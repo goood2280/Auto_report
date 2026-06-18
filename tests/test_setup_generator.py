@@ -26,7 +26,7 @@ class SetupGeneratorTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
-            expected = ["Main.py", "My_Function.py", "config.yaml", "README.md"]
+            expected = ["Main.py", "My_Function.py", "config.yaml", "README.md", "Scheduler.py"]
             for name in expected:
                 self.assertTrue((tmp_path / name).exists(), f"{name} was not generated")
 
@@ -39,7 +39,7 @@ class SetupGeneratorTest(unittest.TestCase):
             self.assertIn("VEHICLE_A", config)
 
             compile_result = subprocess.run(
-                [sys.executable, "-B", "-m", "py_compile", "Main.py", "My_Function.py"],
+                [sys.executable, "-B", "-m", "py_compile", "Main.py", "My_Function.py", "Scheduler.py"],
                 cwd=tmp_path,
                 text=True,
                 capture_output=True,

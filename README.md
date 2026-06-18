@@ -16,6 +16,7 @@ It generates:
 - `My_Function.py`
 - `config.yaml`
 - `README.md`
+- `Scheduler.py`
 
 By default existing files are skipped. Use `--overwrite` to replace existing files.
 
@@ -28,6 +29,8 @@ python -m pip install -r requirements.txt
 python scripts\create_temp_fixtures.py
 python Main.py VEHICLE_A
 ```
+
+`Scheduler.py` is an optional queue runner. It reads `data/queue_list.csv`, writes reservation and completion logs under `data/`, and launches `Main.py` jobs from the configured groups or waiting queue.
 
 The report uses columnbase data directly. For ADDP items, put the required real item names in the reformatter `ADDP Form` column with braces, for example:
 

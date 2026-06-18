@@ -2,7 +2,9 @@ numpy
 openpyxl
 pandas
 Pillow
+psutil
 pyarrow
 python-dotenv
 python-pptx
 PyYAML
+schedule
