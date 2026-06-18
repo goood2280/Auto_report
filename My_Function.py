@@ -887,4 +887,174 @@ def insert_plots(
                 ax.tick_params(axis="y", labelsize=14)    
                 ax.set_xlim(0, 150)    
                 ax.grid(True, alpha=0.5)    
+            ax.get_legend().remove()  
+                plt.tight_layout()    
+                img_buf = BytesIO()    
+                fig.savefig(img_buf, format="JPEG", bbox_inches="tight")    
+                img_buf.seek(0)    
+                with Image.open(img_buf) as img:    
+                    final_stream = BytesIO()    
+                    img.save(final_stream, format="JPEG", quality=img_quality)    
+                    final_stream.seek(0)    
+                plt.close()    
+                slide.shapes.add_picture(    
+                    final_stream,    
+                    left=slide_width_tick * 17,    
+                    top=slide_height_tick * 4,    
+                    width=slide_width_tick * 7,    
+                    height=slide_width_tick * 4,    
+                )
+
+                fig, ax = plt.subplots(figsize=(9, 4.5))    
+                sorted_df = df_group[["WAFER_ID_str", target_data]].dropna().sort_values(    
+                    target_data    
+                )    
+                for wafer_id, sub in sorted_df.groupby("WAFER_ID_str"):    
+                    cum = np.arange(1, len(sub) + 1) / len(sub)    
+                    marker = "*" if wafer_id == "Ref." else "o"    
+                    ax.plot(    
+                        sub[target_data],    
+                        cum,    
+                        marker=marker,    
+                        linestyle="-",    
+                        color=color_dict[wafer_id],    
+                        markersize=20 if wafer_id == "Ref." else 8,    
+                        linewidth=10 if wafer_id == "Ref." else 2,    
+                        label=wafer_id,    
+                    )    
+                if reformatter.loc[alias, "REPORT LOG SCALE"]:    
+                    ax.set_xscale("log")    
+                ax.set_title("Cumulative Distribution Chart", fontsize=24)    
+                ax.set_xlabel(f"{target_data_changed}[{target_unit}]", fontsize=14)    
+                ax.set_ylabel("Cumulative Probability", fontsize=14)    
+                ax.tick_params(axis="both", labelsize=14)    
+                ax.grid(True, alpha=0.5)    
+                plt.tight_layout()    
+                img_buf = BytesIO()    
+                fig.savefig(img_buf, format="JPEG", bbox_inches="tight")    
+                img_buf.seek(0)    
+                with Image.open(img_buf) as img:    
+                    final_stream = BytesIO()    
+                    img.save(final_stream, format="JPEG", quality=img_quality)    
+                    final_stream.seek(0)    
+                plt.close()    
+                slide.shapes.add_picture(    
+                    final_stream,    
+                    left=slide_width_tick * 17,    
+                    top=slide_height_tick * 8,    
+                    width=slide_width_tick * 7,    
+                    height=slide_width_tick * 4,    
+                )
+
+                df_map = df_group.copy()    
+                if reformatter.loc[alias, COL_DIRECTION] == "UPPER":    
+                    cmap_seq = np.linspace(tg, spec_high, 10)    
+                elif reformatter.loc[alias, COL_DIRECTION] == "LOWER":    
+                    cmap_seq = np.linspace(spec_low, tg, 10)    
+                else:    
+                    cmap_seq = np.linspace(spec_low, spec_high, 10)    
+                norm = BoundaryNorm(cmap_seq, cmap.N, clip=True)
+
+                pgm_list = sorted(df_map["PGM(pt)"].unique())    
+                row_cnt = len(pgm_list)
+
+                fig, axes = plt.subplots(    
+                    row_cnt,    
+                    26,    
+                    figsize=(1.106 * 26, 1.106 * (row_cnt + 1)),    
+                    squeeze=False,  
+                )    
+                for r in range(row_cnt):    
+                    for c in range(26):    
+                        ax = axes[r][c]    
+                        ax.invert_yaxis()    
+                        ax.set_xticks([])    
+                        ax.set_yticks([])    
+                        ax.set_xlabel("")    
+                        ax.set_ylabel("" if c else pgm_list[r].split("(")[0])    
+                        ax.axis("equal")    
+                        for spine in ax.spines.values():    
+                            spine.set_visible(False)
+
+                wf_groups = df_map.groupby(["WAFER_ID", "PGM(pt)"], observed=False)    
+                for (wafer_id, pgm), grp in wf_groups:    
+                    col_idx = 25 if wafer_id == "Ref." else int(wafer_id) - 1    
+                    row_idx = pgm_list.index(pgm)    
+                    axes[row_idx][col_idx].scatter(    
+                        grp["CHIP_X_ADJ"],    
+                        grp["CHIP_Y_ADJ"],    
+                        c=grp[target_data],    
+                        cmap=cmap,    
+                        norm=norm,    
+                        marker="s",    
+                    )    
+                    title = (    
+                        f"{wafer_id}"    
+                        if wafer_id == "Ref."    
+                        else f"{target_lot_id}_{wafer_id}"    
+                    )    
+                    axes[row_idx][col_idx].set_title(title)
+
+                plt.tight_layout()    
+                img_buf = BytesIO()    
+                fig.savefig(img_buf, format="JPEG", bbox_inches="tight")    
+                img_buf.seek(0)    
+                with Image.open(img_buf) as img:    
+                    final_stream = BytesIO()    
+                    img.save(final_stream, format="JPEG", quality=img_quality)    
+                    final_stream.seek(0)    
+                plt.close()    
+                slide.shapes.add_picture(    
+                    final_stream,    
+                    margin,    
+                    title_space    
+                    + 0.25 * (slide_height - title_space)    
+                    + 0.5 * slide_height,    
+                    middle_of_slide - margin,    
+                )
+
+                mappable = ScalarMappable(norm=norm, cmap=cmap)    
+                fig, ax = plt.subplots()    
+                plt.colorbar(mappable, ax=ax)    
+                ax.set_visible(False)    
+                plt.tight_layout()    
+                img_buf = BytesIO()    
+                fig.savefig(img_buf, format="JPEG", bbox_inches="tight")    
+                img_buf.seek(0)    
+                with Image.open(img_buf) as img:    
+                    final_stream = BytesIO()    
+                    img.save(final_stream, format="JPEG", quality=img_quality)    
+                    final_stream.seek(0)    
+                plt.close()    
+                slide.shapes.add_picture(    
+                    final_stream,    
+                    left=(slide_width_tick * 16) - (2 * margin),    
+                    top=title_space + slide_height - 25 * margin,    
+                    width=5.8 * margin,    
+                    height=25 * margin,    
+                )
+
+                item_index_table = pd.concat([item_index_table, tmp])
+
+        except Exception as e:    
+            print(f"[WARN] {alias} 처리 중 오류 발생:", e)    
+            continue
+
+    try:    
+        item_index_table.to_csv("final_item_index_table.csv")    
+        if not CONFIG.get("ref_turnoff"):    
+            item_index_table = item_index_table.drop(    
+                columns=["Ref."], errors="ignore"    
+            )    
+        item_index_table.columns = [int(c) for c in item_index_table.columns]    
+        prs = insert_rawdata_board(    
+            item_index_table, prs, target_lot_id, "KEYITEM_Method"    
+        )    
+    except Exception as e:    
+        print("[WARN] RAW DATA BOARD 삽입 중 오류:", e)    
+        prs = insert_rawdata_board(    
+            item_index_table, prs, target_lot_id, "KEYITEM_Method"    
+        )
+
+    return prs  
 
