@@ -1058,3 +1058,36 @@ def insert_plots(
 
     return prs  
 
+def etdata_query() :  
+    try : 
+
+        item_et = pd.read_csv(f'{PATH_CONFIG}/{CONFIG.get("vehicle")}_reformatter.csv') 
+
+        print('필요 파일로드완료')  
+        if not os.path.exists(CONFIG.get("DB_et_daily")):  
+            os.makedirs(CONFIG.get("DB_et_daily"))  
+        if not os.path.exists(CONFIG.get("DB_et_LOTWF_raw")):  
+            os.makedirs(CONFIG.get("DB_et_LOTWF_raw"))  
+        if not os.path.exists(CONFIG.get("DB_et_LOTWF_pivot_raw")):  
+            os.makedirs(CONFIG.get("DB_et_LOTWF_pivot_raw"))  
+        print('경로생성완료')
+
+        current_time = datetime.now()  
+        formatted_time = current_time.strftime("%Y-%m-%d %H:%M")
+
+        sub_datetime_now = datetime.now()  
+        if CONFIG.get("now_minus") :  
+            sub_to_date_time = sub_datetime_now - timedelta(days = CONFIG.get("now_minus"))  
+            sub_from_date_time = sub_datetime_now - timedelta(days = CONFIG.get("QueryTimeSpan"))  
+        else :  
+            sub_to_date_time = sub_datetime_now   
+            sub_from_date_time = sub_datetime_now - timedelta(days = CONFIG.get("QueryTimeSpan"))  
+        dateTo = sub_to_date_time.strftime('%Y-%m-%d')  
+        dateFrom = sub_from_date_time.strftime('%Y-%m-%d')
+
+        date_format = "%Y-%m-%d"  
+        start_date = datetime.strptime(dateFrom, date_format)  
+        end_date = datetime.strptime(dateTo, date_format)  
+        interval = timedelta(days=CONFIG.get("SplitTimeSpan"))
+
+
