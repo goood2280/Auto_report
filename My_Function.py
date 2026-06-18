@@ -224,4 +224,382 @@ def insert_score_board(df, prs, target_lot_id, sub_name, header_font_size=12, in
 
 
 
+def insert_rawdata_board(df, prs, target_lot_id, sub_name, header_font_size=12, index_font_size=11, value_font_size=11, index_size_n=7):  
+    num_rows, num_cols = 25, 25  
+    slide_width = prs.slide_width  
+    slide_height = prs.slide_height  
+    margin = Inches(0.1)  
+    title_space = Inches(1)  
+    slide_height -= title_space  
+    list_of_dfs = [df.iloc[i:i + num_rows] for i in range(0, len(df), num_rows)]  
+    for chunk_df in list_of_dfs:  
+        df_row_cnt, df_col_cnt = chunk_df.shape  
+        slide_layout = prs.slide_layouts[6]  
+        slide = prs.slides.add_slide(slide_layout)  
+        title_box = slide.shapes.add_textbox(margin, margin, prs.slide_width - 2 * margin, title_space)  
+        title_text_frame = title_box.text_frame  
+        title_text_frame.text = f"{target_lot_id} Key Item Raw data"  
+        title_text_frame.paragraphs[0].font.size = Pt(36)  
+        title_text_frame.paragraphs[0].font.name = 'Arial Black'  
+        title_text_frame.paragraphs[0].font.color.rgb = RGBColor(0, 0, 255)  
+        cell_width = (slide_width - 2 * margin) // (num_cols + index_size_n)  
+        cell_height = (slide_height - margin) // (num_rows + 1)  
+        table = slide.shapes.add_table(num_rows + 1, num_cols + index_size_n, margin, title_space, slide_width - 2 * margin, slide_height - margin).table  
+        for i in range(num_rows + 1):  
+            for j in range(num_cols + index_size_n):  
+                cell = table.cell(i, j)  
+                cell.width = cell_width  
+                cell.height = cell_height  
+                para = cell.text_frame.paragraphs[0]  
+                para.margin_top = 0  
+                para.margin_bottom = 0  
+                para.alignment = PP_ALIGN.CENTER  
+                wf_num = int(j-index_size_n+1)  
+                if i == 0:  
+                    if j > 0:  
+                        para.font.size = Pt(header_font_size)  
+                        para.text = f"#{wf_num}" if wf_num >= 1 else ''  
+                        para.font.color.rgb = RGBColor(255, 255, 255)  
+                    else:  
+                        para.font.size = Pt(header_font_size+2)  
+                        para.text = sub_name  
+                        para.font.color.rgb = RGBColor(0, 0, 0)  
+                    para.font.bold = True  
+                    cell.fill.solid()  
+                    cell.fill.fore_color.rgb = RGBColor(0, 0, 0) if wf_num >= 1 else RGBColor(255, 255, 255)  
+                elif j == 0:  
+                    value = str(chunk_df.index[i-1]) if i <= df_row_cnt else ''  
+                    para.font.size = Pt(index_font_size if len(value) < 35 else index_font_size-1 if len(value) < 40 else index_font_size-2)  
+                    para.font.bold = True  
+                    para.text = value  
+                    cell.fill.solid()  
+                    cell.fill.fore_color.rgb = RGBColor(200, 200, 200)  
+                else:  
+                    value = chunk_df.iloc[i-1][wf_num] if wf_num >= 1 and wf_num <= 25 and wf_num in chunk_df and i <= df_row_cnt else float('nan')  
+                    para.font.size = Pt(value_font_size)  
+                    para.font.bold = True  
+                    if pd.isna(value):  
+                        para.text = ''  
+                        cell.fill.solid()  
+                        cell.fill.fore_color.rgb = RGBColor(200, 200, 200)  
+                    else:  
+                        para.text  = '' if np.isnan(value) else "{:.3g}".format(float(value)) if 0.01 <= abs(value) < 10000 else "{:.2e}".format(float(value))  
+        for row in range(num_rows + 1):  
+            first_row = table.rows[row]  
+            first_row.cells[0].merge(first_row.cells[index_size_n-1])  
+    return prs
+
+def convert_target_data(target_data: str, suffix_list=None, replace_map=None):  
+    if suffix_list is None:  
+        suffix_list = []  
+    if replace_map is None:  
+        replace_map = {}  
+    for old, new in replace_map.items():  
+        target_data = target_data.replace(old, new)  
+    use_rmax = target_data.startswith("RMAX_")  
+    if use_rmax:  
+        base = target_data[len("RMAX_"):]  
+    else:  
+        base = target_data  
+    if suffix_list:  
+        pattern = r'(_?(' + "|".join(map(re.escape, suffix_list)) + r')_?)'  
+        base = re.sub(pattern, "", base)  
+        base = re.sub(r'__+', '_', base)  
+        base = base.strip('_')  
+    base = base.replace("_", " ")  
+    if use_rmax:  
+        return f"MAX({base})"  
+    return base
+
+def insert_plots(    
+    item_df,    
+    trend_df,    
+    prs,    
+    description_image_info_dict,    
+    target_fab_lot_id,    
+    target_lot_id,    
+    target_DC_step,    
+    target_DC_step_id,    
+    spec_dict,    
+    img_quality=100,    
+    ref=False,    
+    color_dict=None,    
+):    
+    if color_dict is None:  
+        color_dict = {}
+
+    def to_float(x):    
+        if pd.isna(x):    
+            return np.nan    
+        try:    
+            return float(x)    
+        except Exception:    
+            return np.nan
+
+    match_key = f"{target_lot_id}_{target_DC_step_id}"    
+    search_key = f"{target_fab_lot_id}_{target_DC_step_id}"    
+    search_key_DC_step_ver = f"{target_fab_lot_id}_{target_DC_step}"
+
+    df = item_df.copy()
+
+    slide_width = prs.slide_width    
+    slide_height = prs.slide_height    
+    slide_width_tick = slide_width / 24    
+    slide_height_tick = slide_height / 12
+
+    margin = Inches(0.1)    
+    title_space = Inches(1)    
+    slide_height -= title_space    
+    middle_of_slide = 0.65 * slide_width
+
+    agg_funcs_dict_upper = {    
+        "P95": lambda x: x.quantile(0.95),    
+        "P90": lambda x: x.quantile(0.90),    
+        "MED": lambda x: x.median(),    
+        "P10": lambda x: x.quantile(0.10),    
+    }    
+    agg_funcs_dict_lower = {    
+        "P90": lambda x: x.quantile(0.90),    
+        "MED": lambda x: x.median(),    
+        "P10": lambda x: x.quantile(0.10),    
+        "P05": lambda x: x.quantile(0.05),    
+    }    
+    agg_funcs_dict_both = {    
+        "P90": lambda x: x.quantile(0.90),    
+        "MED": lambda x: x.median(),    
+        "AVG": lambda x: x.mean(),    
+        "P10": lambda x: x.quantile(0.10),    
+    }
+
+    x_list = [str(i) for i in range(1, 26)]
+
+    df["WAFER_ID_str"] = df[COL_WAFER].apply(    
+        lambda x: str(x) if isinstance(x, int) else x    
+    )
+
+    cols_to_drop = []    
+    for col in df.columns:    
+        ref_exists = df[df["WAFER_ID_str"] == "Ref."][col].notna().any()    
+        nonref_na = df[df["WAFER_ID_str"] != "Ref."][col].isna().all()    
+        if ref_exists and nonref_na:    
+            cols_to_drop.append(col)    
+    df.drop(columns=cols_to_drop, inplace=True, errors="ignore")
+
+    item_index_table = pd.DataFrame()
+
+    cat2 = ""    
+    reformatter = pd.read_csv(f'{PATH_CONFIG}/{CONFIG.get("vehicle")}_reformatter.csv')  
+    reformatter = reformatter.set_index(COL_ALIAS).sort_values(COL_ORDER)
+
+    for alias in reformatter.index:    
+        try:    
+            if alias not in df:    
+                continue
+
+            target_data = alias    
+            target_data_changed = convert_target_data(    
+                target_data,    
+                suffix_list=CONFIG.get("suffixes_remove"),    
+                replace_map=CONFIG.get("replace_map"),    
+            )    
+            target_unit = spec_dict.loc[alias, COL_UNIT] if alias in spec_dict.index else ""  
+            df[target_data] = df[alias]
+
+            radius_cols = [c for c in item_df.columns if "Radius" in c]
+
+            df_target = df.dropna(subset=[target_data]).copy()    
+            df_target[target_data] = pd.to_numeric(    
+                df_target[target_data], errors="coerce"    
+            )
+
+            direction = spec_dict.loc[alias, COL_DIRECTION] if alias in spec_dict.index else "BOTH"  
+            if direction == "UPPER":    
+                color_list = ["blue", "grey", "red"]    
+            elif direction == "LOWER":    
+                color_list = ["red", "grey", "blue"]    
+            else:    
+                color_list = ["yellow", "blue", "red"]    
+            cmap = LinearSegmentedColormap.from_list(    
+                "custom_color_list", color_list, N=10    
+            )
+
+            df_groups = df_target.groupby(    
+                ["DC_Split", "TEMPERATURE", "FLAT_ZONE_POS"], observed=False    
+            )
+
+            for group_name, df_group in df_groups:    
+                now_cat2 = spec_dict.loc[alias, "CAT2"] if alias in spec_dict.index else ""    
+                if now_cat2 != cat2:    
+                    slide = prs.slides.add_slide(prs.slide_layouts[5])    
+                    title = slide.shapes.title    
+                    title.text = now_cat2    
+                    title.width, title.height = slide_width, Inches(1.75)    
+                    title.text_frame.paragraphs[0].font.size = Pt(80)    
+                    title.text_frame.paragraphs[0].font.name = "Arial Black"    
+                    title.left, title.top = 0, 0
+
+                    if now_cat2 in description_image_info_dict:    
+                        img = description_image_info_dict[now_cat2]    
+                        slide.shapes.add_picture(    
+                            img["stream"], img["left"], img["top"], img["width"], img["height"]    
+                        )    
+                    cat2 = now_cat2
+
+                group_name_str = ", ".join(    
+                    [    
+                        f"{val}°C"    
+                        if i == 1    
+                        else f"Rotation({val}°)"    
+                        if i == 2    
+                        else val    
+                        for i, val in enumerate(group_name)    
+                        if (i == 0)    
+                        or (i == 1 and int(val) != 25)    
+                        or (i == 2 and int(val) != 0)    
+                    ]    
+                )
+
+                slide = prs.slides.add_slide(prs.slide_layouts[6])    
+                title_box = slide.shapes.add_textbox(    
+                    margin, margin, prs.slide_width - 2 * margin, title_space    
+                )    
+                tf = title_box.text_frame    
+                tf.text = f"{target_data_changed}[{target_unit}]"    
+                tf.paragraphs[0].font.size = Pt(30)    
+                tf.paragraphs[0].font.name = "Arial"    
+                tf.paragraphs[0].font.color.rgb = RGBColor(0, 0, 255)
+
+                df_group[target_data] = pd.to_numeric(df_group[target_data], errors="coerce")
+
+                fig, ax = plt.subplots(figsize=(15, 5))    
+                sns.boxplot(    
+                    x="WAFER_ID_str",    
+                    y=target_data,    
+                    hue="WAFER_ID_str",    
+                    data=df_group,    
+                    ax=ax,    
+                    palette=color_dict,    
+                    linewidth=2.5,    
+                    fliersize=5,    
+                    whis=1.5,  
+                    order=x_list,    
+                    legend=False,    
+                )
+
+                spec_low = to_float(    
+                    spec_dict.loc[alias, COL_SPEC_MIN] if alias in spec_dict.index else np.nan    
+                )    
+                spec_high = to_float(    
+                    spec_dict.loc[alias, COL_SPEC_MAX] if alias in spec_dict.index else np.nan    
+                )    
+                tg = to_float(spec_dict.loc[alias, COL_TARGET] if alias in spec_dict.index else np.nan)
+
+                log_scale = bool(spec_dict.loc[alias, "REPORT LOG SCALE"]) if alias in spec_dict.index else False    
+                if log_scale:    
+                    ax.set_yscale("log")    
+                      
+                sns.boxplot(    
+                    x="WAFER_ID_str",    
+                    y=target_data,    
+                    hue="WAFER_ID_str",    
+                    data=df_group,    
+                    ax=ax,    
+                    palette=color_dict,    
+                    linewidth=2.5,    
+                    fliersize=5,    
+                    whis=1.5,  
+                    order=x_list,    
+                    legend=False,    
+                )
+
+                report_direction = str(spec_dict.loc[alias, COL_DIRECTION]).upper() if alias in spec_dict.index else "BOTH"
+
+                if report_direction == "UPPER":  
+                    if not np.isnan(spec_high):  
+                        ax.axhline(spec_high, color="red", linestyle="--", lw=2.5)
+
+                elif report_direction == "LOWER":  
+                    if not np.isnan(spec_low):  
+                        ax.axhline(spec_low, color="red", linestyle="--", lw=2.5)
+
+                else:  
+                    if not np.isnan(spec_low):  
+                        ax.axhline(spec_low, color="red", linestyle="--", lw=2.5)  
+                    if not np.isnan(spec_high):  
+                        ax.axhline(spec_high, color="red", linestyle="--", lw=2.5)
+
+                ax.set_title(    
+                    f"[{target_lot_id}, {group_name_str}] {target_data_changed}[{target_unit}]",    
+                    fontsize=24,    
+                )    
+                ax.set_xlabel("wafer_id", fontsize=14)    
+                ax.set_ylabel("")  
+                ax.tick_params(axis="x", labelsize=14)    
+                ax.grid(True, alpha=0.5, zorder=0)    
+                plt.tight_layout()  
+
+                img_buf = BytesIO()    
+                fig.savefig(img_buf, format="JPEG", bbox_inches="tight")    
+                img_buf.seek(0)    
+                with Image.open(img_buf) as img:    
+                    final_stream = BytesIO()    
+                    img.save(final_stream, format="JPEG", quality=img_quality)    
+                    final_stream.seek(0)    
+                plt.close()
+
+                slide.shapes.add_picture(    
+                    final_stream,    
+                    margin,    
+                    title_space    
+                    + 0.25 * (slide_height - title_space)    
+                    + margin,    
+                    middle_of_slide - margin,    
+                    0.5 * slide_height - margin,    
+                )
+
+                is_window = "Window" in alias
+
+                fig, ax = plt.subplots(figsize=(9, 4.5))
+
+                if not trend_df.empty:  
+                    for i, vehicle_wv in enumerate(trend_df['MASK'].unique()):      
+                        trend_sub = trend_df[trend_df["MASK"] == vehicle_wv]      
+                          
+                        if is_window:    
+                            plot_df = (      
+                                trend_sub.groupby(COL_TIME)[target_data]      
+                                .apply(lambda s: np.percentile(s.dropna(), 10))      
+                                .reset_index()      
+                            )      
+                        else:    
+                            plot_df = trend_sub
+
+                        sns.scatterplot(      
+                            x=COL_TIME,      
+                            y=target_data,      
+                            data=plot_df,      
+                            ax=ax,      
+                            color=[      
+                                "grey",      
+                                "orange",      
+                                "skyblue",      
+                                "coral",      
+                                "cyan",      
+                                "pink",      
+                                "salmon",      
+                            ][i],      
+                            label=vehicle_wv,      
+                            edgecolor="black",      
+                            linewidth=0.3,      
+                        )
+
+                trend_target = df_target[df_target["match_key"] == match_key] if "match_key" in df_target.columns else df_target
+
+                if is_window:    
+                    plot_df = (      
+                        trend_target.groupby(COL_TIME)[target_data]      
+                        .apply(lambda s: np.percentile(s.dropna(), 10))      
+                        .reset_index()      
+                    )      
+  
 
