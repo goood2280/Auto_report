@@ -3,13 +3,14 @@ import operator
 import os
 import re
 from datetime import datetime
+from html import escape
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from pptx import Presentation
 from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Inches, Pt
 
@@ -338,6 +339,144 @@ def _score_board_tables(item_summary, detail_df):
     return pd.DataFrame(pass_rows), pd.DataFrame(value_rows)
 
 
+def _numeric_text(value):
+    if value == "" or pd.isna(value):
+        return ""
+    if isinstance(value, (float, np.floating)):
+        return f"{float(value):.3g}"
+    return str(value)
+
+
+def _score_class(value):
+    try:
+        number = float(value)
+    except Exception:
+        return ""
+    if number >= 95:
+        return "score-good"
+    if number >= 80:
+        return "score-warn"
+    return "score-bad"
+
+
+def _html_table(df, class_name, max_rows=20):
+    display = df.head(max_rows).copy()
+    return display.to_html(index=False, border=0, classes=class_name, na_rep="", escape=True)
+
+
+def _score_board_html(df, max_rows=20):
+    display = df.head(max_rows).copy()
+    header = "".join(f"<th>{escape(str(col))}</th>" for col in display.columns)
+    body_rows = []
+    for _, row in display.iterrows():
+        cells = []
+        for col_idx, col in enumerate(display.columns):
+            text = escape(_numeric_text(row[col]))
+            css = _score_class(row[col]) if col_idx > 0 else "index-cell"
+            class_attr = f' class="{css}"' if css else ""
+            cells.append(f"<td{class_attr}>{text}</td>")
+        body_rows.append("<tr>" + "".join(cells) + "</tr>")
+    return '<table class="scoreboard"><thead><tr>' + header + "</tr></thead><tbody>" + "".join(body_rows) + "</tbody></table>"
+
+
+def _history_table(target_lot, target_step_id, item_summary, detail_df):
+    time_col = next((col for col in ["tkout_time", "TKOUT_TIME", "date", "Date"] if col in detail_df.columns), None)
+    wafer_count = int(detail_df["wafer_id"].nunique()) if "wafer_id" in detail_df.columns else len(detail_df)
+    avg_pass = item_summary["Pass Rate"].mean() if "Pass Rate" in item_summary else np.nan
+    if time_col:
+        time_values = pd.to_datetime(detail_df[time_col], errors="coerce").dropna()
+        history_time = time_values.max().strftime("%Y-%m-%d %H:%M") if not time_values.empty else str(detail_df[time_col].dropna().iloc[0])
+    else:
+        history_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+    return pd.DataFrame(
+        [
+            {
+                "History Time": history_time,
+                "Lot": target_lot,
+                "Step": target_step_id,
+                "Wafers": wafer_count,
+                "Measured Sites": len(detail_df),
+                "Index Count": len(item_summary),
+                "Avg Pass Rate": round(float(avg_pass), 1) if not np.isnan(avg_pass) else "",
+            }
+        ]
+    )
+
+
+def _item_stats_table(item, item_summary, detail_df):
+    spec = item_summary[item_summary["Item"] == item].iloc[0]
+    low = _safe_number(spec.get("Spec Low"))
+    high = _safe_number(spec.get("Spec High"))
+    rows = []
+    groups = [("Overall", detail_df)]
+    if "wafer_id" in detail_df.columns:
+        for wafer, wafer_df in detail_df.groupby("wafer_id"):
+            label = f"W{int(wafer):02d}" if isinstance(wafer, (int, float, np.integer, np.floating)) else f"W{wafer}"
+            groups.append((label, wafer_df))
+    for label, group in groups[:13]:
+        values = pd.to_numeric(group[item], errors="coerce").dropna()
+        if values.empty:
+            continue
+        pass_mask = pd.Series(True, index=values.index)
+        if not np.isnan(low):
+            pass_mask &= values >= low
+        if not np.isnan(high):
+            pass_mask &= values <= high
+        rows.append(
+            {
+                "Scope": label,
+                "N": int(values.count()),
+                "Mean": round(float(values.mean()), 3),
+                "Std": round(float(values.std(ddof=0)), 3),
+                "Median": round(float(values.median()), 3),
+                "Min": round(float(values.min()), 3),
+                "Max": round(float(values.max()), 3),
+                "Pass Rate": round(float(pass_mask.mean() * 100), 1),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _item_series_by_wafer(item, detail_df):
+    if "wafer_id" not in detail_df.columns or item not in detail_df.columns:
+        return []
+    series = []
+    for wafer, wafer_df in detail_df.groupby("wafer_id"):
+        values = pd.to_numeric(wafer_df[item], errors="coerce").dropna()
+        if values.empty:
+            continue
+        label = f"W{int(wafer):02d}" if isinstance(wafer, (int, float, np.integer, np.floating)) else f"W{wafer}"
+        series.append((label, values))
+    return series
+
+
+def _value_scale(values, low=None, high=None):
+    numeric = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    if numeric.empty:
+        return 0.0, 1.0
+    min_v = float(numeric.min() if low is None or np.isnan(low) else min(numeric.min(), low))
+    max_v = float(numeric.max() if high is None or np.isnan(high) else max(numeric.max(), high))
+    if min_v == max_v:
+        min_v -= 1.0
+        max_v += 1.0
+    pad = (max_v - min_v) * 0.08
+    return min_v - pad, max_v + pad
+
+
+def _add_axis(slide, left, top, width, height, min_v, max_v):
+    axis_color = _rgb("94A3B8")
+    x_axis = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, left, top + height, left + width, top + height)
+    y_axis = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, left, top, left, top + height)
+    x_axis.line.color.rgb = axis_color
+    y_axis.line.color.rgb = axis_color
+    _add_textbox(slide, left - Inches(0.4), top - Inches(0.04), Inches(0.35), Inches(0.2), f"{max_v:.1f}", 7, False, "64748B")
+    _add_textbox(slide, left - Inches(0.4), top + height - Inches(0.08), Inches(0.35), Inches(0.2), f"{min_v:.1f}", 7, False, "64748B")
+
+
+def _y_from_value(value, min_v, max_v, top, height):
+    return top + height - ((float(value) - min_v) / (max_v - min_v) * height)
+
+
 def _add_score_board_table(slide, df, left, top, width, height, font_size=9):
     table = _add_table(slide, df, left, top, width, height, font_size=font_size, max_rows=20)
     for r in range(1, len(df) + 1):
@@ -374,16 +513,135 @@ def _add_score_board_slide(prs, title, subtitle, board_df, note):
     return slide
 
 
+def _add_statistical_table_slide(prs, item, index_no, item_summary, detail_df):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _add_title(slide, f"Statistical Table - Index {index_no}", f"{item} wafer-level distribution summary")
+    stats_df = _item_stats_table(item, item_summary, detail_df)
+    _add_table(slide, stats_df, Inches(0.65), Inches(1.25), Inches(12.0), Inches(4.8), 8, max_rows=13)
+    _add_footer(slide, "Template page: statistical table by index and wafer.")
+    return slide
+
+
+def _add_box_plot_slide(prs, item, index_no, item_summary, detail_df):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _add_title(slide, f"Box Plot - Index {index_no}", f"{item} distribution by wafer")
+    wafer_series = _item_series_by_wafer(item, detail_df)[:10]
+    all_values = [value for _, values in wafer_series for value in values.tolist()]
+    spec = item_summary[item_summary["Item"] == item].iloc[0]
+    min_v, max_v = _value_scale(all_values, _safe_number(spec.get("Spec Low")), _safe_number(spec.get("Spec High")))
+    left, top, width, height = Inches(0.9), Inches(1.45), Inches(11.4), Inches(4.6)
+    _add_axis(slide, left, top, width, height, min_v, max_v)
+
+    if wafer_series:
+        gap = width / max(len(wafer_series), 1)
+        box_w = min(Inches(0.55), gap * 0.45)
+        for idx, (label, values) in enumerate(wafer_series):
+            q1, median, q3 = values.quantile([0.25, 0.5, 0.75]).tolist()
+            low = float(values.min())
+            high = float(values.max())
+            x = left + gap * (idx + 0.5)
+            y_low = _y_from_value(low, min_v, max_v, top, height)
+            y_high = _y_from_value(high, min_v, max_v, top, height)
+            y_q1 = _y_from_value(q1, min_v, max_v, top, height)
+            y_q3 = _y_from_value(q3, min_v, max_v, top, height)
+            y_med = _y_from_value(median, min_v, max_v, top, height)
+            whisker = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, x, y_high, x, y_low)
+            whisker.line.color.rgb = _rgb("475569")
+            box = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, x - box_w / 2, y_q3, box_w, max(Inches(0.06), y_q1 - y_q3))
+            box.fill.solid()
+            box.fill.fore_color.rgb = _rgb("DBEAFE")
+            box.line.color.rgb = _rgb("2563EB")
+            median_line = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, x - box_w / 2, y_med, x + box_w / 2, y_med)
+            median_line.line.color.rgb = _rgb("0F172A")
+            _add_textbox(slide, x - Inches(0.22), top + height + Inches(0.12), Inches(0.45), Inches(0.22), label, 7, False, "64748B")
+    _add_footer(slide, "Template page: box plot by index across wafers.")
+    return slide
+
+
+def _add_trend_slide(prs, item, index_no, item_summary, detail_df):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _add_title(slide, f"Trend - Index {index_no}", f"{item} wafer median trend")
+    wafer_series = _item_series_by_wafer(item, detail_df)[:12]
+    medians = [float(values.median()) for _, values in wafer_series]
+    spec = item_summary[item_summary["Item"] == item].iloc[0]
+    min_v, max_v = _value_scale(medians, _safe_number(spec.get("Spec Low")), _safe_number(spec.get("Spec High")))
+    left, top, width, height = Inches(0.9), Inches(1.45), Inches(11.4), Inches(4.6)
+    _add_axis(slide, left, top, width, height, min_v, max_v)
+
+    points = []
+    if wafer_series:
+        gap = width / max(len(wafer_series) - 1, 1)
+        for idx, ((label, _), value) in enumerate(zip(wafer_series, medians)):
+            x = left + gap * idx if len(wafer_series) > 1 else left + width / 2
+            y = _y_from_value(value, min_v, max_v, top, height)
+            points.append((x, y, label, value))
+        for (x1, y1, _, _), (x2, y2, _, _) in zip(points, points[1:]):
+            line = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, x1, y1, x2, y2)
+            line.line.color.rgb = _rgb("00A3A3")
+            line.line.width = Pt(2)
+        for x, y, label, value in points:
+            dot = slide.shapes.add_shape(MSO_SHAPE.OVAL, x - Inches(0.06), y - Inches(0.06), Inches(0.12), Inches(0.12))
+            dot.fill.solid()
+            dot.fill.fore_color.rgb = _rgb("00A3A3")
+            dot.line.color.rgb = _rgb("0F766E")
+            _add_textbox(slide, x - Inches(0.25), top + height + Inches(0.12), Inches(0.5), Inches(0.22), label, 7, False, "64748B")
+            _add_textbox(slide, x - Inches(0.25), y - Inches(0.32), Inches(0.5), Inches(0.2), f"{value:.1f}", 7, False, "334155")
+    _add_footer(slide, "Template page: median trend by index and wafer order.")
+    return slide
+
+
+def _add_wf_map_slide(prs, item, index_no, item_summary, detail_df):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _add_title(slide, f"WF Map - Index {index_no}", f"{item} wafer map template")
+    coord_cols = [col for col in ["CHIP_X_POS", "CHIP_Y_POS"] if col in detail_df.columns]
+    map_df = detail_df.copy()
+    if "wafer_id" in map_df.columns:
+        first_wafer = sorted(map_df["wafer_id"].dropna().unique().tolist())[0]
+        map_df = map_df[map_df["wafer_id"] == first_wafer]
+
+    left, top = Inches(4.25), Inches(1.2)
+    cell = Inches(0.45)
+    if len(coord_cols) == 2 and item in map_df.columns:
+        x_vals = sorted(map_df["CHIP_X_POS"].dropna().unique().tolist())
+        y_vals = sorted(map_df["CHIP_Y_POS"].dropna().unique().tolist(), reverse=True)
+        values = pd.to_numeric(map_df[item], errors="coerce")
+        min_v, max_v = _value_scale(values)
+        for _, row in map_df.iterrows():
+            x_idx = x_vals.index(row["CHIP_X_POS"])
+            y_idx = y_vals.index(row["CHIP_Y_POS"])
+            value = _safe_number(row[item])
+            ratio = 0.5 if np.isnan(value) else (value - min_v) / (max_v - min_v)
+            if ratio >= 0.66:
+                color = "DCFCE7"
+            elif ratio >= 0.33:
+                color = "FEF9C3"
+            else:
+                color = "FEE2E2"
+            chip = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left + x_idx * cell, top + y_idx * cell, cell, cell)
+            chip.fill.solid()
+            chip.fill.fore_color.rgb = _rgb(color)
+            chip.line.color.rgb = _rgb("CBD5E1")
+            _add_textbox(slide, left + x_idx * cell, top + y_idx * cell + Inches(0.13), cell, Inches(0.16), f"{value:.0f}", 7, False, "334155")
+        _add_textbox(slide, Inches(0.7), Inches(1.55), Inches(2.9), Inches(0.45), "Color scale follows the selected index value range for the displayed wafer.", 11, False, "475569")
+        _add_textbox(slide, Inches(0.7), Inches(2.15), Inches(2.9), Inches(0.3), f"Map chips: {len(map_df)}", 14, True, "0B1F33")
+    else:
+        _add_textbox(slide, Inches(0.7), Inches(2.3), Inches(10.5), Inches(0.5), "Coordinate columns are required for the WF map template.", 16, False, "475569")
+    _add_footer(slide, "Template page: WF map by index using chip coordinates.")
+    return slide
+
+
+def _add_index_analysis_template_slides(prs, item_summary, detail_df, max_indexes=1):
+    items = [item for item in item_summary.get("Item", pd.Series(dtype=str)).tolist() if item in detail_df.columns]
+    for index_no, item in enumerate(items[:max_indexes], start=1):
+        _add_statistical_table_slide(prs, item, index_no, item_summary, detail_df)
+        _add_box_plot_slide(prs, item, index_no, item_summary, detail_df)
+        _add_trend_slide(prs, item, index_no, item_summary, detail_df)
+        _add_wf_map_slide(prs, item, index_no, item_summary, detail_df)
+
+
 def build_mail_html(target_lot, target_step_id, item_summary, detail_df, max_bytes=DEFAULT_HTML_LIMIT_BYTES):
-    summary_html = item_summary.to_html(index=False, border=0, classes="summary")
-    item_cols = [col for col in item_summary.get("Item", pd.Series(dtype=str)).tolist() if col in detail_df.columns]
-    detail_cols = [
-        col
-        for col in ["fab_lot_id", "wafer_id", "step_id", "tkout_time", "eqp_id", "CHIP_X_POS", "CHIP_Y_POS"] + item_cols
-        if col in detail_df.columns
-    ]
-    if not detail_cols:
-        detail_cols = list(detail_df.columns[:8])
+    pass_board, _ = _score_board_tables(item_summary, detail_df)
+    history_df = _history_table(target_lot, target_step_id, item_summary, detail_df)
 
     style = """
 <style>
@@ -391,25 +649,30 @@ body{font-family:Arial,sans-serif;color:#1f2937;margin:0;padding:16px;background
 .wrap{max-width:1180px;margin:0 auto;background:#fff;border:1px solid #e5e7eb}
 .head{background:#0b1f33;color:#fff;padding:18px 22px}
 .head h1{font-size:22px;margin:0 0 4px}.head p{font-size:12px;margin:0;color:#cbd5e1}
-.section{padding:16px 22px}.section h2{font-size:16px;margin:0 0 10px;color:#0b1f33}
+.section{padding:14px 22px}.section h2{font-size:16px;margin:0 0 8px;color:#0b1f33}
 table{border-collapse:collapse;width:100%;font-size:12px}th{background:#0b1f33;color:#fff}
 th,td{border:1px solid #e5e7eb;padding:5px 7px;text-align:center}tr:nth-child(even){background:#f8fafc}
+.index-cell{font-weight:700;text-align:left}.score-good{background:#dcfce7}.score-warn{background:#fef9c3}.score-bad{background:#fee2e2}
+.subnote{font-size:11px;color:#64748b;margin:0 0 8px}.legend{font-size:11px;color:#64748b;margin-top:6px}
 .note{font-size:11px;color:#6b7280;padding:12px 22px 18px}
 </style>
 """
-    rows = min(len(detail_df), 200)
-    while rows >= 5:
-        detail_html = detail_df[detail_cols].head(rows).to_html(index=False, border=0, classes="detail")
+    row_limit = min(max(len(item_summary), 1), 80)
+    while row_limit >= 1:
+        score_html = _score_board_html(pass_board, max_rows=row_limit)
+        inline_html = _html_table(item_summary, "inline-table", max_rows=row_limit)
+        history_html = _html_table(history_df, "history", max_rows=12)
         html = f"""<!doctype html><html><head><meta charset="utf-8">{style}</head><body>
 <div class="wrap">
 <div class="head"><h1>AUTO REPORT - {target_lot}</h1><p>Step {target_step_id} | generated {datetime.now():%Y-%m-%d %H:%M}</p></div>
-<div class="section"><h2>Summary</h2>{summary_html}</div>
-<div class="section"><h2>Data Sample</h2>{detail_html}</div>
+<div class="section"><h2>Score Board</h2><p class="subnote">Wafer-level pass rate by report index.</p>{score_html}<div class="legend">green &gt;=95, yellow 80-94.9, red &lt;80</div></div>
+<div class="section"><h2>Inline Table</h2><p class="subnote">Inline item summary for mail review.</p>{inline_html}</div>
+<div class="section"><h2>History</h2><p class="subnote">Latest report run context from the available columnbase rows.</p>{history_html}</div>
 <div class="note">This is an automated mail summary. The attached PPT contains the report package.</div>
 </div></body></html>"""
         if len(html.encode("utf-8")) <= max_bytes:
             return html
-        rows //= 2
+        row_limit //= 2
     raise ValueError("HTML report exceeds size limit after row reduction")
 
 
@@ -461,17 +724,7 @@ def build_professional_ppt(target_lot, target_root, target_step_id, vehicle, pro
         value_board,
         "Index 2 example uses per-wafer median values for the same report indexes.",
     )
-
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _add_title(slide, "Measurement Data Sample", "Rows are trimmed for mail package size control")
-    sample_cols = [
-        col
-        for col in ["fab_lot_id", "wafer_id", "step_id", "tkout_time", "eqp_id", "CHIP_X_POS", "CHIP_Y_POS"]
-        if col in detail_df.columns
-    ]
-    item_cols = [col for col in item_summary.get("Item", pd.Series(dtype=str)).tolist() if col in detail_df.columns]
-    _add_table(slide, detail_df[sample_cols + item_cols], Inches(0.55), Inches(1.25), Inches(12.25), Inches(5.35), 8, max_rows=16)
-    _add_footer(slide, "Detailed raw data should remain in the source database; this deck keeps only mail-sized summary samples.")
+    _add_index_analysis_template_slides(prs, item_summary, detail_df, max_indexes=1)
     return prs
 
 

@@ -8,6 +8,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class TemplatePreviewTest(unittest.TestCase):
+    def test_template_html_uses_mail_report_sections(self) -> None:
+        html = (ROOT / "templates" / "template_report.html").read_text(encoding="utf-8")
+        self.assertIn("Score Board", html)
+        self.assertIn("Inline Table", html)
+        self.assertIn("History", html)
+        self.assertNotIn("Data Sample", html)
+
     def test_readme_embeds_template_preview_images(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         expected_images = [
@@ -15,6 +22,10 @@ class TemplatePreviewTest(unittest.TestCase):
             "templates/previews/template_report_ppt_cover.png",
             "templates/previews/template_report_scoreboard_index_1.png",
             "templates/previews/template_report_scoreboard_index_2.png",
+            "templates/previews/template_report_statistical_table_index_1.png",
+            "templates/previews/template_report_box_plot_index_1.png",
+            "templates/previews/template_report_trend_index_1.png",
+            "templates/previews/template_report_wafer_map_index_1.png",
         ]
         for relative_path in expected_images:
             self.assertTrue((ROOT / relative_path).exists(), relative_path)
@@ -31,6 +42,11 @@ class TemplatePreviewTest(unittest.TestCase):
         )
         self.assertIn("Score Board - Index 1", slide_text)
         self.assertIn("Score Board - Index 2", slide_text)
+        self.assertIn("Statistical Table - Index 1", slide_text)
+        self.assertIn("Box Plot - Index 1", slide_text)
+        self.assertIn("Trend - Index 1", slide_text)
+        self.assertIn("WF Map - Index 1", slide_text)
+        self.assertNotIn("Measurement Data Sample", slide_text)
 
 
 if __name__ == "__main__":

@@ -4,15 +4,18 @@ body{font-family:Arial,sans-serif;color:#1f2937;margin:0;padding:16px;background
 .wrap{max-width:1180px;margin:0 auto;background:#fff;border:1px solid #e5e7eb}
 .head{background:#0b1f33;color:#fff;padding:18px 22px}
 .head h1{font-size:22px;margin:0 0 4px}.head p{font-size:12px;margin:0;color:#cbd5e1}
-.section{padding:16px 22px}.section h2{font-size:16px;margin:0 0 10px;color:#0b1f33}
+.section{padding:14px 22px}.section h2{font-size:16px;margin:0 0 8px;color:#0b1f33}
 table{border-collapse:collapse;width:100%;font-size:12px}th{background:#0b1f33;color:#fff}
 th,td{border:1px solid #e5e7eb;padding:5px 7px;text-align:center}tr:nth-child(even){background:#f8fafc}
+.index-cell{font-weight:700;text-align:left}.score-good{background:#dcfce7}.score-warn{background:#fef9c3}.score-bad{background:#fee2e2}
+.subnote{font-size:11px;color:#64748b;margin:0 0 8px}.legend{font-size:11px;color:#64748b;margin-top:6px}
 .note{font-size:11px;color:#6b7280;padding:12px 22px 18px}
 </style>
 </head><body>
 <div class="wrap">
-<div class="head"><h1>AUTO REPORT - LOT001</h1><p>Step STEP001 | generated 2026-06-18 16:05</p></div>
-<div class="section"><h2>Summary</h2><table class="dataframe summary">
+<div class="head"><h1>AUTO REPORT - LOT001</h1><p>Step STEP001 | generated 2026-06-18 16:17</p></div>
+<div class="section"><h2>Score Board</h2><p class="subnote">Wafer-level pass rate by report index.</p><table class="scoreboard"><thead><tr><th>Index</th><th>W01</th><th>W02</th><th>W03</th></tr></thead><tbody><tr><td class="index-cell">ADDP_ITEM_01</td><td class="score-good">100</td><td class="score-good">100</td><td class="score-good">100</td></tr></tbody></table><div class="legend">green &gt;=95, yellow 80-94.9, red &lt;80</div></div>
+<div class="section"><h2>Inline Table</h2><p class="subnote">Inline item summary for mail review.</p><table class="dataframe inline-table">
   <thead>
     <tr style="text-align: right;">
       <th>Item</th>
@@ -38,289 +41,27 @@ th,td{border:1px solid #e5e7eb;padding:5px 7px;text-align:center}tr:nth-child(ev
     </tr>
   </tbody>
 </table></div>
-<div class="section"><h2>Data Sample</h2><table class="dataframe detail">
+<div class="section"><h2>History</h2><p class="subnote">Latest report run context from the available columnbase rows.</p><table class="dataframe history">
   <thead>
     <tr style="text-align: right;">
-      <th>fab_lot_id</th>
-      <th>wafer_id</th>
-      <th>step_id</th>
-      <th>tkout_time</th>
-      <th>eqp_id</th>
-      <th>CHIP_X_POS</th>
-      <th>CHIP_Y_POS</th>
-      <th>ADDP_ITEM_01</th>
+      <th>History Time</th>
+      <th>Lot</th>
+      <th>Step</th>
+      <th>Wafers</th>
+      <th>Measured Sites</th>
+      <th>Index Count</th>
+      <th>Avg Pass Rate</th>
     </tr>
   </thead>
   <tbody>
     <tr>
+      <td>2026-01-01 00:00</td>
       <td>LOT001</td>
-      <td>1</td>
       <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>-1</td>
-      <td>-1</td>
-      <td>52.0</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>1</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>-1</td>
-      <td>0</td>
-      <td>51.5</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>1</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>-1</td>
-      <td>1</td>
-      <td>51.0</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>1</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>0</td>
-      <td>-1</td>
-      <td>52.5</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>1</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>0</td>
-      <td>0</td>
-      <td>52.0</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>1</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>0</td>
-      <td>1</td>
-      <td>51.5</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>1</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>1</td>
-      <td>-1</td>
-      <td>53.0</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>1</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>1</td>
-      <td>0</td>
-      <td>52.5</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>1</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>1</td>
-      <td>1</td>
-      <td>52.0</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>2</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>-1</td>
-      <td>-1</td>
-      <td>62.0</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>2</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>-1</td>
-      <td>0</td>
-      <td>61.5</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>2</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>-1</td>
-      <td>1</td>
-      <td>61.0</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>2</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>0</td>
-      <td>-1</td>
-      <td>62.5</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>2</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>0</td>
-      <td>0</td>
-      <td>62.0</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>2</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>0</td>
-      <td>1</td>
-      <td>61.5</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>2</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>1</td>
-      <td>-1</td>
-      <td>63.0</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>2</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>1</td>
-      <td>0</td>
-      <td>62.5</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>2</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>1</td>
-      <td>1</td>
-      <td>62.0</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
       <td>3</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>-1</td>
-      <td>-1</td>
-      <td>72.0</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>3</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>-1</td>
-      <td>0</td>
-      <td>71.5</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>3</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>-1</td>
+      <td>27</td>
       <td>1</td>
-      <td>71.0</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>3</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>0</td>
-      <td>-1</td>
-      <td>72.5</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>3</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>0</td>
-      <td>0</td>
-      <td>72.0</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>3</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>0</td>
-      <td>1</td>
-      <td>71.5</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>3</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>1</td>
-      <td>-1</td>
-      <td>73.0</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>3</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>1</td>
-      <td>0</td>
-      <td>72.5</td>
-    </tr>
-    <tr>
-      <td>LOT001</td>
-      <td>3</td>
-      <td>STEP001</td>
-      <td>2026-01-01</td>
-      <td>EQP_01</td>
-      <td>1</td>
-      <td>1</td>
-      <td>72.0</td>
+      <td>100.0</td>
     </tr>
   </tbody>
 </table></div>

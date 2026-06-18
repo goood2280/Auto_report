@@ -63,26 +63,35 @@ def html_preview():
     img = Image.new("RGB", (WIDTH, HEIGHT), "#f8fafc")
     draw = ImageDraw.Draw(img)
     rect(draw, (90, 55, 1190, 665), "#ffffff", "#e5e7eb")
-    rect(draw, (90, 55, 1190, 165), "#0b1f33")
-    text(draw, (125, 84), "AUTO REPORT - LOT001", 34, "#ffffff", True)
-    text(draw, (126, 128), "Step STEP001 | generated from fixture columnbase data", 17, "#cbd5e1")
-    text(draw, (125, 205), "Summary", 24, "#0b1f33", True)
+    rect(draw, (90, 55, 1190, 145), "#0b1f33")
+    text(draw, (125, 82), "AUTO REPORT - LOT001", 30, "#ffffff", True)
+    text(draw, (126, 120), "Step STEP001 | mail body template", 15, "#cbd5e1")
+    text(draw, (125, 178), "Score Board", 22, "#0b1f33", True)
     draw_table(
         draw,
         125,
-        250,
+        218,
+        ["Index", "W01", "W02", "W03"],
+        [["ADDP_ITEM_01", "100", "100", "100"]],
+        col_w=235,
+    )
+    text(draw, (125, 338), "Inline Table", 22, "#0b1f33", True)
+    draw_table(
+        draw,
+        125,
+        378,
         ["Item", "Count", "Mean", "Min", "Max", "Pass Rate"],
-        [["ADDP_ITEM_01", "27", "56.3", "51.5", "61.5", "100"]],
+        [["ADDP_ITEM_01", "27", "62.0", "51.0", "73.0", "100"]],
         col_w=160,
     )
-    text(draw, (125, 392), "Data Sample", 24, "#0b1f33", True)
+    text(draw, (125, 497), "History", 22, "#0b1f33", True)
     draw_table(
         draw,
         125,
-        437,
-        ["Lot", "Wafer", "Step", "X", "Y", "ADDP_ITEM_01"],
-        [["LOT001", "1", "STEP001", "-1", "-1", "52.0"], ["LOT001", "2", "STEP001", "0", "1", "56.5"], ["LOT001", "3", "STEP001", "1", "0", "61.0"]],
-        col_w=160,
+        537,
+        ["History Time", "Lot", "Step", "Wafers", "Avg Pass"],
+        [["2026-01-01 00:00", "LOT001", "STEP001", "3", "100"]],
+        col_w=190,
     )
     save(img, "template_report_html.png")
 
@@ -113,6 +122,76 @@ def scoreboard_preview(name, title, subtitle, rows):
     save(img, name)
 
 
+def statistical_table_preview():
+    img = Image.new("RGB", (WIDTH, HEIGHT), "#ffffff")
+    draw = ImageDraw.Draw(img)
+    text(draw, (54, 34), "Statistical Table - Index 1", 34, "#0b1f33", True)
+    rect(draw, (55, 90, 180, 98), "#00a3a3")
+    text(draw, (205, 83), "ADDP_ITEM_01 wafer-level distribution summary", 16, "#6b7280")
+    draw_table(
+        draw,
+        70,
+        150,
+        ["Scope", "N", "Mean", "Std", "Median", "Min", "Max", "Pass"],
+        [["Overall", "27", "62.0", "8.18", "62.0", "51.0", "73.0", "100"], ["W01", "9", "52.0", "0.58", "52.0", "51.0", "53.0", "100"], ["W02", "9", "62.0", "0.58", "62.0", "61.0", "63.0", "100"]],
+        col_w=140,
+    )
+    save(img, "template_report_statistical_table_index_1.png")
+
+
+def box_plot_preview():
+    img = Image.new("RGB", (WIDTH, HEIGHT), "#ffffff")
+    draw = ImageDraw.Draw(img)
+    text(draw, (54, 34), "Box Plot - Index 1", 34, "#0b1f33", True)
+    rect(draw, (55, 90, 180, 98), "#00a3a3")
+    text(draw, (205, 83), "ADDP_ITEM_01 distribution by wafer", 16, "#6b7280")
+    chart = (110, 150, 1160, 610)
+    rect(draw, chart, "#ffffff", "#cbd5e1")
+    for x, label, y1, y2 in [(300, "W01", 420, 480), (620, "W02", 315, 375), (940, "W03", 205, 265)]:
+        draw.line((x, y1 - 45, x, y2 + 45), fill="#475569", width=3)
+        rect(draw, (x - 50, y1, x + 50, y2), "#dbeafe", "#2563eb", 2)
+        draw.line((x - 50, (y1 + y2) // 2, x + 50, (y1 + y2) // 2), fill="#0f172a", width=3)
+        text(draw, (x - 28, 625), label, 16, "#64748b")
+    save(img, "template_report_box_plot_index_1.png")
+
+
+def trend_preview():
+    img = Image.new("RGB", (WIDTH, HEIGHT), "#ffffff")
+    draw = ImageDraw.Draw(img)
+    text(draw, (54, 34), "Trend - Index 1", 34, "#0b1f33", True)
+    rect(draw, (55, 90, 180, 98), "#00a3a3")
+    text(draw, (205, 83), "ADDP_ITEM_01 wafer median trend", 16, "#6b7280")
+    chart = (110, 150, 1160, 610)
+    rect(draw, chart, "#ffffff", "#cbd5e1")
+    points = [(220, 470, "W01", "52.0"), (620, 340, "W02", "62.0"), (1020, 210, "W03", "72.0")]
+    for p1, p2 in zip(points, points[1:]):
+        draw.line((p1[0], p1[1], p2[0], p2[1]), fill="#00a3a3", width=4)
+    for x, y, label, value in points:
+        draw.ellipse((x - 8, y - 8, x + 8, y + 8), fill="#00a3a3", outline="#0f766e")
+        text(draw, (x - 24, y - 38), value, 15, "#334155")
+        text(draw, (x - 24, 625), label, 16, "#64748b")
+    save(img, "template_report_trend_index_1.png")
+
+
+def wafer_map_preview():
+    img = Image.new("RGB", (WIDTH, HEIGHT), "#ffffff")
+    draw = ImageDraw.Draw(img)
+    text(draw, (54, 34), "WF Map - Index 1", 34, "#0b1f33", True)
+    rect(draw, (55, 90, 180, 98), "#00a3a3")
+    text(draw, (205, 83), "ADDP_ITEM_01 wafer map template", 16, "#6b7280")
+    text(draw, (90, 170), "Map chips: 9", 24, "#0b1f33", True)
+    text(draw, (90, 220), "Color scale follows the selected index value range.", 17, "#64748b")
+    start_x, start_y, size = 560, 180, 90
+    values = [["51", "52", "53"], ["61", "62", "63"], ["71", "72", "73"]]
+    colors = [["#fee2e2", "#fee2e2", "#fef9c3"], ["#fef9c3", "#fef9c3", "#fef9c3"], ["#dcfce7", "#dcfce7", "#dcfce7"]]
+    for r in range(3):
+        for c in range(3):
+            x, y = start_x + c * size, start_y + r * size
+            rect(draw, (x, y, x + size, y + size), colors[r][c], "#cbd5e1", 2)
+            text(draw, (x + 28, y + 33), values[r][c], 20, "#334155", True)
+    save(img, "template_report_wafer_map_index_1.png")
+
+
 def main():
     html_preview()
     ppt_cover_preview()
@@ -128,6 +207,10 @@ def main():
         "Wafer-level median value by ADDP/reformatted index",
         [["ADDP_ITEM_01", "52.0", "56.5", "61.0", "", "", ""], ["ADDP_ITEM_02", "8.2", "7.9", "8.6", "", "", ""]],
     )
+    statistical_table_preview()
+    box_plot_preview()
+    trend_preview()
+    wafer_map_preview()
     print(f"created previews in {PREVIEW_DIR}")
 
 

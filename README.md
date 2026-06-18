@@ -58,6 +58,14 @@ Review these generated examples directly in GitHub before requesting design or c
 
 ![Score Board - Index 2 preview](templates/previews/template_report_scoreboard_index_2.png)
 
+![Statistical Table - Index 1 preview](templates/previews/template_report_statistical_table_index_1.png)
+
+![Box Plot - Index 1 preview](templates/previews/template_report_box_plot_index_1.png)
+
+![Trend - Index 1 preview](templates/previews/template_report_trend_index_1.png)
+
+![WF Map - Index 1 preview](templates/previews/template_report_wafer_map_index_1.png)
+
 [Download template_report.pptx](templates/template_report.pptx)
 
 These files are generated from the local fixture data and are intended as visual templates for the mail body and PowerPoint package.

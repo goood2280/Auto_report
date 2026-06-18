@@ -58,10 +58,19 @@ class ReportOutputTest(unittest.TestCase):
         self.assertIn("LOT001", slide_text)
         self.assertIn("Score Board - Index 1", slide_text)
         self.assertIn("Score Board - Index 2", slide_text)
+        self.assertIn("Statistical Table - Index 1", slide_text)
+        self.assertIn("Box Plot - Index 1", slide_text)
+        self.assertIn("Trend - Index 1", slide_text)
+        self.assertIn("WF Map - Index 1", slide_text)
+        self.assertNotIn("Measurement Data Sample", slide_text)
 
         html = html_files[0].read_text(encoding="utf-8")
         self.assertIn("LOT001", html)
         self.assertIn("ADDP_ITEM_01", html)
+        self.assertIn("Score Board", html)
+        self.assertIn("Inline Table", html)
+        self.assertIn("History", html)
+        self.assertNotIn("Data Sample", html)
 
 
 if __name__ == "__main__":
