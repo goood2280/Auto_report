@@ -1084,10 +1084,3 @@ def etdata_query() :
             sub_from_date_time = sub_datetime_now - timedelta(days = CONFIG.get("QueryTimeSpan"))  
         dateTo = sub_to_date_time.strftime('%Y-%m-%d')  
         dateFrom = sub_from_date_time.strftime('%Y-%m-%d')
-
-        date_format = "%Y-%m-%d"  
-        start_date = datetime.strptime(dateFrom, date_format)  
-        end_date = datetime.strptime(dateTo, date_format)  
-        interval = timedelta(days=CONFIG.get("SplitTimeSpan"))
-
-
