@@ -47,7 +47,7 @@ class ReportOutputTest(unittest.TestCase):
         self.assertLess(html_files[0].stat().st_size, HTML_LIMIT_BYTES)
 
         prs = Presentation(ppt_files[0])
-        self.assertGreaterEqual(len(prs.slides), 3)
+        self.assertGreaterEqual(len(prs.slides), 5)
         slide_text = "\n".join(
             shape.text
             for slide in prs.slides
@@ -56,6 +56,8 @@ class ReportOutputTest(unittest.TestCase):
         )
         self.assertIn("Auto Report", slide_text)
         self.assertIn("LOT001", slide_text)
+        self.assertIn("Score Board - Index 1", slide_text)
+        self.assertIn("Score Board - Index 2", slide_text)
 
         html = html_files[0].read_text(encoding="utf-8")
         self.assertIn("LOT001", html)

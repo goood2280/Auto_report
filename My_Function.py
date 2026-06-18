@@ -301,6 +301,79 @@ def _add_table(slide, df, left, top, width, height, font_size=9, max_rows=10):
     return table
 
 
+def _score_board_tables(item_summary, detail_df):
+    items = [item for item in item_summary.get("Item", pd.Series(dtype=str)).tolist() if item in detail_df.columns]
+    if not items or "wafer_id" not in detail_df.columns:
+        fallback = item_summary[["Item", "Pass Rate"]].copy() if "Pass Rate" in item_summary else item_summary.copy()
+        return fallback, fallback
+
+    wafers = sorted(pd.Series(detail_df["wafer_id"]).dropna().unique().tolist())[:12]
+    pass_rows = []
+    value_rows = []
+
+    for item in items:
+        spec_row = item_summary[item_summary["Item"] == item].iloc[0]
+        low = _safe_number(spec_row.get("Spec Low"))
+        high = _safe_number(spec_row.get("Spec High"))
+        pass_row = {"Index": item}
+        value_row = {"Index": item}
+
+        for wafer in wafers:
+            values = pd.to_numeric(detail_df.loc[detail_df["wafer_id"] == wafer, item], errors="coerce").dropna()
+            label = f"W{int(wafer):02d}" if float(wafer).is_integer() else f"W{wafer}"
+            if values.empty:
+                pass_row[label] = ""
+                value_row[label] = ""
+                continue
+            pass_mask = pd.Series(True, index=values.index)
+            if not np.isnan(low):
+                pass_mask &= values >= low
+            if not np.isnan(high):
+                pass_mask &= values <= high
+            pass_row[label] = round(float(pass_mask.mean() * 100), 1)
+            value_row[label] = round(float(values.median()), 3)
+        pass_rows.append(pass_row)
+        value_rows.append(value_row)
+
+    return pd.DataFrame(pass_rows), pd.DataFrame(value_rows)
+
+
+def _add_score_board_table(slide, df, left, top, width, height, font_size=9):
+    table = _add_table(slide, df, left, top, width, height, font_size=font_size, max_rows=20)
+    for r in range(1, len(df) + 1):
+        for c in range(1, len(df.columns)):
+            cell = table.cell(r, c)
+            try:
+                value = float(cell.text)
+            except Exception:
+                continue
+            cell.fill.solid()
+            if value >= 95:
+                cell.fill.fore_color.rgb = _rgb("DCFCE7")
+            elif value >= 80:
+                cell.fill.fore_color.rgb = _rgb("FEF9C3")
+            else:
+                cell.fill.fore_color.rgb = _rgb("FEE2E2")
+    return table
+
+
+def _add_score_board_slide(prs, title, subtitle, board_df, note):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _add_title(slide, title, subtitle)
+    _add_score_board_table(slide, board_df, Inches(0.55), Inches(1.25), Inches(12.25), Inches(4.9), 8)
+
+    legend_items = [(">=95", "DCFCE7"), ("80-94.9", "FEF9C3"), ("<80", "FEE2E2")]
+    for i, (label, color) in enumerate(legend_items):
+        left = Inches(0.65 + i * 1.25)
+        box = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, Inches(6.35), Inches(0.25), Inches(0.18))
+        box.fill.solid()
+        box.fill.fore_color.rgb = _rgb(color)
+        box.line.color.rgb = _rgb("CBD5E1")
+        _add_textbox(slide, left + Inches(0.32), Inches(6.28), Inches(0.85), Inches(0.25), label, 8, False, "6B7280")
+    _add_footer(slide, note)
+    return slide
+
+
 def build_mail_html(target_lot, target_step_id, item_summary, detail_df, max_bytes=DEFAULT_HTML_LIMIT_BYTES):
     summary_html = item_summary.to_html(index=False, border=0, classes="summary")
     item_cols = [col for col in item_summary.get("Item", pd.Series(dtype=str)).tolist() if col in detail_df.columns]
@@ -372,6 +445,22 @@ def build_professional_ppt(target_lot, target_root, target_step_id, vehicle, pro
         _add_textbox(slide, left + Inches(0.22), Inches(1.86), Inches(3), Inches(0.45), value, 24, True, "0B1F33")
     _add_table(slide, item_summary, Inches(0.65), Inches(3.05), Inches(12.0), Inches(2.75), 9, max_rows=8)
     _add_footer(slide, "Auto Report summary table generated from columnbase data and reformatter specs.")
+
+    pass_board, value_board = _score_board_tables(item_summary, detail_df)
+    _add_score_board_slide(
+        prs,
+        "Score Board - Index 1",
+        "Wafer-level pass score by ADDP/reformatted index",
+        pass_board,
+        "Index 1 example uses per-wafer pass rate against reformatter spec limits.",
+    )
+    _add_score_board_slide(
+        prs,
+        "Score Board - Index 2",
+        "Wafer-level median value by ADDP/reformatted index",
+        value_board,
+        "Index 2 example uses per-wafer median values for the same report indexes.",
+    )
 
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _add_title(slide, "Measurement Data Sample", "Rows are trimmed for mail package size control")

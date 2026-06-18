@@ -1,6 +1,7 @@
 numpy
 openpyxl
 pandas
+Pillow
 pyarrow
 python-dotenv
 python-pptx

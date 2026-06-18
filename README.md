@@ -39,9 +39,22 @@ The generated mail HTML is limited to 2 MB and the PPTX package is limited to 10
 
 ## Template Outputs
 
-Review these generated examples before requesting design or content changes:
+Review these generated examples directly in GitHub before requesting design or content changes.
 
-- [template_report.html](templates/template_report.html)
-- [template_report.pptx](templates/template_report.pptx)
+### Mail HTML
+
+![Mail HTML template preview](templates/previews/template_report_html.png)
+
+[Open template_report.html](templates/template_report.html)
+
+### PowerPoint
+
+![PowerPoint cover preview](templates/previews/template_report_ppt_cover.png)
+
+![Score Board - Index 1 preview](templates/previews/template_report_scoreboard_index_1.png)
+
+![Score Board - Index 2 preview](templates/previews/template_report_scoreboard_index_2.png)
+
+[Download template_report.pptx](templates/template_report.pptx)
 
 These files are generated from the local fixture data and are intended as visual templates for the mail body and PowerPoint package.
