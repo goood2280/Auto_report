@@ -1,0 +1,7 @@
+numpy
+openpyxl
+pandas
+pyarrow
+python-dotenv
+python-pptx
+PyYAML
