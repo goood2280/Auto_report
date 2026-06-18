@@ -1,0 +1,55 @@
+# ===================================================변수 설명=======================================================================
+
+# with_vehicle : ['Vehicle_A'] # report내 trend chart에 같이 charting할 vehicle List 형식입력 TEST11  
+# version : v8.1 # Auto report version  
+# delay_min : 60 # DC 완료 trigger logic내 Delay Time  
+# viewing_period : 60 #Trend 확인기간  
+# QueryTimeSpan : 1 # 전체 query 일수  
+# SplitTimeSpan : 1 # 나눠서 진행하는 일 수, DB 생성일자가 큰 경우 사용  
+# et_log_show : 30 # HTML 내 최근 DC 측정 자재 상세내역 나오는 갯수  
+# loop_time_sleep_time : 1200 #해당 초 후에 loop문 재실행, 현재 Schedule.py 운영으로 미사용  
+# test_mode : False #True시 query 미실행  
+# DB_Setting_mode : True #초기 DB Setup시에만 True 이 외에는 False  
+# high_qual_ppt_mode : False #High qual ppt 작성 필요시 현재 미사용  
+# KNOXID : user_id_01 #Mail API 사용자  
+# user_name : user_id_01 #내부 Query API 사용자  
+# email_receiver : 'USER_GROUP_A' #Main 수신처  
+# YOUR_PROJECT : PROJECT_NAME_A #Mail_API Project명 변경불필요  
+# fab_QueryTimeSpan : 300 #fabquery 기간  
+# inline_QueryTimeSpan : 300 #Inlinequery 기간  
+# report_making : True report 생성 유무 True 생성  
+# ptype_lot_turnoff : False lot type MP 물량 report 미생성위한값  
+# specific_dc_layer : False 특정 DC layer만 등록 ex MFDC  
+# ref_turnoff : True ref lot 정보 추가 유무
+
+# ==================================================================================================================================
+
+VEHICLE_A:  
+  vehicle : VEHICLE_A   
+  process_id : ['PROCESS_ID_A']   
+  line_id : ['LINE_ID_01','LINE_ID_02','LINE_ID_03']  
+  setting_stepseq : ['%%']  
+  prod : PRODUCT_NAME_A  
+  with_vehicle : ['Vehicle_B']  
+  node : NODE_NAME_A  
+  version : v9.1  
+  system_admin : Admin_01, Admin_02, Admin_03 (Team_A)  
+  delay_min : 180  
+  viewing_period : 21  
+  QueryTimeSpan : 5  
+  SplitTimeSpan : 1  
+  et_log_show : 30   
+  loop_time_sleep_time : 1200   
+  test_mode : False  
+  DB_Setting_mode : False  
+  high_qual_ppt_mode : False  
+  KNOXID : user_id_01  
+  user_name : user_id_01  
+  email_receiver : ['USER_GROUP_01','USER_GROUP_02','USER_GROUP_03']  
+  YOUR_PROJECT : PROJECT_NAME_A  
+  fab_QueryTimeSpan : 300  
+  inline_QueryTimeSpan : 100  
+  report_making : True  
+  ptype_lot_turnoff : False  
+  specific_dc_layer : False  
+  ref_turnoff : True  
