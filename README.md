@@ -36,3 +36,12 @@ The report uses columnbase data directly. For ADDP items, put the required real 
 ```
 
 The generated mail HTML is limited to 2 MB and the PPTX package is limited to 10 MB by default. Change `html_limit_mb` and `ppt_limit_mb` in `config.yaml` if needed.
+
+## Template Outputs
+
+Review these generated examples before requesting design or content changes:
+
+- [template_report.html](templates/template_report.html)
+- [template_report.pptx](templates/template_report.pptx)
+
+These files are generated from the local fixture data and are intended as visual templates for the mail body and PowerPoint package.
