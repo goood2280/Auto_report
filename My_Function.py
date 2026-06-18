@@ -602,4 +602,289 @@ def insert_plots(
                         .reset_index()      
                     )      
   
+              else:    
+                    plot_df = trend_target
+
+                sns.scatterplot(      
+                    x=COL_TIME,      
+                    y=target_data,      
+                    data=plot_df,      
+                    ax=ax,      
+                    color="red",      
+                    label=f"{match_key}",      
+                    edgecolor="black",      
+                    s=75
+                    )
+
+                if not np.isnan(spec_low):      
+                    ax.axhline(spec_low, color="red", linestyle="--", lw=2.5)      
+                if not np.isnan(spec_high):      
+                    ax.axhline(spec_high, color="red", linestyle="--", lw=2.5)  
+
+                if log_scale:      
+                    ax.set_yscale("log")  
+
+                ax.set_title(      
+                    f"{target_data_changed} Trend [P10]"      
+                    if is_window      
+                    else f"{target_data_changed} Trend [Site]",      
+                    fontsize=18,      
+                )  
+
+                ax.set_xlabel("DC_TKOUTTIME", fontsize=14)      
+                ax.set_ylabel("")      
+                ax.tick_params(axis="x", labelsize=10)      
+                ax.tick_params(axis="y", labelsize=13)      
+                ax.grid(True)      
+                ax.legend(loc="upper left", fontsize=13)      
+                plt.tight_layout()
+
+                img_buf = BytesIO()      
+                fig.savefig(img_buf, format="JPEG", bbox_inches="tight")      
+                img_buf.seek(0)      
+                with Image.open(img_buf) as img:      
+                    final_stream = BytesIO()      
+                    img.save(final_stream, format="JPEG", quality=img_quality)      
+                    final_stream.seek(0)      
+                plt.close()
+
+                slide.shapes.add_picture(      
+                    final_stream,      
+                    left=slide_width_tick * 17,      
+                    top=margin,      
+                    width=slide_width_tick * 7,      
+                    height=slide_width_tick * 4 - margin,      
+                )
+
+                agg_funcs = (  
+                    agg_funcs_dict_upper  
+                    if alias in spec_dict.index and str(spec_dict.loc[alias, COL_DIRECTION]).upper() == "UPPER"  
+                    else agg_funcs_dict_lower  
+                    if alias in spec_dict.index and str(spec_dict.loc[alias, COL_DIRECTION]).upper() == "LOWER"  
+                    else agg_funcs_dict_both  
+                )    
+                agg_df_group = df_group.groupby("WAFER_ID_str")[target_data].agg(    
+                    **agg_funcs    
+                ).T    
+                agg_df_group = agg_df_group.reindex(columns=x_list)
+
+                if "Window" in alias:    
+                    tmp = agg_df_group.loc[["P10"]]    
+                else:    
+                    tmp = agg_df_group.loc[["MED"]]    
+                tmp.index = f"{target_data_changed}_" + tmp.index.astype(str)
+
+                num_rows = agg_df_group.shape[0] + 2    
+                num_cols = agg_df_group.shape[1] + 1    
+                table_width = int(middle_of_slide - margin)    
+                table_shape = slide.shapes.add_table(  
+                    num_rows,  
+                    num_cols,  
+                    margin,  
+                    title_space,  
+                    table_width,  
+                    1,  
+                )  
+                table_shape.top -= Pt(7)  
+                table = table_shape.table
+
+                header_txt = f"[{target_lot_id}, {group_name_str}] {target_data_changed}[{target_unit}] Statistical Table"
+
+                for r in range(num_rows):  
+                    for c in range(num_cols):  
+                        cell = table.cell(r, c)  
+                        tf = cell.text_frame  
+                        tf.word_wrap = False  
+                        tf.auto_size = None  
+                        tf.margin_left = 0  
+                        tf.margin_right = 0  
+                        tf.margin_top = 0  
+                        tf.margin_bottom = 0
+
+                        for para in tf.paragraphs:  
+                            para.alignment = PP_ALIGN.CENTER  
+                            para.font.name = "Arial"  
+                            para.font.size = Pt(7.5)  
+                            para.font.bold = False
+
+                for col_idx, col_name in enumerate(agg_df_group, start=1):  
+                    for row_idx in (0, 1):  
+                        cell = table.cell(row_idx, col_idx)
+
+                        tf = cell.text_frame  
+                        tf.clear()  
+                        tf.word_wrap = False  
+                        tf.auto_size = None  
+                        tf.margin_left = 0  
+                        tf.margin_right = 0  
+                        tf.margin_top = 0  
+                        tf.margin_bottom = 0
+
+                        para = tf.paragraphs[0]  
+                        para.alignment = PP_ALIGN.CENTER  
+                        para.font.name = "Arial"  
+                        para.font.size = Pt(7.5)  
+                        para.font.bold = False
+
+                        run = para.add_run()  
+                        run.font.name = "Arial"  
+                        run.font.bold = True
+
+                        if row_idx == 1:  
+                            clean_name = str(col_name).replace("\n", "").replace("\r", "").strip()  
+                            run.text = f"#{clean_name}"  
+                            run.font.size = Pt(9)  
+                        else:  
+                            run.text = header_txt if col_idx == 1 else ""  
+                            run.font.size = Pt(14)
+
+                for r, idx_name in enumerate(agg_df_group.index, start=2):    
+                    cell = table.cell(r, 0)
+
+                    tf = cell.text_frame  
+                    tf.clear()  
+                    tf.word_wrap = False  
+                    tf.auto_size = None  
+                    tf.margin_left = 0  
+                    tf.margin_right = 0  
+                    tf.margin_top = 0  
+                    tf.margin_bottom = 0
+
+                    para = tf.paragraphs[0]  
+                    para.alignment = PP_ALIGN.CENTER  
+                    para.font.name = "Arial"  
+                    para.font.size = Pt(7.5)  
+                    para.font.bold = False
+
+                    run = para.add_run()  
+                    run.text = str(idx_name)  
+                    run.font.name = "Arial"  
+                    run.font.size = Pt(7.5)
+
+                for r, row_vals in enumerate(agg_df_group.values, start=2):    
+                    for c, val in enumerate(row_vals, start=1):    
+                        cell = table.cell(r, c)
+
+                        tf = cell.text_frame  
+                        tf.clear()  
+                        tf.word_wrap = False  
+                        tf.auto_size = None  
+                        tf.margin_left = 0  
+                        tf.margin_right = 0  
+                        tf.margin_top = 0  
+                        tf.margin_bottom = 0
+
+                        para = tf.paragraphs[0]  
+                        para.alignment = PP_ALIGN.CENTER  
+                        para.font.name = "Arial"  
+                        para.font.size = Pt(7.5)  
+                        para.font.bold = False
+
+                        run = para.add_run()  
+                        run.font.name = "Arial"  
+                        run.font.size = Pt(7.5)
+
+                        if pd.isna(val):    
+                            txt = ""    
+                            run.font.color.rgb = RGBColor(0, 0, 0)    
+                        else:    
+                            try:    
+                                v = float(val)
+
+                                if (not np.isnan(spec_high) and v > spec_high) or (not np.isnan(spec_low) and v < spec_low):    
+                                    run.font.color.rgb = RGBColor(255, 0, 0)    
+                                else:    
+                                    run.font.color.rgb = RGBColor(0, 0, 0)
+
+                                txt = f"{v:.3g}" if 0.01 <= abs(v) < 10000 else f"{v:.2e}"    
+                            except Exception:    
+                                txt = ""    
+                                run.font.color.rgb = RGBColor(0, 0, 0)
+
+                        run.text = txt
+
+                table.rows[0].cells[1].merge(table.rows[0].cells[num_cols - 1])
+
+                fig, ax = plt.subplots(figsize=(1, 2))    
+                legend_elems = [    
+                    Patch(facecolor=col, label=lab) for lab, col in color_dict.items()    
+                ]    
+                ax.legend(handles=legend_elems, title="WAFER_ID", loc="center")    
+                ax.axis("off")    
+                plt.tight_layout()    
+                img_buf = BytesIO()    
+                fig.savefig(img_buf, format="JPEG", bbox_inches="tight")    
+                img_buf.seek(0)    
+                with Image.open(img_buf) as img:    
+                    final_stream = BytesIO()    
+                    img.save(final_stream, format="JPEG", quality=img_quality)    
+                    final_stream.seek(0)    
+                plt.close()    
+                slide.shapes.add_picture(    
+                    final_stream,    
+                    left=(slide_width_tick * 16) - (2 * margin),    
+                    top=slide_height_tick,    
+                    width=7.5 * margin,    
+                    height=55 * margin,    
+                )
+
+                fig, ax = plt.subplots(figsize=(9, 6))    
+                radius_col = (    
+                    "Chip_Radius"    
+                    if f"{cat2}_Radius" not in df_group    
+                    else f"{cat2}_Radius"    
+                )
+
+                for wafer in df_group["WAFER_ID_str"].unique():    
+                    grp = df_group[df_group["WAFER_ID_str"] == wafer]    
+                    try:    
+                        coeff = np.polyfit(    
+                            grp[radius_col],    
+                            np.log10(np.abs(grp[target_data]) + 1e-15)    
+                            if reformatter.loc[alias, "REPORT LOG SCALE"]    
+                            else grp[target_data],    
+                            3,    
+                        )    
+                        poly = np.poly1d(coeff)    
+                        x_line = np.linspace(grp[radius_col].min(), grp[radius_col].max(), 100)    
+                        y_line = (    
+                            10 ** poly(x_line)    
+                            if reformatter.loc[alias, "REPORT LOG SCALE"]    
+                            else poly(x_line)    
+                        )    
+                        style = (    
+                            dict(linewidth=9, linestyle="-")    
+                            if wafer == "Ref."    
+                            else dict(linewidth=3, linestyle="--", alpha=0.7)    
+                        )    
+                        ax.plot(x_line, y_line, color=color_dict[wafer], **style)    
+                    except Exception:    
+                        pass
+
+                for wafer in df_group["WAFER_ID_str"].unique():    
+                    if wafer == "Ref.":    
+                        continue    
+                    sub = df_group[df_group["WAFER_ID_str"] == wafer]    
+                    sns.scatterplot(    
+                        data=sub,    
+                        x=radius_col,    
+                        y=target_data,    
+                        color=color_dict[wafer],    
+                        s=100,    
+                        label=wafer,    
+                        zorder=3,    
+                    )
+
+                if reformatter.loc[alias, "REPORT LOG SCALE"]:    
+                    ax.set_yscale("log")    
+                ax.set_title("Radius Profile Chart", fontsize=24)    
+                ax.set_xlabel(    
+                    "Radius[mm]" if radius_col == "Chip_Radius" else "TEG_Radius[mm]",    
+                    fontsize=14,    
+                )    
+                ax.set_ylabel(f"{target_data_changed}[{target_unit}]", fontsize=14)    
+                ax.tick_params(axis="x", labelsize=14)    
+                ax.tick_params(axis="y", labelsize=14)    
+                ax.set_xlim(0, 150)    
+                ax.grid(True, alpha=0.5)    
 
