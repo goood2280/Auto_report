@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.env
+BASE_DIR/
+fixtures/
+reformatter/
+final_item_index_table.csv
