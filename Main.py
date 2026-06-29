@@ -598,5 +598,154 @@ if reformatter_check :
 
                     #Inline Data 추출
                     print(f'{target_root_lot_id} inline data 추출 시작!')
+                    inlinedata = inlinedata_query(target_root_lot_id)
+                    print(f'{target_root_lot_id} inline data 추출 완료!')
+
+                    # =====================================================================================================
+
+                    spec_data = reformatter[(~reformatter['REPORT ORDER'].isnull())] #Report order가 존재하는 item만 spec data확인
+                    spec_dict = {row['ALIAS']: (row['SPECLOW'], row['SPECHIGH']) for _, row in spec_data.iterrows()} #dict형식으로 빠른 접근가능
+                    spec_data = spec_data.set_index('ALIAS')
+
+                    # ========================================= Pass_Rate(Score) 계산 ========================================
+                    reformatter['pass_rate'] = 'pass_rate_' + reformatter['ALIAS'] 
+                    reformatter = reformatter.set_index('pass_rate')
+
+                    # 각 아이템에 대해 pass_rate_Item{num} *report order가 있는 item한
+                    pass_df = pd.DataFrame()
+                    for item in spec_dict:
+                        try :
+                            pass_df[f'{item}'] = df[item].astype(float).apply(lambda x, item=item: x \
+                                    if pd.isna(x) else (1 if float(x) >= float(spec_dict[item][0])\
+                                    and float(x) <= float(spec_dict[item][1]) else 0))
+                        except KeyError:
+                            print(f"Pass Rate 계산 Error 발생: '{item}' - Column not found in dataframe")
+                        except (ValueError, TypeError):
+                            # Check if SPEC values are invalid
+                            if item in spec_dict and (spec_dict[item][0] is None or spec_dict[item][1] is None):
+                                print(f"Pass Rate 계산 Error 발생: '{item}' - Invalid SPEC values (None/NaN)")
+                            else:
+                                print(f"Pass Rate 계산 Error 발생: '{item}' - Non-numeric data in column")
+                        except Exception as e:
+                            print(f"Pass Rate 계산 Error 발생: '{item}' - {str(e)}")
+                    pass_df.columns = 'pass_rate_' + pass_df.columns 
+
+                    df = pd.concat([df, pass_df], axis=1)
+                    # ============================================ VIP_group 생성 ===========================================
+
+                    # match_key와 맞는 data filtering
+                    wf_matching_list = list(zip(df['FAB_LOT_ID'], df['WAFER_ID'].astype(str).apply(lambda x: '#' + x)))
+                    wf_matching_list = list(set(wf_matching_list))
+                    print('wf_matching_list : ',wf_matching_list)
+
+                    # VIP_group_raw 생성
+                    selected_columns = ['WAFER_ID'] + [col for col in df.columns if 'pass' in col]
+                    pivot_group = df[selected_columns]
+                    pivot_group = pivot_group.groupby('WAFER_ID').mean()*100
+                    pivot_group = pivot_group.T
+                    VIP_group_raw = pd.merge(pivot_group, reformatter[['REPORT ORDER','PPT_ONLY']], right_index=True, left_index=True, how='right').sort_values('REPORT ORDER').dropna(subset=['REPORT ORDER'])
+                    VIP_group = VIP_group_raw.drop('REPORT ORDER',axis=1).dropna(how='all')
+                    VIP_group_raw = VIP_group_raw[(VIP_group_raw['PPT_ONLY'] != 1.0)]
+                    VIP_group_raw = VIP_group_raw.drop('PPT_ONLY', axis=1)
+
+                    # VIP_group 생성 *presentation 생성용 dataframe
+                    VIP_group.index = VIP_group.index.str.replace('pass_rate_', '') 
+
+                    # VIP_group_HTML 생성 *VIP_group copy
+                    VIP_group_HTML = pd.merge(VIP_group_raw,reformatter[['CAT2','REPORT ORDER']].dropna(subset=['REPORT ORDER']).drop('REPORT ORDER',axis=1)\
+                                            ,right_index=True, left_index=True, how='left').reset_index()
+                    VIP_group_HTML = VIP_group_HTML.rename(columns={'CAT2': 'CATEGORY', 'index': 'ITEM_ID', 'pass_rate': 'ITEM_ID'})
+                    VIP_group_HTML['ITEM_ID'] = VIP_group_HTML['ITEM_ID'].str.replace('pass_rate_', '')
+                    VIP_group_HTML = VIP_group_HTML.set_index(['CATEGORY', 'ITEM_ID'])
+                    VIP_group_HTML = VIP_group_HTML.drop('REPORT ORDER',axis=1)
+                    VIP_group_HTML = VIP_group_HTML.dropna(how='all')
+
+                    # ========================================= PPT file name 생성 ==========================================
+
+                    rname = f'HOL_{target_DC_step}_Report'
+                    fname = f'{upload_date}-{prod}-{target_root_lot_id}-{rname}.html' #html 저장이름
+                    final_ppt_file_name_DX = f'{upload_date}-{prod}-{target_root_lot_id}-{rname}.pptx' #pptx 저장이름, DX System 및 S3 DB 저장
+
+                    # ========================================= 저화질 버전 ppt 제작 =========================================
+
+                    clear_temp_inside_run()
+                    clear_anomaly_inside_run()
+                    
+                    # 1-1. Title page 투입
+                    print(f'[INFO]..{vehicle}_{target_lot_id}_{target_step_merged}_HOL_AUTO_REPORT 저화질 버전 제작 시작..\n')
+                    prs_low_qual = make_title_page(template_ppt_path, vehicle, target_lot_id, target_step_merged)
+
+                    # 1-2. Scoreboard 투입
+                    prs_low_qual = insert_score_board(VIP_group, prs_low_qual, target_lot_id, ' / '.join([target_lot_id, target_step_merged]))
+
+                    # 1-3. BoxPlot 투입 - 메일링 버전
+                    description_image_info_dict_low_qual = calcaulate_description_image_info_dict(description_ppt_path, img_quality = 20)
+                    prs_low_qual = insert_plots(merged_df, prs_low_qual, description_image_info_dict_low_qual, target_lot_id, target_root_lot_id, target_DC_step, target_DC_step_id, spec_data, img_quality = 12, ref=False)
+                
+                    # 1-4. Save ppt - 메일링 버전
+                    if not os.path.exists(os.path.dirname(low_qual_ppt_save_path)):
+                        os.makedirs(os.path.dirname(low_qual_ppt_save_path))
+                    prs_low_qual.save(f'{low_qual_ppt_save_path}/{final_ppt_file_name_DX}')
+                    print('[INFO]..저장 완료..\n')
+
+                    # =====================================================================================================
+                    VIP_group = VIP_group.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+                    VIP_group = VIP_group.apply(pd.to_numeric, errors='coerce')
+                    VIP_group = VIP_group.dropna(axis=1, how='all')
+                    VIP_group = VIP_group.astype(float)
+                    VIP_group = VIP_group.round(1) # score table
+
+                    et_log = pd.read_csv(Final_et_log_path)
+                    et_log = et_log[['prime_key','wafer_id','step_seq','tkout_time','dc_step_id','dc_done']]
+                    et_log = et_log.sort_values(by='tkout_time', ascending=False)
+                    et_log = et_log.iloc[:et_log_show,:] #아래에서 n개행만 출력 
+
+                    et_log['LOT ID'] = et_log['prime_key'].str.split('_').str[1]
+                    et_log['WAFER ID'] = et_log['wafer_id'].apply(extract_and_sort_numbers)
+                    et_log['DC STEP'] = et_log['dc_step_id'].replace(GLOBAL_CONFIG.get("dc_dict"))
+                    et_log['DC 측정완료 여부'] = et_log['dc_done'].apply(lambda x : "RUN 중" if x == False else "측정완료")
+                    et_log['측정된 DCOP List'] = et_log['step_seq'].apply(remove_brackets)
+                    et_log['DC 측정완료 시간'] = et_log['tkout_time']
+
+                    et_log = et_log[['LOT ID','WAFER ID','DC STEP','DC 측정완료 여부','측정된 DCOP List','DC 측정완료 시간']]
+
+                    inlinedata['ITEMNAME'] = inlinedata['ITEMNAME'].astype(str)
+                    inlinedata['item_id'] = inlinedata['item_id'].astype(str)
+                    inlinedata['STEP_DESC_ITEM_ID'] = inlinedata['ITEMNAME'] + "_" + inlinedata['item_id']
+                    
+                    inlinedata_spec = inlinedata.groupby('STEP_DESC_ITEM_ID')[['spc_ctrl_spec_high', 'spc_ctrl_spec_limit', 'spc_ctrl_spec_low']].mean()
+                    
+                    inlinedata_spec.rename(columns={'spc_ctrl_spec_high': 'UCL'}, inplace=True)
+                    inlinedata_spec.rename(columns={'spc_ctrl_spec_limit': 'CL'}, inplace=True)
+                    inlinedata_spec.rename(columns={'spc_ctrl_spec_low': 'LCL'}, inplace=True)
+                    
+                    #spec이 음수인 경우 0으로 변환
+                    cols_to_replace = ['UCL', 'CL', 'LCL']
+                    for col in cols_to_replace:
+                        inlinedata_spec[col] = inlinedata_spec[col].apply(replace_negatives_with_0)
+
+                    inlinedata['fab_value'] = inlinedata['fab_value'].astype(float)
+                    inlinedata['tkout_time'] = pd.to_datetime(inlinedata['tkout_time'], format='%Y-%m-%d %H:%M:%S')
+                    inlinedata = inlinedata.sort_values(by='tkout_time', ascending=True)
+
+                    inlinedata_pivot = inlinedata.pivot_table(values='fab_value',\
+                                                                index='wafer_id',\
+                                                                columns='STEP_DESC_ITEM_ID', aggfunc='mean',observed = True)
+
+                    # 데이터프레임에 있는 열만 선택하여 새로운 리스트 생성
+                    Inline_setting_file = pd.read_excel(inline_file_path, sheet_name=None, engine='openpyxl')
+                    Inline1 = Inline_setting_file[inline_file_sheet]
+                    inline_filtered = Inline1[Inline1['Key'] == True] 
+                    inline_filtered['STEP_DESC_ITEM_ID'] = inline_filtered['ITEMNAME'] + '_' + inline_filtered['ITEM_ID'] 
+                    inline_grouped  = inline_filtered.groupby('STEP_DESC_ITEM_ID')['Module'].last()
+                    inline_grouped = inline_grouped.reset_index()
+                    inline_grouped_dict = inline_grouped.set_index('STEP_DESC_ITEM_ID')['Module'].to_dict() #Inline ITEM과 Module Matching된 dict
+                    inline_grouped_dict_ITEMNAME = inline_filtered.set_index('STEP_DESC_ITEM_ID')['ITEMNAME'].to_dict() #Inline ITEM과 ITEMNAME Matching된 dict
+                    inline_grouped_dict_ITEM_ID = inline_filtered.set_index('STEP_DESC_ITEM_ID')['ITEM_ID'].to_dict() #Inline ITEM과 ITEM_ID Matching된 dict
+                    inline_filtered_columns = sorted(inline_grouped['STEP_DESC_ITEM_ID'].unique().tolist(), key=lambda s: float(s.split()[0]))
+
+                    valid_columns = [col for col in inline_filtered_columns if col in inlinedata_pivot.columns]
+                    inlinedata_filtered = inlinedata_pivot[valid_columns]
+
 
 
