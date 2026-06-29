@@ -749,3 +749,71 @@ if reformatter_check :
 
 
 
+                    inlinedata_filtered_pivot = inlinedata_filtered.transpose()
+
+                    # 모든 컬럼명을 정수로 변경하기 위한 딕셔너리 생성
+                    #column_map = {old_col: int(old_col) for old_col in inlinedata_filtered_pivot.columns}
+                    column_map = {old_col: int(old_col) for old_col in inlinedata_filtered_pivot.columns if old_col.isdigit()}
+                    inlinedata_filtered_pivot = inlinedata_filtered_pivot.rename(columns=column_map)
+
+                    #sorted_columns = sorted(inlinedata_filtered_pivot.columns, key=lambda x: int(x))
+                    #sorted_columns = sorted([col for col in inlinedata_filtered_pivot.columns if col.isdigit()], key=int)
+                    sorted_columns = sorted([col for col in inlinedata_filtered_pivot.columns if str(col).isdigit()], key=lambda x: int(x))
+
+                    inlinedata_filtered_pivot = inlinedata_filtered_pivot[sorted_columns]
+
+                    inlinedata_filtered_pivot = pd.merge(inlinedata_spec, inlinedata_filtered_pivot,how='right', on='STEP_DESC_ITEM_ID')
+                    print("Inline data 준비완료!")
+                    
+                    # HTML 생성부분 - Mail body
+                    VIP_group_HTML.columns = ['#' + str(col) for col in VIP_group_HTML.columns]
+
+                    column_mapping = {wafer_id : (fab_lot_id, wafer_id) for fab_lot_id, wafer_id in wf_matching_list}
+                    print('column_mapping :', column_mapping)
+
+                    # 첫번째 값이 동일한 항목들을 뭉치기
+                    grouped_values = {}
+                    for key, value in column_mapping.items():
+                        first_value = value[0]
+                        if first_value not in grouped_values:
+                            grouped_values[first_value] = []
+                        grouped_values[first_value].append(key)
+                    print("grouped_values : ",grouped_values)
+                    
+                    sorted_keys = []
+                    for key_list in grouped_values.values():
+                        sorted_keys.extend(sorted(key_list, key=lambda x: int(x[1:])))
+                    if '#0' in sorted_keys:
+                        sorted_keys.insert(0, sorted_keys.pop(sorted_keys.index('#0')))
+                    print("sorted_keys : ",sorted_keys)
+
+                    VIP_group_HTML = VIP_group_HTML[sorted_keys]
+                    VIP_group_HTML.index.names = [None, None]
+
+                    # 데이터프레임의 컬럼을 멀티컬럼으로 변환
+                    multi_index = pd.MultiIndex.from_tuples(
+                        [['Ref.', 'Ref.'] if col == '#0' else column_mapping[col] for col in VIP_group_HTML.columns],
+                        names=['LOT_ID', 'WAFER_ID']
+                    )
+                    print("VIP_group_HTML.columns : ",VIP_group_HTML.columns)
+
+                    VIP_group_HTML.columns = multi_index
+
+                    VIP_group_HTML = VIP_group_HTML.rename(
+                        lambda x: convert_target_data(x, GLOBAL_CONFIG.get("suffixes_remove"), GLOBAL_CONFIG.get("replace_map")), 
+                        level=1
+                    )
+
+                    styled_df1 = (
+                        VIP_group_HTML
+                            .style
+                            .format("{:.1f}", na_rep="")
+                            .apply(apply_style_by_index, axis=1)
+                    )
+                    if VIP_group_HTML.index.duplicated().any():
+                        print("인덱스 중복 여부:", VIP_group_HTML.index.duplicated().any())  
+                        print("중복 인덱스 개수:", VIP_group_HTML.index.duplicated().sum())  
+                        print("중복 인덱스 목록:")  
+                        print(VIP_group_HTML.index[VIP_group_HTML.index.duplicated()].unique())  
+                    
+
