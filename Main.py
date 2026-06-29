@@ -297,4 +297,306 @@ if reformatter_check :
             def q(col: str) -> str:
                 return '"' + col.replace('"', '""') + '"'
 
+            # SELECT 구문
+            select_other = ",\n    ".join([f"b.{q(c)}" for c in other_cols])
+            select_vramp = ",\n    ".join([
+                f'CASE WHEN b.{q(c)} IS NOT NULL AND b.{q(c)} = b.{q(c)} '
+                f'THEN m.{q(c)} ELSE b.{q(c)} END AS {q(c)}'
+                for c in vramp_cols
+            ])
+            max_selects = ",\n        ".join([f"MAX({q(c)}) AS {q(c)}" for c in vramp_cols])
+            select_clause = f"{select_other},\n    {select_vramp}"
+
+            # 그룹 키
+            group_keys = ["root_lot_id", "wafer_id", "chip_x_pos", "chip_y_pos"]   # 필요 시 수정
+            group_keys_sql = ", ".join([q(k) for k in group_keys])
+            join_cond = " AND ".join([f"b.{q(k)} = m.{q(k)}" for k in group_keys])
+
+            if GLOBAL_CONFIG.get("target_lot") : 
+                target_lot_list = [c[:5] for c in dc_done_list['lot_id'].tolist()]
+                et_total_query = f"""
+                        WITH base AS (
+                                SELECT *
+                                FROM read_parquet([{', '.join([f"'{file}'" for file in parquet_files])}], union_by_name=True)
+                                WHERE root_lot_id IN {target_lot_list}
+                            ),
+                            maxvals AS (
+                                SELECT
+                                    {group_keys_sql},
+                                    {max_selects}
+                                FROM read_parquet([{', '.join([f"'{file}'" for file in parquet_files])}], union_by_name=True)
+                                WHERE tkout_time >= (CURRENT_DATE - INTERVAL '365' DAY)
+                                GROUP BY {group_keys_sql}
+                            )
+                            SELECT
+                                {select_clause}
+                            FROM base b
+                            LEFT JOIN maxvals m
+                                ON {join_cond};
+                """
+            else : 
+                et_total_query = f"""
+                            WITH base AS (
+                                    SELECT *
+                                    FROM read_parquet([{', '.join([f"'{file}'" for file in parquet_files])}], union_by_name=True)
+                                    WHERE tkout_time >= (CURRENT_DATE - INTERVAL '{viewing_period}' DAY)
+                                ),
+                                maxvals AS (
+                                    SELECT
+                                        {group_keys_sql},
+                                        {max_selects}
+                                    FROM read_parquet([{', '.join([f"'{file}'" for file in parquet_files])}], union_by_name=True)
+                                    WHERE tkout_time >= (CURRENT_DATE - INTERVAL '365' DAY)
+                                    GROUP BY {group_keys_sql}
+                                )
+                                SELECT
+                                    {select_clause}
+                                FROM base b
+                                LEFT JOIN maxvals m
+                                    ON {join_cond};
+                """
+
+            merged_df = conn.execute(et_total_query).df()
+            #with_vehicle_table load & Merge
+            if not vehicle in with_vehicle :
+                print("[INFO] with_vehicle안에 vehicle 없음. 진행")
+                try : 
+                    with_vehicle_Table = pd.DataFrame() 
+                    for with_vehicle_now in with_vehicle :
+                        ET_TABLE_ROOT_with_vehicle  = DB + with_vehicle_now + '_LOTWF/pivot_raw/'
+                        pattern_with_vehicle = os.path.join(ET_TABLE_ROOT_with_vehicle, f'*')
+                        
+                        print(f'[INFO] viewing_period = {viewing_period}')
+                        # 특정 경로의 모든 Parquet 파일을 DuckDB 테이블로 읽기
+                        parquet_files_with_vehicle = [os.path.join(ET_TABLE_ROOT_with_vehicle, f) for f in os.listdir(ET_TABLE_ROOT_with_vehicle) if f.endswith('.parquet')]
+                        
+                        # 스키마 읽기
+                        cols_df_with_vehicle = conn.execute(f"""
+                            SELECT * 
+                            FROM read_parquet([{', '.join([f"'{file}'" for file in parquet_files_with_vehicle])}], union_by_name=True)
+                            LIMIT 0
+                        """).fetchdf()
+                        all_cols_with_vehicle = list(cols_df_with_vehicle.columns)
+                        vramp_cols_with_vehicle = [c for c in all_cols_with_vehicle if "VRAMP" in c]
+                        other_cols_with_vehicle = [c for c in all_cols_with_vehicle if c not in vramp_cols_with_vehicle]
+
+                        # SELECT 구문
+                        select_other_with_vehicle = ",\n    ".join([f"b.{q(c)}" for c in other_cols_with_vehicle])
+                        select_vramp_with_vehicle = ",\n    ".join([
+                            f'CASE WHEN b.{q(c)} IS NOT NULL AND b.{q(c)} = b.{q(c)} '
+                            f'THEN m.{q(c)} ELSE b.{q(c)} END AS {q(c)}'
+                            for c in vramp_cols_with_vehicle
+                        ])
+                        max_selects_with_vehicle = ",\n        ".join([f"MAX({q(c)}) AS {q(c)}" for c in vramp_cols_with_vehicle])
+                        select_clause_with_vehicle = f"{select_other_with_vehicle},\n    {select_vramp_with_vehicle}"
+
+                        et_total_query_with_vehicle = f"""
+                                    WITH base AS (
+                                            SELECT *
+                                            FROM read_parquet([{', '.join([f"'{file}'" for file in parquet_files_with_vehicle])}], union_by_name=True)
+                                            WHERE tkout_time >= (CURRENT_DATE - INTERVAL '{viewing_period}' DAY)
+                                        ),
+                                        maxvals AS (
+                                            SELECT
+                                                {group_keys_sql},
+                                                {max_selects_with_vehicle}
+                                            FROM read_parquet([{', '.join([f"'{file}'" for file in parquet_files_with_vehicle])}], union_by_name=True)
+                                            WHERE tkout_time >= (CURRENT_DATE - INTERVAL '365' DAY)
+                                            GROUP BY {group_keys_sql}
+                                        )
+                                        SELECT
+                                            {select_clause_with_vehicle}
+                                        FROM base b
+                                        LEFT JOIN maxvals m
+                                            ON {join_cond};
+                        """
+                        with_vehicle_Table_now = conn.execute(et_total_query_with_vehicle).df()
+                        with_vehicle_Table = pd.concat([with_vehicle_Table,with_vehicle_Table_now], ignore_index=True)
+
+                except :
+                    with_vehicle_Table = pd.DataFrame()
+                    
+                merged_df = pd.concat([merged_df,with_vehicle_Table], ignore_index=True)
+                if vehicle in ["Solomon1", "Solomon2"]:
+                    merged_df.to_parquet(f"ET_TABLE_Solomon.parquet")
+            
+            df_include_column = reformatter[['ALIAS','REPORT ORDER']].dropna(subset=['REPORT ORDER']).drop('REPORT ORDER',axis=1)
+            columns_to_include_1 = df_include_column['ALIAS'].tolist()
+            columns_to_include_2 = ['fab_lot_id','lot_id','mask','lot_wf','root_lot_id','wafer_id','process_id','part_id','step_id','step_seq'\
+                                        ,'tkout_time','flat_zone','eqp_id','probe_card_id','chip_x_pos','chip_y_pos','subitem_id','temperature','total_site_cnt','match_key']
+            columns_to_include = columns_to_include_1 +  columns_to_include_2
+            filtered_columns = [col for col in columns_to_include if col in merged_df.columns]
+            merged_df = merged_df[filtered_columns]
+
+            columns_to_exclude_1 = [col for col in merged_df.columns if 'PCHK' in col]
+            columns_to_exclude_2 = ['fab_lot_id','lot_id','mask','lot_wf','root_lot_id','wafer_id','process_id','part_id','step_id','step_seq'\
+                                    ,'tkout_time','flat_zone','eqp_id','probe_card_id','chip_x_pos','chip_y_pos','subitem_id','temperature','total_site_cnt']
+            columns_to_exclude = columns_to_exclude_1 +  columns_to_exclude_2
+            columns_to_check = merged_df.columns.difference(columns_to_exclude)
+            merged_df = merged_df.dropna(subset=columns_to_check, how='all')
+
+            merged_df['wafer_id'] = merged_df['wafer_id'].astype(int)
+            merged_df['DC_Split'] = merged_df['step_id'].replace(GLOBAL_CONFIG.get("dc_dict"))
+            merged_df['search_key'] = merged_df['fab_lot_id'].astype(str) + "_" + merged_df['step_id'].astype(str)
+            merged_df['match_key'] = merged_df['root_lot_id'].astype(str) + "_" + merged_df['step_id'].astype(str)
+            merged_df['tkout_time'] = pd.to_datetime(merged_df['tkout_time'])
+            
+            # Change data type
+            merged_df = merged_df.astype({'wafer_id': int, 'chip_x_pos': int, 'chip_y_pos': int, 'flat_zone': int, 'temperature': float})
+
+            # Add TEMPERATURE Modified
+            merged_df['temperature'] = merged_df['temperature'].apply(lambda a: int(np.round(a / 5) * 5))
+            # =====================================================================================================
+            # merged_df = merged_df[merged_df['step_seq'] == 'N02V98HI']
+
+            # Add coordinate_file
+            coordinate_file = pd.read_excel(coordinate_file_path, sheet_name=None, engine='openpyxl')
+            zone_define = coordinate_file['Zone_Define']
+            zone_define['MASK'] = zone_define['MASK'].replace('RHV_OS','RHV-OS') #RHV OS Vehicle 명 상이함. matching을 위한 변경
+            zone_define = zone_define.astype({'CHIP_X_POS': int, 'CHIP_Y_POS': int, 'CHIP_X_ADJ': int, 'CHIP_Y_ADJ': int, 'FLAT_ZONE_POS': int})
+
+            # =====================================================================================================
+
+            # Add Point column
+            merged_df['Point'] = 1
+            merged_df['Point'] = merged_df.groupby(['fab_lot_id','wafer_id','tkout_time'], observed=False)['Point'].transform('sum').astype(str) # # ,'STEP_ID', 'STEP_SEQ'
+
+            # Add duplicate count
+            merged_df['Duplicate_Count'] = merged_df.groupby(['DC_Split','temperature','flat_zone','fab_lot_id','wafer_id','step_seq','Point'], observed=False)['tkout_time'].rank(method='dense')
+
+            # Add PGM(pt)_CNT
+            merged_df['PGM(pt)'] = list(map(lambda a,b,c: f"{a}({b}pt)_{c}", merged_df['step_seq'],merged_df['Point'],merged_df['Duplicate_Count']))
+
+            # column명 통일
+            new_column_names = []
+            ref_column_names = ['fab_lot_id',
+                                'lot_wf',
+                                'lot_id',
+                                'mask',
+                                'root_lot_id', 
+                                'wafer_id', 
+                                'process_id', 
+                                'part_id', 
+                                'tkout_time', 
+                                'temperature', 
+                                'item_id', 
+                                'flat_zone', 
+                                'chip_x_pos', 
+                                'chip_y_pos',
+                                'subitem_id', 
+                                'et_value',
+                                'step_id', 
+                                'step_seq', 
+                                'eqp_id', 
+                                'probe_card_id',
+                                'point',
+                                'total_site_cnt']
+
+            for col in merged_df.columns:
+                if col in ref_column_names:
+                    if 'flat_zone' in col: 
+                        new_column_names.append('FLAT_ZONE_POS')
+                    else:
+                        new_column_names.append(col.upper())
+                else:
+                    new_column_names.append(col)
+
+            # Set new column names
+            merged_df.columns = new_column_names
+
+            # Zone Radius add
+            merged_df = pd.merge(merged_df,zone_define,on=['MASK','CHIP_X_POS','CHIP_Y_POS','FLAT_ZONE_POS'])
+            
+            if not ref_turnoff:
+                # Ref WF 정보
+                #YLD 정보 Download
+                if vehicle == 'Solomon1' or vehicle == 'Solomon2' :
+                    client.download_file(bucket_simyung, '/SF3_Product/Solomon_EVT1/Result/SF3_SOL_EVT1_Result_Data.csv', 'SF3_SOL_EVT1_Result_Data.csv') 
+                    reference_df = pd.read_csv('SF3_SOL_EVT1_Result_Data.csv')
+                    reference_df['WAFER_ID'] = reference_df['WAFER_ID'].astype(int)
+                    reference_df['END_TIME'] = pd.to_datetime(reference_df['END_TIME'])
+                    reference_df = reference_df.loc[reference_df.groupby(['ROOT_LOT_ID', 'WAFER_ID'])['END_TIME'].idxmax()]
+                    reference_df = reference_df[reference_df['PGM_VER']>12][['ROOT_LOT_ID','WAFER_ID','END_TIME','LOT_ID','PGM_VER','YLD','L1/L2','SCAN_LH','SRAM_LH']]
+                    reference_df = reference_df.sort_values(by=['YLD'], ascending=False).reset_index()
+                    reference_df = reference_df[['ROOT_LOT_ID','WAFER_ID','END_TIME','LOT_ID','PGM_VER','YLD','L1/L2','SCAN_LH','SRAM_LH']].reset_index()
+                
+                    for i in range(0, 100):
+                        try :
+                            reference_lot_id = reference_df['ROOT_LOT_ID'].iloc[i]
+                            reference_wafer_id = reference_df['WAFER_ID'].iloc[i]
+                            reference_yld = reference_df['YLD'].iloc[i]
+                            if not merged_df[(merged_df['ROOT_LOT_ID'] == reference_lot_id) & (merged_df['WAFER_ID'] == reference_wafer_id) & (merged_df['DC_Split'] == "MFDC")].empty :
+                                print("max_yld = ", reference_yld)
+                                print("reference_lot_id = ", reference_lot_id)
+                                print("reference_wafer_id = ", reference_wafer_id)
+                                break
+                        except : 
+                            print(f"{reference_lot_id}_#{reference_wafer_id} MFDC 미확보됨")
+                else :
+                    reference_df = pd.read_csv('Thetis1_YLD.csv')
+                    reference_df['WAFER_ID'] = reference_df['WAFER_ID'].astype(int)
+                    reference_df['TKOUT_TIME'] = pd.to_datetime(reference_df['TKOUT_TIME'])
+                    reference_df = reference_df.loc[reference_df.groupby(['ROOT_LOT_ID', 'WAFER_ID'])['TKOUT_TIME'].idxmax()]
+                    reference_df = reference_df.sort_values(by=['YLD'], ascending=False).reset_index()
+
+                    for i in range(0, 2500):
+                        try :
+                            reference_lot_id = reference_df['ROOT_LOT_ID'].iloc[i]
+                            reference_wafer_id = reference_df['WAFER_ID'].iloc[i]
+                            reference_yld = reference_df['YLD'].iloc[i]
+                            if not merged_df[(merged_df['ROOT_LOT_ID'] == reference_lot_id) & (merged_df['WAFER_ID'] == reference_wafer_id) & (merged_df['DC_Split'] == "MFDC")].empty :
+                                print("max_yld = ", reference_yld)
+                                print("reference_lot_id = ", reference_lot_id)
+                                print("reference_wafer_id = ", reference_wafer_id)
+                                break
+                        except : 
+                            print(f"{reference_lot_id}_#{reference_wafer_id} MFDC 미확보됨")
+
+                reference_df = reference_df[reference_df['YLD'] == reference_yld].reset_index()
+            else :
+                #ref wf true인 경우
+                reference_lot_id  = None
+                reference_wafer_id = None
+                
+            html_code = GLOBAL_CONFIG.get("html_code")
+
+            for search_key in search_strings : #search key = match key, fablot_id + dc_step_id
+                try : 
+                    print(f'[INFO] *****{search_key}에 대한 AUTO LOT Report 발행 시작')
+                    
+                    not_measured = False
+                    
+                    target_lot_id = search_key.split('_')[0] #{fab_lot_id}
+                    target_root_lot_id = target_lot_id[:5] #{root_lot_id}
+                    target_DC_step_id = search_key.split('_')[1] #{DC_step_id}
+                    target_DC_step = GLOBAL_CONFIG.get("dc_dict").get(target_DC_step_id) #{DC_step}
+                    target_step_merged = target_DC_step + "(" + target_DC_step_id + ")" #{DC_step_id}({DC_step})
+
+                    match_key = target_root_lot_id + "_" + target_DC_step_id #match_key = {root_lot_id}_{DC_step_id}
+
+                    print('***** fab_lot_id + step_id : ', search_key)
+                    print('***** root_lot_id + step_id : ', match_key)
+
+                    df = merged_df[(merged_df['match_key'] == match_key) | ((merged_df['ROOT_LOT_ID'] == reference_lot_id) & (merged_df['WAFER_ID'] == reference_wafer_id) & (merged_df['DC_Split'] == "MFDC"))].copy()
+
+                    search_key_rows = df[df['search_key'] == search_key]
+                    df['WAFER_ID'] = df['WAFER_ID'].astype(int)
+                    empty_cols = search_key_rows.columns[search_key_rows.isna().all()]
+                    
+                    df.drop(columns=empty_cols, inplace=True)
+                    
+                    if df.empty :
+                        print(f"{search_key}가 비어있습니다.")
+                        not_measured = True
+                        log_to_file(f"{search_key}에서 HOL DATA가 측정되지 않아 Report 발행되지 않았습니다.", error_log)
+                        continue
+
+                    df.loc[(df['ROOT_LOT_ID'] == reference_lot_id) & (df['WAFER_ID'] == reference_wafer_id) , 'WAFER_ID'] = 0
+
+                    target_wafer_id_list = sorted(df['WAFER_ID'].unique().tolist())
+                    print(f'[INFO] *****{match_key} target_wafer_id_list : ', target_wafer_id_list)
+
+                    #Inline Data 추출
+                    print(f'{target_root_lot_id} inline data 추출 시작!')
+
 
