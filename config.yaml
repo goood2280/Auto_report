@@ -1,41 +1,29 @@
-defaults:
-  root: BASE_DIR
-  report_path: BASE_DIR/Report
-  mail_ppt_path: BASE_DIR/Report/{product}/Mail
-  html_path: BASE_DIR/Report/{product}/HTML
-  reformatter_path: reformatter/{product}_reformatter.csv
-  coordinate_file_path: fixtures/coordinate_template.xlsx
-  columnbase_files:
-    - BASE_DIR/DB/columnbase/{product}_columnbase.parquet
-  item_id_column: item_id
-  value_column: et_value
-  identity_columns:
-    - fab_lot_id
-    - lot_id
-    - root_lot_id
-    - wafer_id
-    - process_id
-    - part_id
-    - step_id
-    - step_seq
-    - tkout_time
-    - flat_zone
-    - eqp_id
-    - probe_card_id
-    - chip_x_pos
-    - chip_y_pos
-    - subitem_id
-    - temperature
-    - total_site_cnt
-  html_limit_mb: 2
-  ppt_limit_mb: 10
-  delivery_enabled: false
-
-VEHICLE_A:
-  vehicle: VEHICLE_A
-  prod: PRODUCT_NAME_A
-  node: NODE_NAME_A
-  version: v1.0
-  system_admin: Admin_01
-  target_lot:
-  target_step_id:
+vehicle_A:
+  vehicle : vehicle_A
+  process_id : ['proc']
+  line_id : ['line']
+  setting_stepseq : ['%%']
+  prod : Node_vehicle_A
+  with_vehicle : ['Vehicle_B']
+  node : SS
+  version : 10
+  system_admin : 우시명
+  delay_min : 90
+  viewing_period : 35
+  QueryTimeSpan : 1
+  SplitTimeSpan : 1
+  et_log_show : 30 
+  loop_time_sleep_time : 1200 
+  test_mode : False
+  DB_Setting_mode : False
+  high_qual_ppt_mode : False
+  KNOXID : simyung.woo
+  user_name : simyung.woo
+  email_receiver : ['POWER_USER']
+  YOUR_PROJECT : AAA
+  fab_QueryTimeSpan : 50
+  inline_QueryTimeSpan : 1
+  report_making : True
+  ptype_lot_turnoff : False
+  specific_dc_layer : False
+  ref_turnoff : True
