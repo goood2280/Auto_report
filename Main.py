@@ -10,14 +10,6 @@ import warnings
 
 # ----- 서드파티
 try:
-    from gpt_oss_client import generate_report_summary
-except ImportError:
-    # gpt_oss_client는 사내 전용 모듈. 없는 환경(로컬/오프라인)에서는
-    # GPT 요약을 건너뛰도록 빈 결과를 반환하는 폴백을 사용합니다.
-    def generate_report_summary(metrics_dict):
-        print("[WARN] gpt_oss_client 미설치 - GPT 요약 비활성화 (빈 요약 반환)")
-        return "", []
-try:
     import boto3  # S3 업로드 전용 (사내 환경). 로컬/오프라인에서는 없을 수 있음 → graceful skip
 except ImportError:
     boto3 = None
@@ -31,7 +23,7 @@ import requests
 from bigdataquery import *
 from My_Function import *
 from My_config import GLOBAL_CONFIG
-from anomaly_engine import run_anomaly_pipeline
+from anomaly_engine import run_anomaly_pipeline, analyze_commonality, render_findings_html, interpret_with_ai
 
 # ==================================================================================================================================
 # GPT OSS 120B API 연결 설정
@@ -133,7 +125,6 @@ et_file_path = GLOBAL_CONFIG.get("et_file_path")
 fab_file_path = GLOBAL_CONFIG.get("fab_file_path")
 inline_file_path = GLOBAL_CONFIG.get("inline_file_path")
 coordinate_file_path = GLOBAL_CONFIG.get("coordinate_file_path")
-template_ppt_path = GLOBAL_CONFIG.get("template_ppt_path")
 description_ppt_path = GLOBAL_CONFIG.get("description_ppt_path")
 email_list_path = GLOBAL_CONFIG.get("email_list_path")
 
@@ -223,7 +214,36 @@ datetime_now = datetime.now()
 formatted_datetime = datetime_now.strftime('%y-%m-%d-%H-%M')
 upload_date = datetime_now.strftime('%Y%m%d')
 
-reformatter = pd.read_csv(f'reformatter/{vehicle}_reformatter.csv') 
+# ── AI 다단계 해석용: LLM 호출 함수(transport)와 지식베이스 텍스트를 1회 구성 ──
+# 실 환경에서는 gpt_client(OpenAI)를 사용, 로컬에서는 gpt_oss_client.mock_llm 사용.
+# 둘 다 없으면 None → AI 해석 비활성(코드 분석만).
+def _build_llm_fn():
+    if GPT_CONNECT and gpt_client is not None:
+        def _f(system, user):
+            r = gpt_client.chat.completions.create(
+                model="gpt-oss-120b",
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": user}],
+                temperature=0.3)
+            return r.choices[0].message.content
+        return _f
+    try:
+        from gpt_oss_client import mock_llm
+        return mock_llm
+    except Exception:
+        return None
+
+_LLM_FN = _build_llm_fn()
+_ANOMALY_KNOWLEDGE_TEXT = ""
+try:
+    _kp = GLOBAL_CONFIG.get("anomaly_knowledge_path")
+    if _kp and os.path.exists(_kp):
+        with open(_kp, encoding="utf-8") as _kf:
+            _ANOMALY_KNOWLEDGE_TEXT = _kf.read()
+except Exception as _ke:
+    print(f"[WARN] 이상 지식베이스 로드 실패: {_ke}")
+
+reformatter = pd.read_csv(f'reformatter/{vehicle}_reformatter.csv')
 
 reformatter_check = reformatter_verify(reformatter)
 # print("reformatter_check : ", reformatter_check)
@@ -456,9 +476,17 @@ if reformatter_check :
             columns_to_include_1 = df_include_column['ALIAS'].tolist()
             columns_to_include_2 = ['fab_lot_id','lot_id','mask','lot_wf','root_lot_id','wafer_id','process_id','part_id','step_id','step_seq'\
                                         ,'tkout_time','flat_zone','eqp_id','probe_card_id','chip_x_pos','chip_y_pos','subitem_id','temperature','total_site_cnt','match_key']
-            columns_to_include = columns_to_include_1 +  columns_to_include_2
+            # PCHK(Probe check) 컬럼은 차트/스코어보드엔 안 쓰지만, 측정 신뢰성 분석(동일 site 이탈)
+            # 을 위해 merged_df에 유지한다. (REPORT ORDER가 없어 include_1엔 안 잡히므로 별도 보존)
+            pchk_keep = [c for c in merged_df.columns if 'PCHK' in str(c).upper()]
+            # 다중컬럼 ADDP 파생(MA_Window 등: {alias}_minus_margin/_ovl_index 등)도 유지.
+            # Reformatize가 {alias}_{subcol} 형태로 만든 컬럼들을 REPORT ORDER alias 접두로 보존한다.
+            derived_addp = [c for c in merged_df.columns
+                            if c not in columns_to_include_1
+                            and any(str(c).startswith(str(a) + "_") for a in columns_to_include_1)]
+            columns_to_include = columns_to_include_1 + columns_to_include_2 + pchk_keep + derived_addp
             filtered_columns = [col for col in columns_to_include if col in merged_df.columns]
-            merged_df = merged_df[filtered_columns]
+            merged_df = merged_df[list(dict.fromkeys(filtered_columns))]
 
             columns_to_exclude_1 = [col for col in merged_df.columns if 'PCHK' in col]
             columns_to_exclude_2 = ['fab_lot_id','lot_id','mask','lot_wf','root_lot_id','wafer_id','process_id','part_id','step_id','step_seq'\
@@ -688,7 +716,16 @@ if reformatter_check :
                     VIP_group_raw = VIP_group_raw.drop('PPT_ONLY', axis=1)
 
                     # VIP_group 생성 *presentation 생성용 dataframe
-                    VIP_group.index = VIP_group.index.str.replace('pass_rate_', '') 
+                    VIP_group.index = VIP_group.index.str.replace('pass_rate_', '')
+
+                    # PPT Score Board용 (lot, wafer) 분리 pivot — VIP_group과 같은 행순서, 컬럼만 lot별 분리
+                    _sb_pass = [c for c in df.columns if 'pass' in c]
+                    _sb_lw = (df[['FAB_LOT_ID', 'WAFER_ID'] + _sb_pass]
+                              .groupby(['FAB_LOT_ID', 'WAFER_ID']).mean() * 100).T
+                    _sb_lw.index = _sb_lw.index.str.replace('pass_rate_', '')
+                    _sb_lw.columns = pd.MultiIndex.from_tuples(
+                        [(str(_l), int(float(_w))) for (_l, _w) in _sb_lw.columns])
+                    VIP_group_lw = _sb_lw.reindex(VIP_group.index)   # 행=VIP_group 순서, 컬럼=(lot,wafer)
 
                     # VIP_group_HTML 생성 *VIP_group copy (HTML 카테고리 구분자는 CAT2 기준)
                     VIP_group_HTML = pd.merge(VIP_group_raw,reformatter[['CAT2','REPORT ORDER']].dropna(subset=['REPORT ORDER']).drop('REPORT ORDER',axis=1)\
@@ -712,15 +749,31 @@ if reformatter_check :
                     
                     # 1-1. Title page 투입
                     print(f'[INFO]..{vehicle}_{target_lot_id}_{target_step_merged}_HOL_AUTO_REPORT 저화질 버전 제작 시작..\n')
-                    prs_low_qual = make_title_page(template_ppt_path, vehicle, target_lot_id, target_step_merged)
+                    prs_low_qual = make_title_page(vehicle, target_lot_id, target_step_merged)
 
-                    # 1-2. Scoreboard 투입
-                    prs_low_qual = insert_score_board(VIP_group, prs_low_qual, target_lot_id, ' / '.join([target_lot_id, target_step_merged]), spec_data=spec_data, config=GLOBAL_CONFIG)
+                    # 1-2. Scoreboard 투입 (lot_id 분리 — HTML과 동일하게 (lot,wafer) 컬럼)
+                    prs_low_qual = insert_score_board(VIP_group_lw, prs_low_qual, target_lot_id, ' / '.join([target_lot_id, target_step_merged]), spec_data=spec_data, config=GLOBAL_CONFIG)
 
                     # 1-3. BoxPlot 투입 - 메일링 버전
                     description_image_info_dict_low_qual = calcaulate_description_image_info_dict(description_ppt_path, img_quality = 20)
                     prs_low_qual, metrics_dict = insert_plots(merged_df, prs_low_qual, description_image_info_dict_low_qual, target_lot_id, target_root_lot_id, target_DC_step, target_DC_step_id, spec_data, img_quality = 12, ref=False, reformatter=reformatter, dpi=GLOBAL_CONFIG.ppt_chart_dpi)
-                
+
+                    # 1-3b. 코드 통계 분석(findings) — HTML [0]와 PPT 상세 페이지에 공용 사용
+                    code_findings = []
+                    try:
+                        code_findings = analyze_commonality(
+                            merged_df, target_lot_id, metrics_dict, spec_data,
+                            main_vehicle=vehicle, config=GLOBAL_CONFIG, reformatter=reformatter)
+                        print(f"[INFO] commonality 분석: {len(code_findings)}건 finding")
+                    except Exception as ce:
+                        print(f"[WARN] commonality 분석 스킵 (오류): {ce}")
+                    # Score Board 바로 뒤에 'Anomaly 상세(통계)' 페이지 삽입
+                    try:
+                        _sb_pages = (len(VIP_group) - 1) // 30 + 1
+                        prs_low_qual = insert_findings_page(prs_low_qual, code_findings, after_index=1 + _sb_pages)
+                    except Exception as fe:
+                        print(f"[WARN] Anomaly 상세 페이지 삽입 스킵: {fe}")
+
                     # 1-4. Save ppt - 메일링 버전
                     if not os.path.exists(low_qual_ppt_save_path):
                         os.makedirs(low_qual_ppt_save_path)
@@ -814,106 +867,170 @@ if reformatter_check :
                     
                     
                     # HTML 생성부분 - Mail body
-                    VIP_group_HTML.columns = ['#' + str(col) for col in VIP_group_HTML.columns]
+                    # ===== Score Board 컬럼을 (FAB_LOT_ID, WAFER_ID)로 구성 =====
+                    # 같은 root_lot_id의 형제 lot을 wafer 평균으로 합치지 않고 lot별로 분리 표시.
+                    _pass_cols = [c for c in df.columns if 'pass' in c]
+                    _pivot_lw = (df[['FAB_LOT_ID', 'WAFER_ID'] + _pass_cols]
+                                 .groupby(['FAB_LOT_ID', 'WAFER_ID']).mean() * 100).T
+                    _pivot_lw.index = _pivot_lw.index.str.replace('pass_rate_', '')
 
-                    column_mapping = {wafer_id : (fab_lot_id, wafer_id) for fab_lot_id, wafer_id in wf_matching_list}
-                    # print('column_mapping :', column_mapping)
+                    def _waf_int(w):
+                        # wafer level 정규화 (#1.0 방지 + WF MAP 키 정합)
+                        try:
+                            return int(float(w))
+                        except (ValueError, TypeError):
+                            return w
+                    _pivot_lw.columns = pd.MultiIndex.from_tuples(
+                        [(str(l), _waf_int(w)) for (l, w) in _pivot_lw.columns])
 
-                    # 첫번째 값이 동일한 항목들을 뭉치기
-                    grouped_values = {}
-                    for key, value in column_mapping.items():
-                        first_value = value[0]
-                        if first_value not in grouped_values:
-                            grouped_values[first_value] = []
-                        grouped_values[first_value].append(key)
-                    print("grouped_values : ",grouped_values)
-                    
-                    sorted_keys = []
-                    for key_list in grouped_values.values():
-                        sorted_keys.extend(sorted(key_list, key=lambda x: int(x[1:])))
-                    if '#0' in sorted_keys:
-                        sorted_keys.insert(0, sorted_keys.pop(sorted_keys.index('#0')))
-                    print("sorted_keys : ",sorted_keys)
+                    # VIP_group_HTML의 (CATEGORY, ITEM_ID) 행 순서/카테고리는 유지하고 데이터만 교체
+                    _items_order = list(VIP_group_HTML.index.get_level_values('ITEM_ID'))
+                    _data_lw = _pivot_lw.reindex(_items_order)
+                    _data_lw.index = VIP_group_HTML.index
+                    VIP_group_HTML = _data_lw
 
-                    VIP_group_HTML = VIP_group_HTML[sorted_keys]
+                    # 컬럼 정렬: 1) target lot(해당 report lot_id)을 맨 왼쪽, 2) reference(wafer 0) lot, 3) 형제 lot(이름순) / lot 내 wafer 오름차순
+                    _all_cols = list(VIP_group_HTML.columns)
+                    _lots = list(dict.fromkeys([c[0] for c in _all_cols]))
+                    _ref_lots = [l for l in _lots if any((c[0] == l and c[1] == 0) for c in _all_cols)]
+
+                    def _lot_rank(l):
+                        if str(l) == str(target_lot_id):
+                            return (0, str(l))
+                        if l in _ref_lots:
+                            return (1, str(l))
+                        return (2, str(l))
+                    _lots_sorted = sorted(_lots, key=_lot_rank)
+                    _ordered_cols = []
+                    for _lot in _lots_sorted:
+                        _wafs = sorted([c for c in _all_cols if c[0] == _lot],
+                                       key=lambda c: (c[1] if isinstance(c[1], int) else 10 ** 9))
+                        _ordered_cols.extend(_wafs)
+                    VIP_group_HTML = VIP_group_HTML[_ordered_cols]
                     VIP_group_HTML.index.names = ['category', 'Item']
+                    print("score board lots :", _lots_sorted)
 
-                    # "우측에 빈칸있는 행 안나오게해줘" -> 하나라도 비어있는 데이터 drop
-                    VIP_group_HTML = VIP_group_HTML.dropna(how='any')
-
-                    # 컬럼 단일 레벨화 (WAFER_ID만 남김)
-                    VIP_group_HTML.columns = [col for col in VIP_group_HTML.columns]
-                    VIP_group_HTML.columns.name = ' ' # 2줄 헤더 유도를 위한 빈칸 이름 설정
+                    # 측정값이 전혀 없는 행만 제거(형제 lot 일부 미측정 셀은 회색으로 표기)
+                    VIP_group_HTML = VIP_group_HTML.dropna(how='all')
 
                     # ==================== Score Board HTML 렌더링 (Manual) ====================
                     # Pandas의 to_html()이 만드는 불안정한 멀티인덱스 태그를 방지하기 위해 HTML 태그를 한 땀 한 땀 생성
                     # - 좌측 고정열(LOT_ID/category/Item)은 클래스 기반 sticky (rowspan 사용해도 안깨짐)
                     # - category(CAT2) 연속 동일값은 rowspan으로 병합
                     sb_rows = list(VIP_group_HTML.iterrows())
-                    sb_cats = [idx[0] for idx, _ in sb_rows]
-                    # 연속 동일 category 묶음의 시작 위치 → rowspan 수 계산
+                    _wcols = list(VIP_group_HTML.columns)
+
+                    # wafer별 WF MAP (≥min_pts 측정 index만) — index 점수행 아래에 'WF MAP 행'으로, wafer 열에 정렬
+                    _wf_min = getattr(GLOBAL_CONFIG, 'scoreboard_wfmap_min_pts', 50)
+                    wfmaps_by_item = {}
+                    try:
+                        for _it in list(dict.fromkeys([idx[1] for idx, _ in sb_rows])):
+                            _dir = 'BOTH'
+                            _slow = _shigh = None
+                            try:
+                                if _it in spec_data.index:
+                                    if 'REPORT DIRECTION' in spec_data.columns:
+                                        _dv = str(spec_data.loc[_it, 'REPORT DIRECTION']).strip().upper()
+                                        if _dv in ('UPPER', 'LOWER', 'BOTH'):
+                                            _dir = _dv
+                                    if 'SPECLOW' in spec_data.columns:
+                                        _v = spec_data.loc[_it, 'SPECLOW']; _slow = None if pd.isna(_v) else _v
+                                    if 'SPECHIGH' in spec_data.columns:
+                                        _v = spec_data.loc[_it, 'SPECHIGH']; _shigh = None if pd.isna(_v) else _v
+                            except Exception:
+                                pass
+                            _mp = render_wafer_wfmaps_b64(df, _it, min_pts=_wf_min,
+                                                          lot_prefix=target_root_lot_id, direction=_dir,
+                                                          spec_low=_slow, spec_high=_shigh, by_lot=True)
+                            if _mp:
+                                wfmaps_by_item[_it] = _mp
+                        print(f"[INFO] Score Board wafer WF MAP: {len(wfmaps_by_item)}개 index (>={_wf_min}pt)")
+                    except Exception as _we:
+                        print(f"[WARN] Score Board WF MAP 스킵: {_we}")
+
+                    # 렌더 시퀀스: 각 index 점수행 뒤에 (WF MAP 있으면) 'wfmap' 행 추가
+                    render_seq = []   # (kind, cat, item, payload)
+                    for idx, row in sb_rows:
+                        cat, item = idx
+                        render_seq.append(('score', cat, item, row))
+                        if item in wfmaps_by_item:
+                            render_seq.append(('wfmap', cat, item, wfmaps_by_item[item]))
+
+                    # category 연속 묶음 rowspan (WF MAP 행 포함하여 카운트)
+                    seq_cats = [r[1] for r in render_seq]
                     cat_span = {}
                     _j = 0
-                    while _j < len(sb_cats):
+                    while _j < len(seq_cats):
                         _k = _j
-                        while _k + 1 < len(sb_cats) and sb_cats[_k + 1] == sb_cats[_j]:
+                        while _k + 1 < len(seq_cats) and seq_cats[_k + 1] == seq_cats[_j]:
                             _k += 1
                         cat_span[_j] = _k - _j + 1
                         _j = _k + 1
 
-                    sb_html = '<table class="score-board">\n'
-                    sb_html += '  <thead>\n'
-                    # 헤더 첫번째 줄 (LOT_ID는 category+Item 위에 colspan=2, 좌측 고정)
+                    # WF MAP이 있으면 wafer 열 폭을 약간만 넓혀 표시 (작게 + 여백 최소)
+                    _has_wf = len(wfmaps_by_item) > 0
+                    _wf_w = 48
+                    sb_html = ''
+                    if _has_wf:
+                        sb_html += (f'<style>.score-board td.sb-val, .score-board th.sb-waf'
+                                    f'{{width:{_wf_w}px !important; min-width:{_wf_w}px !important; '
+                                    f'max-width:{_wf_w}px !important;}}</style>\n')
+                    # lot 그룹(헤더 colspan용): _wcols 순서대로 같은 lot을 묶음
+                    _lot_groups = []   # [(lot, [col, ...]), ...]
+                    for _c in _wcols:
+                        if _lot_groups and _lot_groups[-1][0] == _c[0]:
+                            _lot_groups[-1][1].append(_c)
+                        else:
+                            _lot_groups.append((_c[0], [_c]))
+
+                    sb_html += '<table class="score-board">\n  <thead>\n'
                     sb_html += '    <tr>\n'
                     sb_html += f'      <th colspan="2" class="sb-frozen-lot" style="text-align:center; background-color:#d9e1f2;">LOT_ID</th>\n'
-                    sb_html += f'      <th colspan="{len(VIP_group_HTML.columns)}" style="text-align:center; background-color:#f0f0f0;">{target_lot_id}</th>\n'
+                    # root_lot_id가 같은 형제 lot을 각각 헤더로 분리 (target lot은 강조)
+                    for _lot, _cols in _lot_groups:
+                        _is_tgt = (str(_lot) == str(target_lot_id))
+                        _bg = '#dbe7c8' if _is_tgt else '#f0f0f0'
+                        _fw = 'bold' if _is_tgt else 'normal'
+                        sb_html += (f'      <th colspan="{len(_cols)}" style="text-align:center; '
+                                    f'background-color:{_bg}; font-weight:{_fw};">{_lot}</th>\n')
                     sb_html += '    </tr>\n'
-                    # 헤더 두번째 줄
                     sb_html += '    <tr>\n'
                     sb_html += '      <th class="sb-cat" style="background-color:#d9e1f2;">category</th>\n'
                     sb_html += '      <th class="sb-item" style="background-color:#d9e1f2;">Item</th>\n'
-                    for col in VIP_group_HTML.columns:
-                        sb_html += f'      <th class="sb-waf" style="background-color:#f0f0f0;">{col}</th>\n'
-                    sb_html += '    </tr>\n'
-                    sb_html += '  </thead>\n'
-                    sb_html += '  <tbody>\n'
+                    for col in _wcols:
+                        sb_html += f'      <th class="sb-waf" style="background-color:#f0f0f0;">#{col[1]}</th>\n'
+                    sb_html += '    </tr>\n  </thead>\n  <tbody>\n'
 
-                    for _i, (idx, row) in enumerate(sb_rows):
-                        cat, item = idx
+                    for _i, (kind, cat, item, payload) in enumerate(render_seq):
                         sb_html += '    <tr>\n'
-                        # category 셀은 연속 동일값 묶음의 시작행에서만 rowspan으로 1회 출력 (셀 병합)
                         if _i in cat_span:
                             sb_html += f'      <td class="sb-cat row_heading" rowspan="{cat_span[_i]}" style="font-weight:bold; background-color:#ebf4ff; vertical-align:middle;">{cat}</td>\n'
-                        sb_html += f'      <td class="sb-item row_heading" style="font-weight:bold; background-color:#ebf4ff;">{item}</td>\n'
-                        for col in VIP_group_HTML.columns:
-                            val = row[col]
-                            if pd.isna(val) or val == "":
-                                sb_html += '      <td class="sb-val" style="background-color:#555555;"></td>\n'
-                            else:
-                                # Score Board 색상 임계값 (config에서 로드)
-                                _thresholds = GLOBAL_CONFIG.score_thresholds  # [100.0, 90.0, 70.0, 50.0]
-                                _colors = GLOBAL_CONFIG.score_colors
-                                bg_color = '#ffffff'
-                                color = '#000000'
-                                if val == _thresholds[0]:       # == 100
-                                    bg_color = _colors[100]['bg']
-                                    color = _colors[100]['fg']
-                                elif val >= _thresholds[1]:     # >= 90
-                                    bg_color = _colors[90]['bg']
-                                    color = _colors[90].get('fg', '#000000')
-                                elif val >= _thresholds[2]:     # >= 70
-                                    bg_color = _colors[70]['bg']
-                                    color = _colors[70].get('fg', '#000000')
-                                elif val >= _thresholds[3]:     # >= 50
-                                    bg_color = _colors[50]['bg']
-                                    color = _colors[50].get('fg', '#ffffff')
-                                else:                           # < 50
-                                    bg_color = _colors[0]['bg']
-                                    color = _colors[0].get('fg', '#ffffff')
-                                sb_html += f'      <td class="sb-val" style="background-color:{bg_color}; color:{color}; font-weight:bold;">{val:.1f}</td>\n'
+                        if kind == 'score':
+                            row = payload
+                            sb_html += (f'      <td class="sb-item row_heading" style="font-weight:bold; '
+                                        f'background-color:#ebf4ff;">{item}</td>\n')
+                            for col in _wcols:
+                                val = row[col]
+                                if pd.isna(val) or val == "":
+                                    sb_html += f'      <td class="sb-val" style="background-color:{GLOBAL_CONFIG.score_color_na};"></td>\n'
+                                else:
+                                    # 연속 색상(PPT와 동일), ITEM별 스케일 override 지원
+                                    bg_color, color = GLOBAL_CONFIG.score_color(val, item)
+                                    sb_html += f'      <td class="sb-val" style="background-color:{bg_color}; color:{color}; font-weight:bold;">{val:.1f}</td>\n'
+                        else:  # 'wfmap' 행 — wafer 열에 각 wafer의 WF MAP 정렬
+                            maps = payload
+                            sb_html += ('      <td class="sb-item row_heading" style="font-size:9px; color:#666; '
+                                        'background-color:#ebf4ff;">WF MAP</td>\n')
+                            for col in _wcols:
+                                _b = maps.get(f"{col[0]}|{col[1]}")
+                                if _b:
+                                    sb_html += (f'      <td class="sb-val" style="background-color:#ffffff; padding:0;">'
+                                                f'<img src="data:image/png;base64,{_b}" '
+                                                f'style="width:{_wf_w - 2}px; height:{_wf_w - 2}px; display:block; margin:auto;"/></td>\n')
+                                else:
+                                    sb_html += '      <td class="sb-val" style="background-color:#f4f4f4;"></td>\n'
                         sb_html += '    </tr>\n'
-                    sb_html += '  </tbody>\n'
-                    sb_html += '</table>\n'
+                    sb_html += '  </tbody>\n</table>\n'
                     score_board_html = sb_html
 
                     # ==================== Inline Table HTML 렌더링 (Manual) ====================
@@ -970,53 +1087,169 @@ if reformatter_check :
                     et_log_styled = et_log.style.format(na_rep="").hide(axis='index')
                     lot_detail_html = et_log_styled.set_table_attributes('class="lot-detail-table"').to_html()
 
-                    # ==================== Anomaly Detection & GPT 요약 ====================
-                    # GPT 연동 기능은 My_config.py의 플래그로 ON/OFF 제어합니다.
-                    #   - GLOBAL_CONFIG.use_gpt_summary      : GPT 요약(Top 항목 선정/요약문)
-                    #   - GLOBAL_CONFIG.use_gpt_anomaly_chart: GPT 선정 항목 기반 이상차트(3x2)
-                    # False면 해당 GPT 기능 호출 자체를 하지 않고 완전히 스킵합니다.
-                    anomaly_html = ""
-                    gpt_summary_html = ""
+                    # ==================== [0] Anomaly: 코드 분석 + (선택)AI 다단계 해석 + Trend chart ====================
+                    # 코드(analyze_commonality)는 AI 유무와 무관하게 항상 동작하여 통계 Finding을 산출.
+                    # use_gpt_summary가 켜져 있고 LLM이 가능하면, 그 Finding을 입력으로 AI 다단계 해석을 곁들임.
+                    _top_n = getattr(GLOBAL_CONFIG, 'anomaly_trend_chart_top_n', 6)
+
+                    # 1) 코드 통계 분석 결과(위 1-3b에서 계산) → HTML 요약(상위 5건 + PPT 상세 참조)
+                    code_summary_html = ""
+                    try:
+                        code_summary_html = render_findings_html(code_findings)
+                    except Exception as ce:
+                        print(f"[WARN] findings 렌더 스킵 (오류): {ce}")
+
+                    # 2) Anomaly Trend chart 항목 선정 — '통계 기반 자동 분석'(code_findings) 상위와 동일.
+                    #    findings(severity 정렬)에서 항목을 순서대로 추출(콤마 분해·중복 제거),
+                    #    차트 가능한(merged_df 컬럼 + Trend PNG 존재) 항목만 최대 _top_n개.
+                    #    findings로 부족하면 metrics 우선순위(spec_out→deviation)로 보충.
+                    def _has_png(_it):
+                        _safe = re.sub(r'[\\/:*?"<>|]', '_', str(_it))
+                        return os.path.exists(f"RUN/TEMP/{_safe}.png")
                     top_item_names = []
+                    _seen = set()
+                    for _f in (code_findings or []):
+                        for _it in str(_f.get('item', '')).split(','):
+                            _it = _it.strip()
+                            if (not _it) or (_it in _seen) or (_it not in merged_df.columns) or (not _has_png(_it)):
+                                continue
+                            top_item_names.append(_it); _seen.add(_it)
+                            if len(top_item_names) >= _top_n: break
+                        if len(top_item_names) >= _top_n: break
+                    if len(top_item_names) < _top_n and metrics_dict:
+                        _sigma = getattr(GLOBAL_CONFIG, 'anomaly_deviation_sigma', 1.5)
+                        _anom = [m for m in metrics_dict.values()
+                                 if m.get('spec_out_count', 0) > 0 or m.get('deviation', 0.0) > _sigma]
+                        _anom.sort(key=lambda m: (m.get('spec_out_count', 0), m.get('deviation', 0.0)), reverse=True)
+                        for m in _anom:
+                            _it = m['item']
+                            if (_it in _seen) or (_it not in merged_df.columns) or (not _has_png(_it)):
+                                continue
+                            top_item_names.append(_it); _seen.add(_it)
+                            if len(top_item_names) >= _top_n: break
+                    print(f"[INFO] Anomaly Trend chart 항목 {len(top_item_names)}개 선정(통계 자동분석 상위): {top_item_names}")
 
-                    # 1. GPT OSS 120B 우회 호출 (Top 6 선정 및 요약)
-                    if GLOBAL_CONFIG.use_gpt_summary:
-                        try:
-                            gpt_summary_html, top_item_names = generate_report_summary(metrics_dict)
-                        except Exception as ae:
-                            print(f"[WARN] GPT 요약 스킵 (오류): {ae}")
-                    else:
-                        print("[INFO] use_gpt_summary=False → GPT 요약 스킵")
-
-                    # 2. HTML 3x2 Grid 이상차트 생성 (GPT가 선정한 top_item_names 기반)
-                    if GLOBAL_CONFIG.use_gpt_anomaly_chart:
+                    # 3) Anomaly Trend chart 렌더 — 이상(SPEC OUT)/주의(WARNING) 2그룹.
+                    #    - 이상: spec-out 항목을 1행씩, 좌=Trend / 우=spec-out WF MAP(최대한 많이, target lot 전량 우선)
+                    #    - 주의: 나머지 항목을 한 행에 가로로 채워 wrap
+                    anomaly_html = ""
+                    if GLOBAL_CONFIG.show_anomaly_trend_chart:
                         try:
                             import base64
                             if top_item_names:
-                                anomaly_html = '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">'
+                                _wf_on = getattr(GLOBAL_CONFIG, 'anomaly_wfmap_specout', True)
+                                _wf_max = getattr(GLOBAL_CONFIG, 'anomaly_wfmap_max_count', 25)
+
+                                def _trend_block(item, is_spec, img_b64):
+                                    if is_spec:
+                                        _stat, _bg, _fg = 'SPEC OUT', '#d32f2f', '#ffffff'
+                                    else:
+                                        _stat, _bg, _fg = 'WARNING', '#f9a825', '#1a1a1a'
+                                    _bstyle = ('font-size:10px; font-weight:bold; padding:2px 7px; '
+                                               'border-radius:3px; box-shadow:0 1px 2px rgba(0,0,0,.35);')
+                                    _sticker = f'<span style="background:{_bg}; color:{_fg}; {_bstyle}">{_stat}</span>'
+                                    return (
+                                        '<div style="position:relative; flex:0 0 380px;">'
+                                        f'<div style="position:absolute; top:6px; left:6px; z-index:2;">{_sticker}</div>'
+                                        f'<img src="data:image/png;base64,{img_b64}" style="display:block; width:100%; border:1px solid #ddd;"/>'
+                                        '</div>')
+
+                                def _spec_bounds(item):
+                                    _slow = _shigh = None
+                                    if item in spec_data.index:
+                                        if 'SPECLOW' in spec_data.columns:
+                                            _v = spec_data.loc[item, 'SPECLOW']; _slow = None if pd.isna(_v) else _v
+                                        if 'SPECHIGH' in spec_data.columns:
+                                            _v = spec_data.loc[item, 'SPECHIGH']; _shigh = None if pd.isna(_v) else _v
+                                        if 'REPORT DIRECTION' in spec_data.columns:
+                                            _dv = str(spec_data.loc[item, 'REPORT DIRECTION']).strip().upper()
+                                            if _dv == 'UPPER': _slow = None
+                                            elif _dv == 'LOWER': _shigh = None
+                                    return _slow, _shigh
+
+                                _tab = ('display:inline-block; background:#2f3a4a; color:#fff; font-size:12px; '
+                                        'font-weight:bold; padding:3px 14px; border-radius:4px 4px 0 0; margin:8px 0 4px;')
+                                _spec_rows, _warn_blocks = [], []
                                 for item in top_item_names:
-                                    # 저장 시와 동일한 파일명 안전화('/' 등 → '_')
                                     safe_item = re.sub(r'[\\/:*?"<>|]', '_', str(item))
                                     img_path = f"RUN/TEMP/{safe_item}.png"
-                                    if os.path.exists(img_path):
-                                        with open(img_path, "rb") as f:
-                                            img_b64 = base64.b64encode(f.read()).decode('utf-8')
-                                        anomaly_html += f'<div style="text-align:center;"><img src="data:image/png;base64,{img_b64}" style="max-width:100%; border:1px solid #ddd;"/><br><b>{item}</b></div>'
-                                anomaly_html += '</div>'
+                                    if not os.path.exists(img_path):
+                                        continue
+                                    with open(img_path, "rb") as f:
+                                        img_b64 = base64.b64encode(f.read()).decode('utf-8')
+                                    _is_spec = metrics_dict.get(item, {}).get('spec_out_count', 0) > 0
+                                    if not _is_spec:
+                                        _warn_blocks.append(_trend_block(item, False, img_b64))
+                                        continue
+                                    # 이상(SPEC OUT) — 우측에 spec-out WF MAP 최대한 많이
+                                    _wf_block = ''
+                                    if _wf_on:
+                                        try:
+                                            _slow, _shigh = _spec_bounds(item)
+                                            _wfmaps = render_specout_wfmaps_b64(
+                                                merged_df, item, spec_low=_slow, spec_high=_shigh,
+                                                target_lot=target_lot_id, max_maps=_wf_max)
+                                            if _wfmaps:
+                                                _cells = ''
+                                                for _lab, _b in _wfmaps:
+                                                    _cells += (
+                                                        '<div style="text-align:center;">'
+                                                        f'<img src="data:image/png;base64,{_b}" '
+                                                        'style="width:58px; height:58px; display:block; margin:0 auto; border:1px solid #1f4e79;"/>'
+                                                        f'<div style="font-size:8px; color:#555; white-space:nowrap;">{_lab}</div>'
+                                                        '</div>')
+                                                _wf_block = (
+                                                    '<div style="flex:1; display:grid; grid-template-columns: repeat(auto-fill, 64px); '
+                                                    f'gap:4px; align-content:start;">{_cells}</div>')
+                                        except Exception as _we:
+                                            print(f"[WARN] spec-out WF MAP 스킵 ({item}): {_we}")
+                                    _spec_rows.append(
+                                        '<div style="display:flex; align-items:flex-start; gap:12px; margin-bottom:8px;">'
+                                        f'{_trend_block(item, True, img_b64)}{_wf_block}</div>')
+
+                                _parts = []
+                                if _spec_rows:
+                                    _parts.append(f'<div style="{_tab}"><span style="color:#ff5a5a;">●</span> 이상 <span style="color:#9aa6b5;">|</span></div>')
+                                    _parts.extend(_spec_rows)
+                                if _warn_blocks:
+                                    _parts.append(f'<div style="{_tab}"><span style="color:#ffc23d;">●</span> 주의 <span style="color:#9aa6b5;">|</span></div>')
+                                    _parts.append(
+                                        '<div style="display:flex; flex-wrap:wrap; align-items:flex-start; gap:8px;">'
+                                        f'{"".join(_warn_blocks)}</div>')
+                                anomaly_html = ''.join(_parts) if _parts else '<p>이상항목 없음</p>'
                             else:
                                 anomaly_html = '<p>이상항목 없음</p>'
                         except Exception as ae:
-                            print(f"[WARN] 이상차트 생성 스킵 (오류): {ae}")
+                            print(f"[WARN] 이상 Trend chart 생성 스킵 (오류): {ae}")
                     else:
-                        print("[INFO] use_gpt_anomaly_chart=False → 이상차트 스킵")
+                        print("[INFO] show_anomaly_trend_chart=False → 이상 Trend chart 스킵")
+
+                    # 4) (선택) AI 다단계 해석 — code_findings를 입력으로. 실패/미사용 시 None → 코드 분석만 표시
+                    ai_html = None
+                    if (GLOBAL_CONFIG.use_gpt_summary and getattr(GLOBAL_CONFIG, 'use_gpt_multistep', True)
+                            and code_findings and _LLM_FN is not None):
+                        try:
+                            ai_html = interpret_with_ai(
+                                code_findings, metrics_dict, _ANOMALY_KNOWLEDGE_TEXT,
+                                _LLM_FN, config=GLOBAL_CONFIG, target_lot_id=target_lot_id)
+                            print("[INFO] AI 다단계 해석 적용" if ai_html else "[INFO] AI 다단계 해석 결과 없음")
+                        except Exception as ae:
+                            print(f"[WARN] AI 다단계 해석 스킵 (오류): {ae}")
+                    elif not GLOBAL_CONFIG.use_gpt_summary:
+                        print("[INFO] use_gpt_summary=False → AI 해석 스킵 (코드 분석만)")
 
                     # ==================== HTML 조립 ====================
                     sub_title = f'{target_lot_id} / {target_step_merged}'
                     html_content = html_code.replace('sub_title', sub_title)
 
+                    # [0] 섹션 = (AI 다단계 해석 있으면 상단) + 코드 자동 분석(통계 Finding) + Trend chart 그리드
+                    _ai_block = (ai_html + '<hr style="border:none;border-top:1px solid #eee;margin:8px 0;">') if ai_html else ''
+                    _chart_sub = ('<div class="section-title" style="font-size:13px; margin-top:14px;">'
+                                  'Anomaly Trend Chart</div>')
                     html_content = html_content.replace(
                         '<div id="target0"></div>',
-                        f'<div id="target0"><div class="section-title">■ [0] Anomaly Summary</div>{gpt_summary_html}<br>{anomaly_html}</div>'
+                        f'<div id="target0"><div class="section-title">■ [0] Anomaly Summary</div>'
+                        f'{_ai_block}{code_summary_html}{_chart_sub}{anomaly_html}</div>'
                     )
                     html_content = html_content.replace(
                         '<div id="target1"></div>',

@@ -16,6 +16,351 @@ from dotenv import load_dotenv
 import os
 
 
+# ============================================================
+# 리포트 HTML 템플릿 (내장)
+# ------------------------------------------------------------
+# 과거 templates/report.html 파일로 분리되어 있었으나, 사내 이식 시
+# 코어 4개 파일(Main.py / My_config.py / My_Function.py / anomaly_engine.py)
+# 외 추가 파일이 따라가지 않도록 이 모듈 안에 직접 내장합니다.
+# {{node}} / {{vehicle}} / {{system_admin}} 플레이스홀더는
+# _generate_dependent_vars()에서 vehicle별 값으로 치환됩니다.
+# Main.py는 'sub_title' 및 <div id="targetN"></div> 영역을 추가 치환합니다.
+# ============================================================
+_REPORT_HTML_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>[{{node}} HOL] {{vehicle}} Auto Report</title>
+    <style>
+        /* ============================================================
+           Auto Report HTML Template – Engineer Report Style
+           ============================================================
+           이 CSS는 전문 엔지니어 리포트 스타일을 정의합니다.
+           Color scheme: Navy (#003366) primary, dark borders (#2c2c2c)
+           ============================================================ */
+
+        /* ── 기본 스타일 (Base styles) ── */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Arial, '맑은 고딕', Malgun Gothic, sans-serif;
+            font-size: 12px;
+            background-color: #ffffff;
+            color: #1a1a1a;
+            line-height: 1.5;
+            max-width: 100%;
+            margin: 0;
+            padding: 16px 24px;
+        }
+
+        /* ── 제목 스타일 (Heading styles) ── */
+        h1, h2, h3, h4 {
+            color: #003366;
+            margin-bottom: 4px;
+        }
+
+        h2 {
+            font-size: 18px;
+            border-bottom: 2px solid #003366;
+            padding-bottom: 6px;
+            margin-top: 0;
+            margin-bottom: 2px;
+        }
+
+        /* ── 링크 스타일 (Link styles) ── */
+        a {
+            color: #0055aa;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+            color: #003366;
+        }
+
+        /* ── 섹션 제목 (Section titles) ── */
+        .section-title {
+            border-left: 4px solid #003366;
+            padding-left: 8px;
+            font-size: 15px;
+            font-weight: bold;
+            color: #003366;
+            margin-top: 20px;
+            margin-bottom: 6px;
+        }
+
+        /* ── 정보 블록 (Info block) ── */
+        .info-block {
+            margin-bottom: 12px;
+            font-size: 12px;
+        }
+
+        .info-block strong {
+            font-size: 14px;
+            color: #003366;
+        }
+
+        .info-block span {
+            font-size: 12px;
+        }
+
+        .subtitle {
+            font-size: 13px;
+            font-weight: bold;
+            color: #555555;
+            margin-bottom: 10px;
+        }
+
+        /* ── 목차 (Table of contents) ── */
+        .toc {
+            margin-bottom: 16px;
+        }
+
+        .toc a {
+            display: inline-block;
+            margin: 1px 0;
+            font-size: 12px;
+        }
+
+        /* ============================================================
+           테이블 스타일 (Table styles)
+           ============================================================ */
+
+        /* ── 테이블 컨테이너 – 스크롤 및 틀고정 (Scrollable container) ── */
+        .table-container {
+            overflow-x: auto;
+            overflow-y: auto;
+            max-height: 500px;
+            width: max-content;
+            max-width: 100%;
+            margin-top: 5px;
+            margin-bottom: 15px;
+        }
+
+        /* ── 기본 테이블 (Base table) ── */
+        table {
+            border-collapse: collapse;
+            font-size: 11px;
+            width: max-content;
+        }
+
+        table, th, td {
+            border: 1px solid #2c2c2c;
+        }
+
+        /* ── 테이블 헤더 – 고정 헤더 (Sticky headers) ── */
+        thead th {
+            position: sticky;
+            top: 0;
+            background: #f5f6fa;
+            color: #1a1a1a;
+            text-align: center;
+            padding: 5px 8px;
+            font-weight: bold;
+            white-space: nowrap;
+            z-index: 10;
+            border-bottom: 2px solid #003366;
+        }
+
+        /* 멀티인덱스 두번째 헤더행 겹침 방지 */
+        thead tr:nth-child(2) th {
+            top: 25px;
+            z-index: 9;
+        }
+
+        /* ── 셀 스타일 (Cell styles) ── */
+        td {
+            text-align: center;
+            padding: 4px 6px;
+            white-space: nowrap;
+        }
+
+        /* ── 교대 행 색상 (Alternating row colors) ── */
+        tbody tr:nth-child(even) {
+            background: #fafbfc;
+        }
+
+        tbody tr:hover {
+            background: #eef2f7;
+        }
+
+        /* ============================================================
+           Score Board 테이블 (Score board table)
+           좌측 고정열: LOT_ID / category / Item
+           (클래스 기반 sticky — category 셀 rowspan 병합에도 안 깨짐)
+           ============================================================ */
+        /* category (가장 왼쪽 고정열) */
+        .score-board th.sb-cat, .score-board td.sb-cat {
+            position: sticky;
+            left: 0;
+            z-index: 6;
+            width: 64px; min-width: 64px; max-width: 64px;
+            background-color: #ebf4ff;
+        }
+        /* Item (두번째 고정열, category 폭 64px 만큼 오프셋) */
+        .score-board th.sb-item, .score-board td.sb-item {
+            position: sticky;
+            left: 64px;
+            z-index: 6;
+            width: 86px; min-width: 86px; max-width: 86px;
+            background-color: #ebf4ff;
+        }
+        /* LOT_ID 헤더 (category+Item 위 colspan=2, 좌측 상단 코너 고정) */
+        .score-board th.sb-frozen-lot {
+            position: sticky;
+            left: 0;
+            z-index: 12;
+            width: 150px; min-width: 150px; max-width: 150px;
+            text-align: center;
+        }
+        /* 헤더의 고정열 셀은 top(thead) + left 동시 고정(코너) → z-index 상향 */
+        .score-board thead th.sb-cat,
+        .score-board thead th.sb-item {
+            z-index: 11;
+        }
+        /* wafer 열: 폭 최소화 → 풀스크린에서 25개까지 한 화면에 표시 */
+        .score-board th.sb-waf, .score-board td.sb-val {
+            width: 34px; min-width: 34px; max-width: 34px;
+            padding: 2px 1px;
+            font-size: 10px;
+            white-space: nowrap;
+        }
+        table.score-board th.row_heading,
+        table.score-board td.row_heading {
+            text-align: center !important;
+        }
+
+        /* ============================================================
+           Inline 테이블 (Inline table)
+           ============================================================ */
+        table.inline-table th.row_heading {
+            text-align: left !important;
+            background-color: #e2efda !important;
+        }
+
+        /* ============================================================
+           Lot Detail 테이블 (Lot detail table)
+           ============================================================ */
+        table.lot-detail {
+            font-size: 10px;
+            width: max-content;
+        }
+
+        table.lot-detail thead th {
+            background: #e8edf3;
+            font-size: 10px;
+            padding: 3px 5px;
+        }
+
+        table.lot-detail td {
+            padding: 2px 5px;
+        }
+
+        /* ============================================================
+           구분선 (Divider)
+           ============================================================ */
+        hr {
+            border: none;
+            border-top: 1px solid #cccccc;
+            margin: 16px 0;
+        }
+
+        /* ============================================================
+           인쇄 미디어 쿼리 (Print media query)
+           ============================================================ */
+        @media print {
+            body {
+                max-width: 100%;
+                padding: 10px;
+                font-size: 10px;
+            }
+
+            .table-container {
+                max-height: none;
+                overflow: visible;
+            }
+
+            thead th {
+                position: static;
+            }
+
+            .score-board th.sb-cat, .score-board td.sb-cat,
+            .score-board th.sb-item, .score-board td.sb-item,
+            .score-board th.sb-frozen-lot {
+                position: static;
+            }
+
+            tbody tr:nth-child(even) {
+                background: #f5f5f5 !important;
+            }
+
+            a {
+                color: #000000;
+                text-decoration: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- ============================================================
+         Header – 리포트 제목 및 부제
+         ============================================================ -->
+    <div id="top"></div>
+    <h2>[{{node}} HOL] {{vehicle}} sub_title</h2>
+    <div class="subtitle">&nbsp; Python-based automated system providing new DC results, charts</div>
+
+    <!-- ============================================================
+         공지사항 (Announcements)
+         ============================================================ -->
+    <div class="info-block">
+        <strong>■ 공지 사항</strong><br>
+        <span>▷ Python 기반의 새로운 {{node}} {{vehicle}} HOL DC 측정 결과 자동 메일 발송 시스템 입니다.</span><br>
+        <strong style="color:#0055aa; font-size:12px;">▷ 메일 자동 분류는 아래 조건으로 설정하면 됩니다:</strong><br>
+        <span>&nbsp;&nbsp;&nbsp;(1) 보낸 사람 : {{system_admin}}<br>
+        &nbsp;&nbsp;&nbsp;(2) 메일 제목 : 다음 키워드를 포함할 때 - [HOL AUTO REPORT]</span>
+    </div>
+
+    <!-- ============================================================
+         문의 및 요청사항 (Contact & Requests)
+         ============================================================ -->
+    <div class="info-block">
+        <strong>■ 문의 및 요청사항</strong><br>
+        <span>▷ 수신처 추가 및 시스템 문의 : {{system_admin}}</span><br>
+        <span>▷ Lot Report Archive : <a href="https://go/pa-web">DX Web System Link</a></span>
+    </div>
+
+    <!-- ============================================================
+         Contents – 목차 (Table of Contents)
+         ============================================================ -->
+    <div class="info-block toc">
+        <strong>■ Contents</strong><br>
+        <span>&nbsp; <a href="#target0">[0] Anomaly Trend Chart</a></span><br>
+        <span>&nbsp; <a href="#target1">[1] Score Board</a></span><br>
+        <span>&nbsp; <a href="#target2">[2] Inline Table</a></span><br>
+        <span>&nbsp; <a href="#target3">[3] 최근 DC측정자재 상세</a></span>
+    </div>
+
+    <hr>
+
+    <!-- ============================================================
+         Section Placeholders (동적 콘텐츠 삽입 영역)
+         Main.py에서 각 target div 아래에 콘텐츠를 삽입합니다.
+         ============================================================ -->
+    <div id="target0"></div>
+    <div id="target1"></div>
+    <div id="target2"></div>
+    <div id="target3"></div>
+
+</body>
+</html>
+"""
+
+
 class Config:
     """Auto Report 설정 관리 클래스 (Configuration manager class).
 
@@ -107,12 +452,12 @@ class Config:
         # 좌표 데이터 파일 경로 (FAB 파일과 동일)
         self.coordinate_file_path = os.path.join(
             self.base_path, 'SF3_Data_Extractor_Input_File_v0.xlsx')
-        # PPT 템플릿 파일 경로
-        self.template_ppt_path = os.path.join(
-            self.base_path, 'HOL_Auto_Report_Template.pptx')
         # PPT 설명 문서 경로
         self.description_ppt_path = os.path.join(
             self.base_path, 'HOL_Auto_Report_Description.pptx')
+        # 이상 해석 지식베이스(MD) — AI 다단계 해석의 root-cause 단계가 참고
+        self.anomaly_knowledge_path = os.path.join(
+            self.base_path, 'ANOMALY_KNOWLEDGE.md')
         # 메일링 리스트 엑셀 파일 경로
         self.email_list_path = os.path.join(
             self.base_path, 'HOL_Auto_Report_Mailing_List.xlsx')
@@ -124,20 +469,25 @@ class Config:
         self.inline_file_sheet = 'INLINE_1'     # Inline 데이터 시트명
 
         # ──────────────────────────────────────────────────────
-        # Score Board 설정 (Score board thresholds & colors)
-        # 점수 구간별 배경색/글자색을 정의합니다.
-        # score_thresholds: 내림차순 점수 경계값 리스트
-        # score_colors: 경계값별 색상 매핑 (bg=배경, fg=글자)
+        # Score Board 색상 (연속 보간 / continuous) — PPT·HTML 공통
+        #   score_color_scale: [(점수, '#hex'), ...] 오름차순 제어점. 사이 값은 RGB 선형보간.
+        #   글자색은 배경 밝기로 자동(밝으면 검정/어두우면 흰색).
+        #   score_color_scale_by_item: ITEM(ALIAS)별 커스텀 스케일(없으면 기본 사용).
+        #     예) 어떤 항목은 90점도 빨강, 어떤 항목은 90점이 노랑 — 항목별로 제어점만 다르게.
+        #   값→색은 GLOBAL_CONFIG.score_color(value, item)으로 산출(PPT/HTML 동일 호출).
         # ──────────────────────────────────────────────────────
-        self.score_thresholds = [100.0, 90.0, 70.0, 50.0]
+        self.score_color_scale = [
+            (0.0,   '#C00000'),   # 0점: 진빨강
+            (50.0,  '#FF0000'),   # 50:  빨강
+            (70.0,  '#FFC000'),   # 70:  주황
+            (90.0,  '#92D050'),   # 90:  연초록
+            (100.0, '#00B050'),   # 100: 초록
+        ]
+        self.score_color_na = '#555555'   # 측정 없음(N/A) 회색
 
-        self.score_colors = {
-            100: {'bg': '#00B050', 'fg': '#ffffff'},   # 100점: 초록 (green)
-            90:  {'bg': '#92D050', 'fg': '#000000'},   #  90+: 연초록 (light green)
-            70:  {'bg': '#FFC000', 'fg': '#000000'},   #  70+: 주황/노랑 (amber)
-            50:  {'bg': '#FF0000', 'fg': '#ffffff'},   #  50+: 빨강 (red)
-            0:   {'bg': '#C00000', 'fg': '#ffffff'},   #  <50: 진빨강 (dark red)
-            'na': {'bg': '#555555', 'fg': '#ffffff'},  # N/A: 회색 (gray)
+        self.score_color_scale_by_item = {
+            # 'VTH_N': [(0,'#C00000'), (90,'#FF0000'), (95,'#FFC000'), (100,'#00B050')],
+            # 'IDSAT_N': [(0,'#C00000'), (80,'#FFC000'), (100,'#00B050')],
         }
 
         # ──────────────────────────────────────────────────────
@@ -162,8 +512,46 @@ class Config:
         # False로 두면 해당 GPT 기능을 완전히 스킵합니다(호출 자체를 하지 않음).
         # 오프라인/사내망 외 환경이거나 GPT 미사용 시 False로 설정하세요.
         # ──────────────────────────────────────────────────────
-        self.use_gpt_summary = True        # GPT 리포트 요약(Top 항목 선정 및 요약문) 사용 여부
-        self.use_gpt_anomaly_chart = True  # GPT 선정 항목 기반 이상차트(3x2 Grid) 삽입 여부
+        self.use_gpt_summary = True        # GPT 리포트 요약(요약문) 사용 여부 (텍스트 요약에만 영향)
+        self.use_gpt_multistep = True      # AI 다단계 해석(triage→root-cause→final) 사용 (use_gpt_summary=True일 때)
+        # 이상 Trend chart([0] 섹션) 표시 여부.
+        #   - AI(GPT) 사용 여부와 무관하게 동작합니다.
+        #   - use_gpt_summary=False 이거나 GPT 호출이 실패해도,
+        #     metrics_dict 기반 코드 우선순위로 이상 Trend chart를 첨부합니다.
+        self.show_anomaly_trend_chart = True
+        self.anomaly_trend_chart_top_n = 5   # 이상 Trend chart 최대 개수(이상+주의 합산, 통계 자동분석 상위와 동일)
+        self.anomaly_deviation_sigma = 1.5   # 코드 이상판정 임계: 평균 이탈도(sigma) 초과 시 이상
+
+        # ──────────────────────────────────────────────────────
+        # Commonality / 이상 해석 엔진 (anomaly_engine.analyze_commonality)
+        # AI 없이도 코드로 동작하는 1차 자동 해석의 임계값들.
+        # 모두 이 파일에서 조정 → README "Anomaly Trend Chart 우선순위" 참고
+        # ──────────────────────────────────────────────────────
+        self.anomaly_lot_median_sigma = 2.0      # lot별 median 이상: 타랏 median 분포 대비 z 임계
+        self.anomaly_lot_dispersion_ratio = 1.5  # lot 산포 이상: 타랏 std 중앙값 대비 배수 임계
+        self.anomaly_trend_slope_sigma = 1.0     # Trend drift: (기울기*기간)/std 임계
+        self.anomaly_split_separation = 2.0      # lot내 집단 분리: |두 군 평균차|/pooled std 임계
+        self.anomaly_site_recurrence_min_lots = 2  # 동일 site spec-out 재발 최소 lot 수
+        self.anomaly_pchk_check = True           # 동일 site PCHK(reformatter SPEC) 이탈 시 측정 의심 표기
+        self.scoreboard_wfmap_min_pts = 50       # Score Board(HTML)에 wafer별 WF MAP을 넣을 최소 측정 point 수
+
+        # ── [0] Anomaly Trend Chart 우측 spec-out WF MAP ──
+        #   SPEC OUT(이상) 항목은 Trend 차트 우측에 spec-out(=flier) 칩맵을 최대한 많이 그린다.
+        #   (통과 칩=회색, spec 이탈 칩=빨강). target lot의 spec-out wafer는 '모두' 우선 표시하고
+        #   (lot 25매 전부 spec이면 25장 다 표시), 남는 칸은 다른 lot을 TKOUT_TIME 최신순으로 채운다.
+        #   anomaly_wfmap_max_count는 'target 외'를 포함한 총 표시 상한(target spec wafer는 상한과 무관하게 모두 표시).
+        self.anomaly_wfmap_specout = True        # spec-out WF MAP 표시 on/off
+        self.anomaly_wfmap_max_count = 25        # 총 표시 상한(target spec wafer는 항상 전부 표시)
+
+        # ── PPT Trend chart: 특정 항목은 site(모든 값) 대신 tkout_time 기준 집계점으로 표시 ──
+        #   {항목명(ALIAS): 'P10'} 형식. 'P10'=10퍼센타일, 'P90', 'MEDIAN'(=P50), 'MEAN' 지원.
+        #   각 측정(tkout_time=wafer 측정)별로 site 값을 1점으로 집계해 Trend에 찍는다.
+        self.trend_tkout_agg = {'MAWIN': 'P10'}
+
+        # 불량 모드(Defect Mode) 판정/조합 해석은 코드가 하지 않는다.
+        #   - 코드는 각 Index의 단일 이상(spec-out / median·std 이탈)만 산출.
+        #   - 불량 모드 우선순위 판정표는 ANOMALY_KNOWLEDGE.md('불량 모드 판정표')에서 관리하며,
+        #     AI(use_gpt_summary)가 연결된 경우에만 상단 요약에 불량 모드를 해석/표기한다.
 
         # ──────────────────────────────────────────────────────
         # PPT 차트 렌더링 설정 (Chart rendering settings for PPT)
@@ -237,6 +625,50 @@ class Config:
         self._load_env_variables()
 
     # ================================================================
+    # Score Board 색상 (연속 보간) — PPT/HTML 공통 호출
+    # ================================================================
+    @staticmethod
+    def _hex2rgb(h):
+        h = str(h).lstrip('#')
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+    @staticmethod
+    def _rgb2hex(r, g, b):
+        return '#{:02X}{:02X}{:02X}'.format(int(round(r)), int(round(g)), int(round(b)))
+
+    def score_color(self, value, item=None):
+        """점수(0~100) → (배경 hex, 글자 hex). 연속 보간. ITEM별 스케일 override 지원.
+        측정 없음/비수치는 (score_color_na, 흰색) 반환."""
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return (self.score_color_na, '#ffffff')
+        if v != v:   # NaN
+            return (self.score_color_na, '#ffffff')
+        scale = None
+        if item is not None:
+            scale = (self.score_color_scale_by_item or {}).get(item)
+        if not scale:
+            scale = self.score_color_scale
+        scale = sorted(scale, key=lambda p: p[0])
+        if v <= scale[0][0]:
+            bg = scale[0][1]
+        elif v >= scale[-1][0]:
+            bg = scale[-1][1]
+        else:
+            bg = scale[-1][1]
+            for (v0, c0), (v1, c1) in zip(scale[:-1], scale[1:]):
+                if v0 <= v <= v1:
+                    t = (v - v0) / (v1 - v0) if v1 > v0 else 0.0
+                    a, b = self._hex2rgb(c0), self._hex2rgb(c1)
+                    bg = self._rgb2hex(*(a[i] + (b[i] - a[i]) * t for i in range(3)))
+                    break
+        r, g, b = self._hex2rgb(bg)
+        lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+        fg = '#000000' if lum > 0.6 else '#ffffff'
+        return (bg, fg)
+
+    # ================================================================
     # 환경 변수 로드 (Environment variable loading)
     # ================================================================
 
@@ -299,7 +731,7 @@ class Config:
 
         다음 항목들을 생성합니다:
         - url: 메일 발송 API URL
-        - html_code: 리포트 HTML 템플릿 (templates/report.html에서 로드)
+        - html_code: 리포트 HTML 템플릿 (모듈 내장 _REPORT_HTML_TEMPLATE에서 로드)
         - 파일 시스템 경로: ROOT, DB, Report, Log 디렉토리 및 파일
         """
 
@@ -311,21 +743,14 @@ class Config:
             f"&loginUser.login={self.settings['KNOXID']}"
         )
 
-        # ── HTML 템플릿 로드 (Load HTML template from file) ──
-        # templates/report.html 파일에서 리포트 HTML을 로드하고
-        # vehicle별 플레이스홀더를 치환합니다.
-        template_path = os.path.join(self.base_path, 'templates', 'report.html')
-        if os.path.exists(template_path):
-            with open(template_path, 'r', encoding='utf-8') as f:
-                template = f.read()
-            # 플레이스홀더를 vehicle별 설정값으로 치환
-            template = template.replace('{{node}}', self.settings.get('node', ''))
-            template = template.replace('{{vehicle}}', self.settings.get('vehicle', ''))
-            template = template.replace('{{system_admin}}', self.settings.get('system_admin', ''))
-            self.generated_vars['html_code'] = template
-        else:
-            # 템플릿 파일이 없으면 빈 문자열 (fallback)
-            self.generated_vars['html_code'] = ''
+        # ── HTML 템플릿 로드 (내장 상수에서 로드) ──
+        # 외부 templates/report.html 파일 대신 모듈 내장 _REPORT_HTML_TEMPLATE를
+        # 사용하고, vehicle별 플레이스홀더를 치환합니다.
+        template = _REPORT_HTML_TEMPLATE
+        template = template.replace('{{node}}', self.settings.get('node', ''))
+        template = template.replace('{{vehicle}}', self.settings.get('vehicle', ''))
+        template = template.replace('{{system_admin}}', self.settings.get('system_admin', ''))
+        self.generated_vars['html_code'] = template
 
         # ── DB 경로 생성 (DB directory paths) ──
         # ROOT: 실행 기반 디렉토리
