@@ -68,7 +68,7 @@ def reformatter_verify(reformatter):
     1. 필수 컬럼 존재 여부 (CATEGORY, ITEMID, ALIAS, SCALE FACTOR, ABSOLUTE,
        ADDP FORM, REPORT ORDER, SPECLOW, SPECHIGH, REPORT DIRECTION).
     2. DataFrame 비어 있지 않음.
-    3. ALIAS 중복 없음 (피벗 컬럼명 충돌 방지).
+    3. ITEMID 중복 없음 (ITEMID는 유일 / ALIAS 중복은 허용).
     4. CATEGORY 값이 {'REAL', 'ADDP'} 범위 내.
     5. REAL 행은 ITEMID 보유, ADDP 행은 ADDP FORM(수식) 보유.
 
@@ -97,16 +97,17 @@ def reformatter_verify(reformatter):
         return False
 
     # 선택 컬럼(없어도 동작하나 차트 표현에 사용) — 경고만 출력
-    optional = ["col_unit", "REPORT LOG SCALE", "CAT1", "CAT2", "PPT_ONLY"]
+    optional = ["UNIT", "TARGET", "REPOR LOG SCALE", "CAT1", "CAT2", "PPT_ONLY"]
     opt_missing = [c for c in optional if c not in reformatter.columns]
     if opt_missing:
         print(f"[WARN] reformatter 선택 컬럼 누락(차트 표현 일부 제한): {opt_missing}")
 
-    # 3. ALIAS 중복 검사 (피벗 시 컬럼명 충돌 방지)
-    alias_nonnull = reformatter["ALIAS"].dropna().astype(str)
-    dup = alias_nonnull[alias_nonnull.duplicated()].unique().tolist()
-    if dup:
-        print(f"[ERROR] reformatter ALIAS가 중복되었습니다: {dup}")
+    # 3. ITEMID 중복 검사 (ITEMID는 유일해야 함 / ALIAS 중복은 허용)
+    itemid_nonnull = reformatter["ITEMID"].dropna().astype(str)
+    itemid_nonnull = itemid_nonnull[itemid_nonnull.str.strip() != ""]
+    dup_itemid = itemid_nonnull[itemid_nonnull.duplicated()].unique().tolist()
+    if dup_itemid:
+        print(f"[ERROR] reformatter ITEMID가 중복되었습니다(유일해야 함): {dup_itemid}")
         return False
 
     # 4. CATEGORY 값 검증
@@ -766,16 +767,16 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             elif direction == 'LOWER':
                 spec_high = None
 
-            # REPORT LOG SCALE: 값 축 log10 적용 여부
+            # REPOR LOG SCALE: 값 축 log10 적용 여부
             log_scale = False
-            if 'REPORT LOG SCALE' in spec_data.columns:
-                _ls = spec_data.loc[item_name, 'REPORT LOG SCALE']
+            if 'REPOR LOG SCALE' in spec_data.columns:
+                _ls = spec_data.loc[item_name, 'REPOR LOG SCALE']
                 log_scale = str(_ls).strip().lower() in ('true', '1', '1.0', 'yes')
 
-            # col_unit: 축 라벨 단위
+            # UNIT: 축 라벨 단위
             unit = ''
-            if 'col_unit' in spec_data.columns:
-                _u = str(spec_data.loc[item_name, 'col_unit']).strip()
+            if 'UNIT' in spec_data.columns:
+                _u = str(spec_data.loc[item_name, 'UNIT']).strip()
                 if _u and _u.lower() != 'nan':
                     unit = _u
             y_label = f"{item_name} [{unit}]" if unit else item_name

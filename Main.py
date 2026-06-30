@@ -8,7 +8,14 @@ from datetime import datetime, timedelta, date
 import warnings
 
 # ----- 서드파티
-from gpt_oss_client import generate_report_summary
+try:
+    from gpt_oss_client import generate_report_summary
+except ImportError:
+    # gpt_oss_client는 사내 전용 모듈. 없는 환경(로컬/오프라인)에서는
+    # GPT 요약을 건너뛰도록 빈 결과를 반환하는 폴백을 사용합니다.
+    def generate_report_summary(metrics_dict):
+        print("[WARN] gpt_oss_client 미설치 - GPT 요약 비활성화 (빈 요약 반환)")
+        return "", []
 try:
     import boto3  # S3 업로드 전용 (사내 환경). 로컬/오프라인에서는 없을 수 있음 → graceful skip
 except ImportError:

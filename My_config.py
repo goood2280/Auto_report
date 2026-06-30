@@ -212,7 +212,17 @@ class Config:
         self.env = {}               # .env 환경 변수 저장소
         self.settings = {}          # YAML에서 로드된 원본 설정 (per-vehicle)
         self.generated_vars = {}    # 종속 변수 저장 (경로, HTML 등)
-        self.dc_dict = {}           # step_id → DC step 역매핑 (YAML에서 생성)
+
+        # ── DC Step 매핑 (코드에서 직접 관리, YAML 의존 없음) ──
+        # dc_step_to_ids: {DC layer: [step_id, ...]} 형태로 코드에서 직접 선언합니다.
+        # 엔지니어가 이 dict를 직접 수정하여 DC layer ↔ step_id 매핑을 관리합니다.
+        self.dc_step_to_ids = {'MFDC': ['test']}
+        # dc_dict: 위 매핑으로부터 생성한 step_id → DC layer 역매핑
+        self.dc_dict = {
+            sid: dc
+            for dc, sids in self.dc_step_to_ids.items()
+            for sid in sids
+        }
 
         # .env 파일에서 환경 변수 로드
         self._load_env_variables()
@@ -264,15 +274,8 @@ class Config:
         # 원본 설정 저장 (Store raw YAML settings)
         self.settings = config_data[item_name]
 
-        # ── dc_step_to_ids → dc_dict 역매핑 생성 ──
-        # dc_step_to_ids(DC layer → step_id 목록)로부터 step_id → DC layer
-        # 역매핑(dc_dict)을 생성합니다. 예: {'MFDC': ['test']} → {'test': 'MFDC'}
-        dc_step_to_ids = self.settings.get('dc_step_to_ids', {}) or {}
-        self.dc_dict = {
-            sid: dc
-            for dc, sids in dc_step_to_ids.items()
-            for sid in sids
-        }
+        # NOTE: dc_step_to_ids / dc_dict는 __init__에서 코드로 직접 선언합니다.
+        #       (YAML 의존 없음)
 
         # 종속 변수 생성 (Generate dependent variables)
         self._generate_dependent_vars()
@@ -381,7 +384,7 @@ class Config:
 
     def get_step_ids_from_dc_step(self, dc_step, default=None):
         """DC step 이름으로부터 해당하는 step_id 목록을 조회합니다.
-        (Get list of step_ids for a given DC step from YAML settings.)
+        (Get list of step_ids for a given DC step from self.dc_step_to_ids.)
 
         Args:
             dc_step (str): DC step 이름 (예: 'M1DC')
@@ -390,8 +393,7 @@ class Config:
         Returns:
             list or default: step_id 리스트 또는 기본값
         """
-        dc_step_to_ids = self.settings.get('dc_step_to_ids', {})
-        return dc_step_to_ids.get(dc_step, default)
+        return self.dc_step_to_ids.get(dc_step, default)
 
     # ================================================================
     # 범용 값 조회 (General value lookup)
