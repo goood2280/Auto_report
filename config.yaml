@@ -1,5 +1,11 @@
 vehicle_A:
   vehicle : vehicle_A
+  # ── DC Step 매핑 (step_id → DC layer) ──
+  # My_config.py가 이 항목으로부터 역매핑(dc_dict)을 자동 생성합니다.
+  # NOTE: 코드가 실제로 로드하는 활성 설정은 reformatter/config.yaml 입니다.
+  #       두 파일을 동일하게 유지하세요.
+  dc_step_to_ids:
+    MFDC: ['test']
   process_id : ['proc']
   line_id : ['line']
   setting_stepseq : ['%%']
@@ -16,7 +22,6 @@ vehicle_A:
   loop_time_sleep_time : 1200 
   test_mode : False
   DB_Setting_mode : False
-  high_qual_ppt_mode : False
   KNOXID : simyung.woo
   user_name : simyung.woo
   email_receiver : ['POWER_USER']
@@ -26,4 +31,3 @@ vehicle_A:
   report_making : True
   ptype_lot_turnoff : False
   specific_dc_layer : False
-  ref_turnoff : True

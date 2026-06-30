@@ -4,11 +4,16 @@ import os
 import sys
 import traceback
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import warnings
 
 # ----- 서드파티
-import boto3
+from gpt_oss_client import generate_report_summary
+try:
+    import boto3  # S3 업로드 전용 (사내 환경). 로컬/오프라인에서는 없을 수 있음 → graceful skip
+except ImportError:
+    boto3 = None
+    print("[WARN] boto3 미설치 - S3 업로드 비활성화 (로컬 테스트 모드)")
 import duckdb
 import numpy as np
 import pandas as pd
@@ -81,7 +86,9 @@ trigger_flag = False
 # (TRIGGER) 제거
 if raw_arg.startswith("_TRIGGER_"):
     raw_arg = raw_arg.replace("_TRIGGER_", "", 1)
-    vehicle_name = raw_arg.strip().split("_")[0]
+    # rsplit to handle vehicle names with underscores like 'vehicle_A'
+    parts = raw_arg.strip().rsplit("_", 2)
+    vehicle_name = parts[0]
     trigger_flag = True
 else :
     vehicle_name = raw_arg
@@ -103,7 +110,6 @@ viewing_period = int(GLOBAL_CONFIG.get("viewing_period"))
 et_log_show = GLOBAL_CONFIG.get("et_log_show")
 test_mode = GLOBAL_CONFIG.get("test_mode")
 DB_Setting_mode = GLOBAL_CONFIG.get("DB_Setting_mode")
-high_qual_ppt_mode = GLOBAL_CONFIG.get("high_qual_ppt_mode")
 KNOXID = GLOBAL_CONFIG.get("KNOXID")
 user_name = GLOBAL_CONFIG.get("user_name")
 email_receiver = GLOBAL_CONFIG.get("email_receiver")
@@ -111,11 +117,8 @@ email_receiver = GLOBAL_CONFIG.get("email_receiver")
 ROOT = GLOBAL_CONFIG.get("ROOT")
 DB = GLOBAL_CONFIG.get("DB")
 DB_et_daily = GLOBAL_CONFIG.get("DB_et_daily")
-DB_et_LOTWF_raw = GLOBAL_CONFIG.get("DB_et_LOTWF_raw")
-DB_et_LOTWF_pivot_raw = GLOBAL_CONFIG.get("DB_et_LOTWF_pivot_raw")
 Report = GLOBAL_CONFIG.get("Report")
 low_qual_ppt_save_path = GLOBAL_CONFIG.get("low_qual_ppt_save_path")
-high_qual_ppt_save_path = GLOBAL_CONFIG.get("high_qual_ppt_save_path")
 html_save_path = GLOBAL_CONFIG.get("html_save_path")
 
 et_file_path = GLOBAL_CONFIG.get("et_file_path")
@@ -135,24 +138,78 @@ Final_et_log_path = GLOBAL_CONFIG.get("Final_et_log_path")
 report_making = GLOBAL_CONFIG.get("report_making")
 ptype_lot_turnoff = GLOBAL_CONFIG.get("ptype_lot_turnoff")
 specific_dc_layer = GLOBAL_CONFIG.get("specific_dc_layer")
-ref_turnoff = GLOBAL_CONFIG.get("ref_turnoff")
 
 # =============================================== Folder path 생성 ==================================================================
+# NOTE: DB_et_LOTWF_raw / DB_et_LOTWF_pivot_raw 삭제됨 — daily DB에서 DuckDB로 직접 조회
 
-for target_path in [ROOT, DB, log, Report, low_qual_ppt_save_path, high_qual_ppt_save_path, html_save_path]:
+for target_path in [ROOT, DB, DB_et_daily, log, Report, low_qual_ppt_save_path, html_save_path]:
     if not os.path.exists(target_path):
         os.makedirs(target_path)
+
+import builtins
+import atexit
+
+_original_print = builtins.print
+_run_log_buffer = []
+
+def _run_log_print(*args, **kwargs):
+    _original_print(*args, **kwargs)
+    try:
+        if 'loop_log' in globals() and loop_log:
+            msg = " ".join(str(a) for a in args)
+            _run_log_buffer.append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
+
+def _flush_logs_to_top():
+    if not ('loop_log' in globals() and loop_log) or not _run_log_buffer:
+        return
+    
+    new_logs = "".join(_run_log_buffer)
+    existing_logs = ""
+    
+    if os.path.exists(loop_log):
+        try:
+            with open(loop_log, "r", encoding="utf-8") as f:
+                existing_logs = f.read()
+        except Exception:
+            pass
+
+    combined_logs = new_logs + existing_logs
+    
+    # 50MB Limit (Approx 50,000,000 chars)
+    max_chars = 50 * 1024 * 1024
+    if len(combined_logs) > max_chars:
+        combined_logs = combined_logs[:max_chars]
+        last_nl = combined_logs.rfind('\n')
+        if last_nl != -1:
+            combined_logs = combined_logs[:last_nl+1]
+            
+    try:
+        with open(loop_log, "w", encoding="utf-8") as f:
+            f.write(combined_logs)
+    except Exception:
+        pass
+
+atexit.register(_flush_logs_to_top)
+builtins.print = _run_log_print
 
 # =============================================== Main Loop 실행 ====================================================================
 bucket_dx = GLOBAL_CONFIG.get("bucket_dx") 
 bucket_simyung = GLOBAL_CONFIG.get("bucket_simyung") 
 
-# Download the file
-client = boto3.client(
-            service_name='s3', region_name='DS',
-            aws_access_key_id=GLOBAL_CONFIG.get("s3_aws_access_key_id"),  
-            aws_secret_access_key=GLOBAL_CONFIG.get("s3_aws_secret_access_key"),
-            endpoint_url=GLOBAL_CONFIG.get("endpoint_url"))
+# S3 client (사내 환경 전용 - 로컬에서는 graceful skip)
+S3_CONNECT = False
+client = None
+try:
+    client = boto3.client(
+                service_name='s3', region_name='DS',
+                aws_access_key_id=GLOBAL_CONFIG.get("s3_aws_access_key_id"),  
+                aws_secret_access_key=GLOBAL_CONFIG.get("s3_aws_secret_access_key"),
+                endpoint_url=GLOBAL_CONFIG.get("endpoint_url"))
+    S3_CONNECT = True
+except Exception as s3_init_err:
+    print(f"[WARN] S3 client 초기화 실패 (로컬 테스트 모드): {s3_init_err}")
 
 datetime_now = datetime.now()
 formatted_datetime = datetime_now.strftime('%y-%m-%d-%H-%M')
@@ -168,14 +225,10 @@ if reformatter_check :
 
     #test_mode True일 경우 etdata_query 진행하지않고 Report 생성만 진행
     if not test_mode and not trigger_flag:
+        # ── ET 데이터 쿼리 (Hive 파티션으로 daily 폴더에 저장) ──
         etdata_query()
         print('[INFO] ==============et_query 수행완료==============')
-        
-        if GLOBAL_CONFIG.get("target_lot"):
-            print('[INFO] ==============et_LOTWF_generator 미수행==============')
-        else:
-            et_LOTWF_generator()
-            print('[INFO] ==============et_LOTWF_generator 수행완료==============')
+        # NOTE: et_LOTWF_generator 삭제됨 — daily DB에서 DuckDB로 직접 조회
         log_to_file("Query Success...", query_log)
 
         wipdata_query()
@@ -190,8 +243,10 @@ if reformatter_check :
     wip_current = wip_current.sort_values(by='last_update_date')
     grouped = wip_current.groupby('lot_id').last().reset_index()
 
-    et_log['lot_id'] = et_log['prime_key'].str.split('_').str[1]
-    et_log['dc_step_id'] = et_log['prime_key'].str.split('_').str[2]
+    # rsplit: vehicle 이름에 언더스코어 포함 가능 대응 (prime_key = mask_fablotid_stepid)
+    _pk_parts = et_log['prime_key'].str.rsplit('_', n=2)
+    et_log['lot_id'] = _pk_parts.str[1]
+    et_log['dc_step_id'] = _pk_parts.str[2]
     et_log = pd.merge(et_log, grouped[['lot_id','step_id']], on='lot_id', how='left')
 
     combined_lot_log = pd.concat([existing_lot_log, et_log]) 
@@ -201,8 +256,8 @@ if reformatter_check :
     datetime_now_plus = datetime_now - timedelta(minutes=delay_min) 
 
     # LOT 완료 확인 Logic
-    final_lot_log['dc_step_id_num'] = final_lot_log['dc_step_id'].str.extract('(\d+)', expand=False).astype(float)
-    final_lot_log['step_id_num'] = final_lot_log['step_id'].str.extract('(\d+)', expand=False).astype(float)
+    final_lot_log['dc_step_id_num'] = final_lot_log['dc_step_id'].str.extract(r'(\d+)', expand=False).astype(float)
+    final_lot_log['step_id_num'] = final_lot_log['step_id'].str.extract(r'(\d+)', expand=False).astype(float)
 
     final_lot_log['dc_done']= np.where( ((final_lot_log['step_id'].str[:2] != final_lot_log['dc_step_id'].str[:2]) | \
                                         (final_lot_log['step_id'].isnull()) |\
@@ -232,28 +287,26 @@ if reformatter_check :
     dc_done_list = dc_done_list[dc_done_list['dc_done'] == True]
     
     if not trigger_flag:
-        print(f"[INFO] {datetime_now} 측정완료 LOT List")
-        print("[INFO] 측정완료된 dc_done_list = ",dc_done_list)
+        print(f"[INFO] {datetime_now} 측정완료 LOT 확인 됨 (총 {len(dc_done_list)}건)")
     
     if ptype_lot_turnoff == True or ptype_lot_turnoff == 'True' :
-        print("[INFO] ptype_lot_turnoff True로 ptype 제외")
         dc_done_list = dc_done_list[~dc_done_list['lot_id'].str.startswith('A4')]
-        print("[INFO] A4* 자재 제외 List = ",dc_done_list)
+        print(f"[INFO] P-Type(A4*) 제외 후 LOT: {len(dc_done_list)}건")
     
     if specific_dc_layer is not False:
-        print("[INFO] specific_dc_layer 만 Report 생성됨")
         dc_done_list['dc_layer_check'] = dc_done_list['dc_step_id'].map(GLOBAL_CONFIG.get("dc_dict"))
         dc_done_list = dc_done_list[dc_done_list['dc_layer_check'] == 'MFDC']
         dc_done_list = dc_done_list.drop(columns=['dc_layer_check'])
-        print("[INFO] specific_dc_layer 외 제외List = ",dc_done_list)
+        print(f"[INFO] specific_dc_layer 타겟 필터 후 LOT: {len(dc_done_list)}건")
     
     # trigger_flag = True
 
     if trigger_flag :
         #trigger
+        parts = raw_arg.strip().rsplit("_", 2)
         dc_done_list = {
-            'lot_id': [raw_arg.strip().split("_")[1]],
-            'dc_step_id': [raw_arg.strip().split("_")[2]],
+            'lot_id': [parts[1]],
+            'dc_step_id': [parts[2]],
             'dc_done': [True],
             'dc_done_before': [False]
         }
@@ -280,138 +333,109 @@ if reformatter_check :
             dc_done_list['search_key'] = dc_done_list['lot_id'].astype(str) + '_' + dc_done_list['dc_step_id'].astype(str)
             search_strings = dc_done_list['search_key'].unique().tolist() #측정된 {fab_lot_id}_{dc_step_id} list
             
-            parquet_files = [os.path.join(DB_et_LOTWF_pivot_raw, f) for f in os.listdir(DB_et_LOTWF_pivot_raw) if f.endswith('.parquet')]
-
-            # ALIAS에 VRAMP가 들어간 경우 1년내 LOT_WF,CHIP_XY 기준 MAX 값으로 치환
-            # 스키마 읽기
-            cols_df = conn.execute(f"""
-                SELECT * 
-                FROM read_parquet([{', '.join([f"'{file}'" for file in parquet_files])}], union_by_name=True)
-                LIMIT 0
-            """).fetchdf()
-            all_cols = list(cols_df.columns)
-            vramp_cols = [c for c in all_cols if "VRAMP" in c]
-            other_cols = [c for c in all_cols if c not in vramp_cols]
-
-            # 안전하게 인용 (큰따옴표로 감싸기)
-            def q(col: str) -> str:
-                return '"' + col.replace('"', '""') + '"'
-
-            # SELECT 구문
-            select_other = ",\n    ".join([f"b.{q(c)}" for c in other_cols])
-            select_vramp = ",\n    ".join([
-                f'CASE WHEN b.{q(c)} IS NOT NULL AND b.{q(c)} = b.{q(c)} '
-                f'THEN m.{q(c)} ELSE b.{q(c)} END AS {q(c)}'
-                for c in vramp_cols
-            ])
-            max_selects = ",\n        ".join([f"MAX({q(c)}) AS {q(c)}" for c in vramp_cols])
-            select_clause = f"{select_other},\n    {select_vramp}"
-
-            # 그룹 키
-            group_keys = ["root_lot_id", "wafer_id", "chip_x_pos", "chip_y_pos"]   # 필요 시 수정
-            group_keys_sql = ", ".join([q(k) for k in group_keys])
-            join_cond = " AND ".join([f"b.{q(k)} = m.{q(k)}" for k in group_keys])
-
-            if GLOBAL_CONFIG.get("target_lot") : 
-                target_lot_list = [c[:5] for c in dc_done_list['lot_id'].tolist()]
-                et_total_query = f"""
-                        WITH base AS (
-                                SELECT *
-                                FROM read_parquet([{', '.join([f"'{file}'" for file in parquet_files])}], union_by_name=True)
-                                WHERE root_lot_id IN {target_lot_list}
-                            ),
-                            maxvals AS (
-                                SELECT
-                                    {group_keys_sql},
-                                    {max_selects}
-                                FROM read_parquet([{', '.join([f"'{file}'" for file in parquet_files])}], union_by_name=True)
-                                WHERE tkout_time >= (CURRENT_DATE - INTERVAL '365' DAY)
-                                GROUP BY {group_keys_sql}
-                            )
-                            SELECT
-                                {select_clause}
-                            FROM base b
-                            LEFT JOIN maxvals m
-                                ON {join_cond};
-                """
-            else : 
-                et_total_query = f"""
-                            WITH base AS (
-                                    SELECT *
-                                    FROM read_parquet([{', '.join([f"'{file}'" for file in parquet_files])}], union_by_name=True)
-                                    WHERE tkout_time >= (CURRENT_DATE - INTERVAL '{viewing_period}' DAY)
-                                ),
-                                maxvals AS (
-                                    SELECT
-                                        {group_keys_sql},
-                                        {max_selects}
-                                    FROM read_parquet([{', '.join([f"'{file}'" for file in parquet_files])}], union_by_name=True)
-                                    WHERE tkout_time >= (CURRENT_DATE - INTERVAL '365' DAY)
-                                    GROUP BY {group_keys_sql}
-                                )
-                                SELECT
-                                    {select_clause}
-                                FROM base b
-                                LEFT JOIN maxvals m
-                                    ON {join_cond};
-                """
-
-            merged_df = conn.execute(et_total_query).df()
-            #with_vehicle_table load & Merge
+            # ================================================================
+            # DuckDB: daily Hive 파티션에서 직접 조회 (LOTWF 제거)
+            # ================================================================
+            DB_et_daily = GLOBAL_CONFIG.get('DB_et_daily')
+            
+            # reformatter에서 REAL/ADDP 항목 분리
+            item_et = reformatter.copy()
+            is_real = item_et['CATEGORY'] == 'REAL'
+            is_addp = item_et['CATEGORY'] == 'ADDP'
+            real = item_et[is_real][['ITEMID', 'ALIAS', 'SCALE FACTOR', 'ABSOLUTE']].copy()
+            addp = item_et[is_addp][['ALIAS', 'ADDP FORM', 'SCALE FACTOR']].copy()
+            addp['addpscale'] = addp['SCALE FACTOR'].astype(str) + '*(' + addp['ADDP FORM'] + ')'
+            ALIAS = list(map(str, addp.ALIAS))
+            FORMULA = list(map(str, addp.addpscale))
+            
+            # Hive 파티션 glob 패턴
+            hive_glob = os.path.join(DB_et_daily, '*', '*.parquet').replace('\\', '/')
+            
+            # DuckDB로 viewing_period 범위의 raw 데이터 로드
+            raw_query = f"""
+                SELECT *
+                FROM read_parquet('{hive_glob}', hive_partitioning=true)
+                WHERE date >= CURRENT_DATE - INTERVAL '{viewing_period}' DAY
+            """
+            raw_df = conn.execute(raw_query).df()
+            
+            if raw_df.empty:
+                print(f'[WARN] daily DB에 {viewing_period}일 이내 데이터 없음')
+                sys.exit(0)
+            
+            # ── Scale Factor 적용 ──
+            raw_df = pd.merge(raw_df, real, left_on='item_id', right_on='ITEMID', how='left')
+            raw_df['et_value'] = raw_df['et_value'].astype(float)
+            raw_df.loc[raw_df['SCALE FACTOR'].notna(), 'et_value'] *= raw_df.loc[raw_df['SCALE FACTOR'].notna(), 'SCALE FACTOR'].astype(float)
+            raw_df['item_id'] = raw_df['ALIAS'].fillna(raw_df['item_id'])
+            raw_df['match_key'] = raw_df['root_lot_id'].astype(str) + '_' + raw_df['step_id'].astype(str)
+            raw_df['lot_wf'] = raw_df['root_lot_id'].astype(str) + '_' + raw_df['wafer_id'].astype(str)
+            
+            # ── Pivot (세로→가로 전개) ──
+            pivot_idx = ['fab_lot_id','lot_id','root_lot_id','wafer_id','process_id','part_id',
+                         'step_id','step_seq','tkout_time','flat_zone','eqp_id','probe_card_id',
+                         'chip_x_pos','chip_y_pos','subitem_id','temperature','total_site_cnt',
+                         'match_key','lot_wf']
+            pivot_idx = [c for c in pivot_idx if c in raw_df.columns]
+            
+            merged_df = raw_df.pivot_table(
+                values='et_value', index=pivot_idx,
+                columns='item_id', aggfunc='last', observed=True
+            )
+            
+            # ── ADDP (Index) 계산 ──
+            merged_df = Reformatize(merged_df, ALIAS, FORMULA)
+            merged_df = merged_df.reset_index()
+            merged_df['mask'] = vehicle
+            # ── with_vehicle 데이터 로드 & Merge (daily Hive 파티션 사용) ──
             if not vehicle in with_vehicle :
                 print("[INFO] with_vehicle안에 vehicle 없음. 진행")
                 try : 
                     with_vehicle_Table = pd.DataFrame() 
                     for with_vehicle_now in with_vehicle :
-                        ET_TABLE_ROOT_with_vehicle  = DB + with_vehicle_now + '_LOTWF/pivot_raw/'
-                        pattern_with_vehicle = os.path.join(ET_TABLE_ROOT_with_vehicle, f'*')
+                        wv_daily_path = DB + with_vehicle_now + '_daily'
+                        wv_hive_glob = os.path.join(wv_daily_path, '*', '*.parquet').replace('\\', '/')
                         
-                        print(f'[INFO] viewing_period = {viewing_period}')
-                        # 특정 경로의 모든 Parquet 파일을 DuckDB 테이블로 읽기
-                        parquet_files_with_vehicle = [os.path.join(ET_TABLE_ROOT_with_vehicle, f) for f in os.listdir(ET_TABLE_ROOT_with_vehicle) if f.endswith('.parquet')]
+                        print(f'[INFO] with_vehicle={with_vehicle_now}, viewing_period={viewing_period}')
                         
-                        # 스키마 읽기
-                        cols_df_with_vehicle = conn.execute(f"""
-                            SELECT * 
-                            FROM read_parquet([{', '.join([f"'{file}'" for file in parquet_files_with_vehicle])}], union_by_name=True)
-                            LIMIT 0
-                        """).fetchdf()
-                        all_cols_with_vehicle = list(cols_df_with_vehicle.columns)
-                        vramp_cols_with_vehicle = [c for c in all_cols_with_vehicle if "VRAMP" in c]
-                        other_cols_with_vehicle = [c for c in all_cols_with_vehicle if c not in vramp_cols_with_vehicle]
-
-                        # SELECT 구문
-                        select_other_with_vehicle = ",\n    ".join([f"b.{q(c)}" for c in other_cols_with_vehicle])
-                        select_vramp_with_vehicle = ",\n    ".join([
-                            f'CASE WHEN b.{q(c)} IS NOT NULL AND b.{q(c)} = b.{q(c)} '
-                            f'THEN m.{q(c)} ELSE b.{q(c)} END AS {q(c)}'
-                            for c in vramp_cols_with_vehicle
-                        ])
-                        max_selects_with_vehicle = ",\n        ".join([f"MAX({q(c)}) AS {q(c)}" for c in vramp_cols_with_vehicle])
-                        select_clause_with_vehicle = f"{select_other_with_vehicle},\n    {select_vramp_with_vehicle}"
-
-                        et_total_query_with_vehicle = f"""
-                                    WITH base AS (
-                                            SELECT *
-                                            FROM read_parquet([{', '.join([f"'{file}'" for file in parquet_files_with_vehicle])}], union_by_name=True)
-                                            WHERE tkout_time >= (CURRENT_DATE - INTERVAL '{viewing_period}' DAY)
-                                        ),
-                                        maxvals AS (
-                                            SELECT
-                                                {group_keys_sql},
-                                                {max_selects_with_vehicle}
-                                            FROM read_parquet([{', '.join([f"'{file}'" for file in parquet_files_with_vehicle])}], union_by_name=True)
-                                            WHERE tkout_time >= (CURRENT_DATE - INTERVAL '365' DAY)
-                                            GROUP BY {group_keys_sql}
-                                        )
-                                        SELECT
-                                            {select_clause_with_vehicle}
-                                        FROM base b
-                                        LEFT JOIN maxvals m
-                                            ON {join_cond};
+                        # daily Hive 파티션에서 with_vehicle 데이터 로드
+                        wv_raw_query = f"""
+                            SELECT *
+                            FROM read_parquet('{wv_hive_glob}', hive_partitioning=true)
+                            WHERE date >= CURRENT_DATE - INTERVAL '{viewing_period}' DAY
                         """
-                        with_vehicle_Table_now = conn.execute(et_total_query_with_vehicle).df()
-                        with_vehicle_Table = pd.concat([with_vehicle_Table,with_vehicle_Table_now], ignore_index=True)
+                        wv_raw_df = conn.execute(wv_raw_query).df()
+                        
+                        if wv_raw_df.empty:
+                            print(f'[WARN] {with_vehicle_now} daily DB 데이터 없음, 스킵')
+                            continue
+                        
+                        # Scale Factor 적용 (with_vehicle용 reformatter 로드)
+                        wv_reformatter = pd.read_csv(f'reformatter/{with_vehicle_now}_reformatter.csv')
+                        wv_item = wv_reformatter.copy()
+                        wv_real = wv_item[wv_item['CATEGORY'] == 'REAL'][['ITEMID', 'ALIAS', 'SCALE FACTOR', 'ABSOLUTE']].copy()
+                        wv_addp = wv_item[wv_item['CATEGORY'] == 'ADDP'][['ALIAS', 'ADDP FORM', 'SCALE FACTOR']].copy()
+                        wv_addp['addpscale'] = wv_addp['SCALE FACTOR'].astype(str) + '*(' + wv_addp['ADDP FORM'] + ')'
+                        wv_ALIAS = list(map(str, wv_addp.ALIAS))
+                        wv_FORMULA = list(map(str, wv_addp.addpscale))
+                        
+                        wv_raw_df = pd.merge(wv_raw_df, wv_real, left_on='item_id', right_on='ITEMID', how='left')
+                        wv_raw_df['et_value'] = wv_raw_df['et_value'].astype(float)
+                        wv_raw_df.loc[wv_raw_df['SCALE FACTOR'].notna(), 'et_value'] *= wv_raw_df.loc[wv_raw_df['SCALE FACTOR'].notna(), 'SCALE FACTOR'].astype(float)
+                        wv_raw_df['item_id'] = wv_raw_df['ALIAS'].fillna(wv_raw_df['item_id'])
+                        wv_raw_df['match_key'] = wv_raw_df['root_lot_id'].astype(str) + '_' + wv_raw_df['step_id'].astype(str)
+                        wv_raw_df['lot_wf'] = wv_raw_df['root_lot_id'].astype(str) + '_' + wv_raw_df['wafer_id'].astype(str)
+                        
+                        wv_pivot_idx = [c for c in pivot_idx if c in wv_raw_df.columns]
+                        wv_pivot = wv_raw_df.pivot_table(
+                            values='et_value', index=wv_pivot_idx,
+                            columns='item_id', aggfunc='last', observed=True
+                        )
+                        wv_pivot = Reformatize(wv_pivot, wv_ALIAS, wv_FORMULA)
+                        wv_pivot = wv_pivot.reset_index()
+                        wv_pivot['mask'] = with_vehicle_now
+                        
+                        with_vehicle_Table = pd.concat([with_vehicle_Table, wv_pivot], ignore_index=True)
 
                 except :
                     with_vehicle_Table = pd.DataFrame()
@@ -507,32 +531,29 @@ if reformatter_check :
             # Zone Radius add
             merged_df = pd.merge(merged_df,zone_define,on=['MASK','CHIP_X_POS','CHIP_Y_POS','FLAT_ZONE_POS'])
             
-            if not ref_turnoff:
-                # Ref WF 정보
-                #YLD 정보 Download
-                if vehicle == 'Solomon1' or vehicle == 'Solomon2' :
-                    client.download_file(bucket_simyung, '/SF3_Product/Solomon_EVT1/Result/SF3_SOL_EVT1_Result_Data.csv', 'SF3_SOL_EVT1_Result_Data.csv') 
-                    reference_df = pd.read_csv('SF3_SOL_EVT1_Result_Data.csv')
-                    reference_df['WAFER_ID'] = reference_df['WAFER_ID'].astype(int)
-                    reference_df['END_TIME'] = pd.to_datetime(reference_df['END_TIME'])
-                    reference_df = reference_df.loc[reference_df.groupby(['ROOT_LOT_ID', 'WAFER_ID'])['END_TIME'].idxmax()]
-                    reference_df = reference_df[reference_df['PGM_VER']>12][['ROOT_LOT_ID','WAFER_ID','END_TIME','LOT_ID','PGM_VER','YLD','L1/L2','SCAN_LH','SRAM_LH']]
-                    reference_df = reference_df.sort_values(by=['YLD'], ascending=False).reset_index()
-                    reference_df = reference_df[['ROOT_LOT_ID','WAFER_ID','END_TIME','LOT_ID','PGM_VER','YLD','L1/L2','SCAN_LH','SRAM_LH']].reset_index()
-                
-                    for i in range(0, 100):
-                        try :
-                            reference_lot_id = reference_df['ROOT_LOT_ID'].iloc[i]
-                            reference_wafer_id = reference_df['WAFER_ID'].iloc[i]
-                            reference_yld = reference_df['YLD'].iloc[i]
-                            if not merged_df[(merged_df['ROOT_LOT_ID'] == reference_lot_id) & (merged_df['WAFER_ID'] == reference_wafer_id) & (merged_df['DC_Split'] == "MFDC")].empty :
-                                print("max_yld = ", reference_yld)
-                                print("reference_lot_id = ", reference_lot_id)
-                                print("reference_wafer_id = ", reference_wafer_id)
-                                break
-                        except : 
-                            print(f"{reference_lot_id}_#{reference_wafer_id} MFDC 미확보됨")
-                else :
+            # Ref WF 정보
+            #YLD 정보 Download
+            if vehicle == 'Solomon1' or vehicle == 'Solomon2' :
+                client.download_file(bucket_simyung, '/SF3_Product/Solomon_EVT1/Result/SF3_SOL_EVT1_Result_Data.csv', 'SF3_SOL_EVT1_Result_Data.csv') 
+                reference_df = pd.read_csv('SF3_SOL_EVT1_Result_Data.csv')
+                reference_df['WAFER_ID'] = reference_df['WAFER_ID'].astype(int)
+                reference_df['END_TIME'] = pd.to_datetime(reference_df['END_TIME'])
+                reference_df = reference_df.loc[reference_df.groupby(['ROOT_LOT_ID', 'WAFER_ID'])['END_TIME'].idxmax()]
+                reference_df = reference_df[reference_df['PGM_VER']>12][['ROOT_LOT_ID','WAFER_ID','END_TIME','LOT_ID','PGM_VER','YLD','L1/L2','SCAN_LH','SRAM_LH']]
+                reference_df = reference_df.sort_values(by=['YLD'], ascending=False).reset_index()
+                reference_df = reference_df[['ROOT_LOT_ID','WAFER_ID','END_TIME','LOT_ID','PGM_VER','YLD','L1/L2','SCAN_LH','SRAM_LH']].reset_index()
+            
+                for i in range(0, 100):
+                    try :
+                        reference_lot_id = reference_df['ROOT_LOT_ID'].iloc[i]
+                        reference_wafer_id = reference_df['WAFER_ID'].iloc[i]
+                        reference_yld = reference_df['YLD'].iloc[i]
+                        if not merged_df[(merged_df['ROOT_LOT_ID'] == reference_lot_id) & (merged_df['WAFER_ID'] == reference_wafer_id) & (merged_df['DC_Split'] == "MFDC")].empty :
+                            break
+                    except : 
+                        pass
+            else :
+                try:
                     reference_df = pd.read_csv('Thetis1_YLD.csv')
                     reference_df['WAFER_ID'] = reference_df['WAFER_ID'].astype(int)
                     reference_df['TKOUT_TIME'] = pd.to_datetime(reference_df['TKOUT_TIME'])
@@ -545,18 +566,17 @@ if reformatter_check :
                             reference_wafer_id = reference_df['WAFER_ID'].iloc[i]
                             reference_yld = reference_df['YLD'].iloc[i]
                             if not merged_df[(merged_df['ROOT_LOT_ID'] == reference_lot_id) & (merged_df['WAFER_ID'] == reference_wafer_id) & (merged_df['DC_Split'] == "MFDC")].empty :
-                                print("max_yld = ", reference_yld)
-                                print("reference_lot_id = ", reference_lot_id)
-                                print("reference_wafer_id = ", reference_wafer_id)
                                 break
                         except : 
-                            print(f"{reference_lot_id}_#{reference_wafer_id} MFDC 미확보됨")
+                            pass
+                except FileNotFoundError:
+                    print("[WARN] Thetis1_YLD.csv 파일이 없습니다. reference 데이터를 None으로 설정합니다.")
+                    reference_lot_id = None
+                    reference_wafer_id = None
+                    reference_yld = None
 
+            if reference_yld is not None and 'reference_df' in locals():
                 reference_df = reference_df[reference_df['YLD'] == reference_yld].reset_index()
-            else :
-                #ref wf true인 경우
-                reference_lot_id  = None
-                reference_wafer_id = None
                 
             html_code = GLOBAL_CONFIG.get("html_code")
 
@@ -574,8 +594,8 @@ if reformatter_check :
 
                     match_key = target_root_lot_id + "_" + target_DC_step_id #match_key = {root_lot_id}_{DC_step_id}
 
-                    print('***** fab_lot_id + step_id : ', search_key)
-                    print('***** root_lot_id + step_id : ', match_key)
+                    # print('***** fab_lot_id + step_id : ', search_key)
+                    # print('***** root_lot_id + step_id : ', match_key)
 
                     df = merged_df[(merged_df['match_key'] == match_key) | ((merged_df['ROOT_LOT_ID'] == reference_lot_id) & (merged_df['WAFER_ID'] == reference_wafer_id) & (merged_df['DC_Split'] == "MFDC"))].copy()
 
@@ -594,7 +614,7 @@ if reformatter_check :
                     df.loc[(df['ROOT_LOT_ID'] == reference_lot_id) & (df['WAFER_ID'] == reference_wafer_id) , 'WAFER_ID'] = 0
 
                     target_wafer_id_list = sorted(df['WAFER_ID'].unique().tolist())
-                    print(f'[INFO] *****{match_key} target_wafer_id_list : ', target_wafer_id_list)
+                    print(f'[INFO] 대상 Wafer 목록: {target_wafer_id_list}')
 
                     #Inline Data 추출
                     print(f'{target_root_lot_id} inline data 추출 시작!')
@@ -605,6 +625,11 @@ if reformatter_check :
 
                     spec_data = reformatter[(~reformatter['REPORT ORDER'].isnull())] #Report order가 존재하는 item만 spec data확인
                     spec_dict = {row['ALIAS']: (row['SPECLOW'], row['SPECHIGH']) for _, row in spec_data.iterrows()} #dict형식으로 빠른 접근가능
+                    # col_direction(REPORT DIRECTION): UPPER=상한만, LOWER=하한만, BOTH=둘 다 (합격판정에 반영)
+                    spec_dir = {}
+                    for _, _r in spec_data.iterrows():
+                        _d = str(_r['col_direction']).strip().upper() if 'col_direction' in spec_data.columns and pd.notna(_r.get('col_direction')) else 'BOTH'
+                        spec_dir[_r['ALIAS']] = _d if _d in ('UPPER', 'LOWER', 'BOTH') else 'BOTH'
                     spec_data = spec_data.set_index('ALIAS')
 
                     # ========================================= Pass_Rate(Score) 계산 ========================================
@@ -615,9 +640,15 @@ if reformatter_check :
                     pass_df = pd.DataFrame()
                     for item in spec_dict:
                         try :
-                            pass_df[f'{item}'] = df[item].astype(float).apply(lambda x, item=item: x \
-                                    if pd.isna(x) else (1 if float(x) >= float(spec_dict[item][0])\
-                                    and float(x) <= float(spec_dict[item][1]) else 0))
+                            _low = float(spec_dict[item][0]); _high = float(spec_dict[item][1])
+                            _dir = spec_dir.get(item, 'BOTH')
+                            def _passfn(x, low=_low, high=_high, direction=_dir):
+                                if pd.isna(x): return x
+                                x = float(x)
+                                if direction == 'UPPER': return 1 if x <= high else 0   # 상한만
+                                if direction == 'LOWER': return 1 if x >= low else 0    # 하한만
+                                return 1 if (x >= low and x <= high) else 0             # BOTH
+                            pass_df[f'{item}'] = df[item].astype(float).apply(_passfn)
                         except KeyError:
                             print(f"Pass Rate 계산 Error 발생: '{item}' - Column not found in dataframe")
                         except (ValueError, TypeError):
@@ -636,7 +667,7 @@ if reformatter_check :
                     # match_key와 맞는 data filtering
                     wf_matching_list = list(zip(df['FAB_LOT_ID'], df['WAFER_ID'].astype(str).apply(lambda x: '#' + x)))
                     wf_matching_list = list(set(wf_matching_list))
-                    print('wf_matching_list : ',wf_matching_list)
+                    # print('wf_matching_list : ',wf_matching_list)
 
                     # VIP_group_raw 생성
                     selected_columns = ['WAFER_ID'] + [col for col in df.columns if 'pass' in col]
@@ -651,10 +682,10 @@ if reformatter_check :
                     # VIP_group 생성 *presentation 생성용 dataframe
                     VIP_group.index = VIP_group.index.str.replace('pass_rate_', '') 
 
-                    # VIP_group_HTML 생성 *VIP_group copy
-                    VIP_group_HTML = pd.merge(VIP_group_raw,reformatter[['CAT2','REPORT ORDER']].dropna(subset=['REPORT ORDER']).drop('REPORT ORDER',axis=1)\
+                    # VIP_group_HTML 생성 *VIP_group copy (HTML 카테고리 구분자는 CAT1 기준)
+                    VIP_group_HTML = pd.merge(VIP_group_raw,reformatter[['CAT1','REPORT ORDER']].dropna(subset=['REPORT ORDER']).drop('REPORT ORDER',axis=1)\
                                             ,right_index=True, left_index=True, how='left').reset_index()
-                    VIP_group_HTML = VIP_group_HTML.rename(columns={'CAT2': 'CATEGORY', 'index': 'ITEM_ID', 'pass_rate': 'ITEM_ID'})
+                    VIP_group_HTML = VIP_group_HTML.rename(columns={'CAT1': 'CATEGORY', 'index': 'ITEM_ID', 'pass_rate': 'ITEM_ID'})
                     VIP_group_HTML['ITEM_ID'] = VIP_group_HTML['ITEM_ID'].str.replace('pass_rate_', '')
                     VIP_group_HTML = VIP_group_HTML.set_index(['CATEGORY', 'ITEM_ID'])
                     VIP_group_HTML = VIP_group_HTML.drop('REPORT ORDER',axis=1)
@@ -662,7 +693,7 @@ if reformatter_check :
 
                     # ========================================= PPT file name 생성 ==========================================
 
-                    rname = f'HOL_{target_DC_step}_Report'
+                    rname = f'HOL_{target_DC_step}_Report_v13'
                     fname = f'{upload_date}-{prod}-{target_root_lot_id}-{rname}.html' #html 저장이름
                     final_ppt_file_name_DX = f'{upload_date}-{prod}-{target_root_lot_id}-{rname}.pptx' #pptx 저장이름, DX System 및 S3 DB 저장
 
@@ -676,20 +707,23 @@ if reformatter_check :
                     prs_low_qual = make_title_page(template_ppt_path, vehicle, target_lot_id, target_step_merged)
 
                     # 1-2. Scoreboard 투입
-                    prs_low_qual = insert_score_board(VIP_group, prs_low_qual, target_lot_id, ' / '.join([target_lot_id, target_step_merged]))
+                    prs_low_qual = insert_score_board(VIP_group, prs_low_qual, target_lot_id, ' / '.join([target_lot_id, target_step_merged]), spec_data=spec_data, config=GLOBAL_CONFIG)
 
                     # 1-3. BoxPlot 투입 - 메일링 버전
                     description_image_info_dict_low_qual = calcaulate_description_image_info_dict(description_ppt_path, img_quality = 20)
-                    prs_low_qual = insert_plots(merged_df, prs_low_qual, description_image_info_dict_low_qual, target_lot_id, target_root_lot_id, target_DC_step, target_DC_step_id, spec_data, img_quality = 12, ref=False)
+                    prs_low_qual, metrics_dict = insert_plots(merged_df, prs_low_qual, description_image_info_dict_low_qual, target_lot_id, target_root_lot_id, target_DC_step, target_DC_step_id, spec_data, img_quality = 12, ref=False, reformatter=reformatter, dpi=GLOBAL_CONFIG.ppt_chart_dpi)
                 
                     # 1-4. Save ppt - 메일링 버전
-                    if not os.path.exists(os.path.dirname(low_qual_ppt_save_path)):
-                        os.makedirs(os.path.dirname(low_qual_ppt_save_path))
-                    prs_low_qual.save(f'{low_qual_ppt_save_path}/{final_ppt_file_name_DX}')
-                    print('[INFO]..저장 완료..\n')
+                    if not os.path.exists(low_qual_ppt_save_path):
+                        os.makedirs(low_qual_ppt_save_path)
+                    try:
+                        prs_low_qual.save(f'{low_qual_ppt_save_path}{final_ppt_file_name_DX}')
+                        print('[INFO]..저장 완료..\n')
+                    except PermissionError:
+                        print(f"[WARN] PermissionError: PPT 파일을 저장할 수 없습니다 (파일이 열려있을 수 있습니다): {final_ppt_file_name_DX}")
 
                     # =====================================================================================================
-                    VIP_group = VIP_group.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+                    VIP_group = VIP_group.map(lambda x: x.strip() if isinstance(x, str) else x)
                     VIP_group = VIP_group.apply(pd.to_numeric, errors='coerce')
                     VIP_group = VIP_group.dropna(axis=1, how='all')
                     VIP_group = VIP_group.astype(float)
@@ -700,7 +734,7 @@ if reformatter_check :
                     et_log = et_log.sort_values(by='tkout_time', ascending=False)
                     et_log = et_log.iloc[:et_log_show,:] #아래에서 n개행만 출력 
 
-                    et_log['LOT ID'] = et_log['prime_key'].str.split('_').str[1]
+                    et_log['LOT ID'] = et_log['prime_key'].str.rsplit('_', n=2).str[1]
                     et_log['WAFER ID'] = et_log['wafer_id'].apply(extract_and_sort_numbers)
                     et_log['DC STEP'] = et_log['dc_step_id'].replace(GLOBAL_CONFIG.get("dc_dict"))
                     et_log['DC 측정완료 여부'] = et_log['dc_done'].apply(lambda x : "RUN 중" if x == False else "측정완료")
@@ -763,13 +797,19 @@ if reformatter_check :
                     inlinedata_filtered_pivot = inlinedata_filtered_pivot[sorted_columns]
 
                     inlinedata_filtered_pivot = pd.merge(inlinedata_spec, inlinedata_filtered_pivot,how='right', on='STEP_DESC_ITEM_ID')
-                    print("Inline data 준비완료!")
+                    
+                    # [PATCH] Inline Table 멀티 인덱스 복구
+                    inlinedata_filtered_pivot['ITEMNAME'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_ITEMNAME)
+                    inlinedata_filtered_pivot['ITEM_ID'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_ITEM_ID)
+                    inlinedata_filtered_pivot = inlinedata_filtered_pivot.set_index(['ITEMNAME', 'ITEM_ID'])
+                    inlinedata_filtered_pivot.index.names = ['Module', 'Item']
+                    
                     
                     # HTML 생성부분 - Mail body
                     VIP_group_HTML.columns = ['#' + str(col) for col in VIP_group_HTML.columns]
 
                     column_mapping = {wafer_id : (fab_lot_id, wafer_id) for fab_lot_id, wafer_id in wf_matching_list}
-                    print('column_mapping :', column_mapping)
+                    # print('column_mapping :', column_mapping)
 
                     # 첫번째 값이 동일한 항목들을 뭉치기
                     grouped_values = {}
@@ -788,32 +828,219 @@ if reformatter_check :
                     print("sorted_keys : ",sorted_keys)
 
                     VIP_group_HTML = VIP_group_HTML[sorted_keys]
-                    VIP_group_HTML.index.names = [None, None]
+                    VIP_group_HTML.index.names = ['category', 'Item']
 
-                    # 데이터프레임의 컬럼을 멀티컬럼으로 변환
-                    multi_index = pd.MultiIndex.from_tuples(
-                        [['Ref.', 'Ref.'] if col == '#0' else column_mapping[col] for col in VIP_group_HTML.columns],
-                        names=['LOT_ID', 'WAFER_ID']
-                    )
-                    print("VIP_group_HTML.columns : ",VIP_group_HTML.columns)
+                    # "우측에 빈칸있는 행 안나오게해줘" -> 하나라도 비어있는 데이터 drop
+                    VIP_group_HTML = VIP_group_HTML.dropna(how='any')
 
-                    VIP_group_HTML.columns = multi_index
+                    # 컬럼 단일 레벨화 (WAFER_ID만 남김)
+                    VIP_group_HTML.columns = [col for col in VIP_group_HTML.columns]
+                    VIP_group_HTML.columns.name = ' ' # 2줄 헤더 유도를 위한 빈칸 이름 설정
 
-                    VIP_group_HTML = VIP_group_HTML.rename(
-                        lambda x: convert_target_data(x, GLOBAL_CONFIG.get("suffixes_remove"), GLOBAL_CONFIG.get("replace_map")), 
-                        level=1
-                    )
-
-                    styled_df1 = (
-                        VIP_group_HTML
-                            .style
-                            .format("{:.1f}", na_rep="")
-                            .apply(apply_style_by_index, axis=1)
-                    )
-                    if VIP_group_HTML.index.duplicated().any():
-                        print("인덱스 중복 여부:", VIP_group_HTML.index.duplicated().any())  
-                        print("중복 인덱스 개수:", VIP_group_HTML.index.duplicated().sum())  
-                        print("중복 인덱스 목록:")  
-                        print(VIP_group_HTML.index[VIP_group_HTML.index.duplicated()].unique())  
+                    # ==================== Score Board HTML 렌더링 (Manual) ====================
+                    # Pandas의 to_html()이 만드는 불안정한 멀티인덱스 태그를 방지하기 위해 HTML 태그를 한 땀 한 땀 생성
+                    sb_html = '<table class="score-board">\n'
+                    sb_html += '  <thead>\n'
+                    # 헤더 첫번째 줄
+                    sb_html += '    <tr>\n'
+                    sb_html += f'      <th colspan="2" class="row_heading" style="text-align:center; background-color:#d9e1f2;">LOT_ID</th>\n'
+                    sb_html += f'      <th colspan="{len(VIP_group_HTML.columns)}" style="text-align:center; background-color:#f0f0f0;">{target_lot_id}</th>\n'
+                    sb_html += '    </tr>\n'
+                    # 헤더 두번째 줄
+                    sb_html += '    <tr>\n'
+                    sb_html += '      <th style="background-color:#d9e1f2;">category</th>\n'
+                    sb_html += '      <th style="background-color:#d9e1f2;">Item</th>\n'
+                    for col in VIP_group_HTML.columns:
+                        sb_html += f'      <th style="background-color:#f0f0f0; width:70px; min-width:70px; max-width:70px;">{col}</th>\n'
+                    sb_html += '    </tr>\n'
+                    sb_html += '  </thead>\n'
+                    sb_html += '  <tbody>\n'
                     
+                    for idx, row in VIP_group_HTML.iterrows():
+                        cat, item = idx
+                        sb_html += '    <tr>\n'
+                        sb_html += f'      <td class="row_heading" style="font-weight:bold; background-color:#ebf4ff;">{cat}</td>\n'
+                        sb_html += f'      <td class="row_heading" style="font-weight:bold; background-color:#ebf4ff;">{item}</td>\n'
+                        for col in VIP_group_HTML.columns:
+                            val = row[col]
+                            if pd.isna(val) or val == "":
+                                sb_html += '      <td style="background-color:#555555;"></td>\n'
+                            else:
+                                # Score Board 색상 임계값 (config에서 로드)
+                                _thresholds = GLOBAL_CONFIG.score_thresholds  # [100.0, 90.0, 70.0, 50.0]
+                                _colors = GLOBAL_CONFIG.score_colors
+                                bg_color = '#ffffff'
+                                color = '#000000'
+                                if val == _thresholds[0]:       # == 100
+                                    bg_color = _colors[100]['bg']
+                                    color = _colors[100]['fg']
+                                elif val >= _thresholds[1]:     # >= 90
+                                    bg_color = _colors[90]['bg']
+                                    color = _colors[90].get('fg', '#000000')
+                                elif val >= _thresholds[2]:     # >= 70
+                                    bg_color = _colors[70]['bg']
+                                    color = _colors[70].get('fg', '#000000')
+                                elif val >= _thresholds[3]:     # >= 50
+                                    bg_color = _colors[50]['bg']
+                                    color = _colors[50].get('fg', '#ffffff')
+                                else:                           # < 50
+                                    bg_color = _colors[0]['bg']
+                                    color = _colors[0].get('fg', '#ffffff')
+                                sb_html += f'      <td style="background-color:{bg_color}; color:{color}; font-weight:bold; width:70px; min-width:70px; max-width:70px;">{val:.1f}</td>\n'
+                        sb_html += '    </tr>\n'
+                    sb_html += '  </tbody>\n'
+                    sb_html += '</table>\n'
+                    score_board_html = sb_html
 
+                    # ==================== Inline Table HTML 렌더링 (Manual) ====================
+                    inlinedata_filtered_pivot = inlinedata_filtered_pivot.reset_index()
+                    
+                    cols = ['Module', 'Item'] + [c for c in inlinedata_filtered_pivot.columns if c not in ['Module', 'Item', 'STEP_DESC_ITEM_ID']]
+                    inlinedata_filtered_pivot = inlinedata_filtered_pivot[cols]
+                    
+                    it_html = '<table class="inline-table">\n'
+                    it_html += '  <thead>\n'
+                    it_html += '    <tr>\n'
+                    for col in inlinedata_filtered_pivot.columns:
+                        if col in ['Module', 'Item']:
+                            it_html += f'      <th class="row_heading" style="background-color:#e2efda !important;">{col}</th>\n'
+                        elif col in ['UCL', 'CL', 'LCL']:
+                            it_html += f'      <th style="background-color:#f0f0f0 !important;">{col}</th>\n'
+                        else:
+                            col_str = str(col) if str(col).startswith('#') else '#' + str(col)
+                            it_html += f'      <th style="background-color:#f0f0f0 !important; width:70px; min-width:70px; max-width:70px;">{col_str}</th>\n'
+                    it_html += '    </tr>\n'
+                    it_html += '  </thead>\n'
+                    it_html += '  <tbody>\n'
+                    for _, row in inlinedata_filtered_pivot.iterrows():
+                        it_html += '    <tr>\n'
+                        for col in inlinedata_filtered_pivot.columns:
+                            val = row[col]
+                            if pd.isna(val):
+                                formatted_val = ""
+                            elif isinstance(val, (int, float)) and abs(val) >= 1e6:
+                                formatted_val = f"{val:.2e}"
+                            elif isinstance(val, (int, float)):
+                                if abs(val) < 0.01 and val != 0:
+                                    formatted_val = f"{val:.5g}"
+                                else:
+                                    formatted_val = f"{val:.2f}"
+                            else:
+                                formatted_val = str(val)
+                            
+                            style = ""
+                            if col in ['UCL', 'CL', 'LCL']:
+                                style = 'background-color:#e0f7fa;'
+                            elif col in ['Module', 'Item']:
+                                style = 'background-color:#f0fff4;'
+                            else:
+                                style = 'width:70px; min-width:70px; max-width:70px;'
+                            
+                            it_html += f'      <td style="{style}">{formatted_val}</td>\n'
+                        it_html += '    </tr>\n'
+                    it_html += '  </tbody>\n'
+                    it_html += '</table>\n'
+                    inline_table_html = it_html
+
+                    # ==================== Lot Detail Table HTML 렌더링 ====================
+                    et_log_styled = et_log.style.format(na_rep="").hide(axis='index')
+                    lot_detail_html = et_log_styled.set_table_attributes('class="lot-detail-table"').to_html()
+
+                    # ==================== Anomaly Detection & GPT 요약 ====================
+                    anomaly_html = ""
+                    gpt_summary_html = ""
+                    try:
+                        import base64
+                        
+                        # 1. GPT OSS 120B 우회 호출 (Top 6 선정 및 요약)
+                        gpt_summary_html, top_item_names = generate_report_summary(metrics_dict)
+                        
+                        # 2. HTML 3x2 Grid 차트 생성
+                        if top_item_names:
+                            anomaly_html = '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">'
+                            for item in top_item_names:
+                                img_path = f"RUN/TEMP/Trend_{item}.png"
+                                if os.path.exists(img_path):
+                                    with open(img_path, "rb") as f:
+                                        img_b64 = base64.b64encode(f.read()).decode('utf-8')
+                                    anomaly_html += f'<div style="text-align:center;"><img src="data:image/png;base64,{img_b64}" style="max-width:100%; border:1px solid #ddd;"/><br><b>{item}</b></div>'
+                            anomaly_html += '</div>'
+                        else:
+                            anomaly_html = '<p>이상항목 없음</p>'
+                            
+                    except Exception as ae:
+                        print(f"[WARN] Anomaly pipeline/GPT skipped: {ae}")
+
+                    # ==================== HTML 조립 ====================
+                    sub_title = f'{target_lot_id} / {target_step_merged}'
+                    html_content = html_code.replace('sub_title', sub_title)
+
+                    html_content = html_content.replace(
+                        '<div id="target0"></div>',
+                        f'<div id="target0"><div class="section-title">■ [0] Anomaly Summary</div>{gpt_summary_html}<br>{anomaly_html}</div>'
+                    )
+                    html_content = html_content.replace(
+                        '<div id="target1"></div>',
+                        f'<div id="target1"><div class="section-title">■ [1] Score Board</div>'
+                        f'<div class="table-container">{score_board_html}</div></div>'
+                    )
+                    html_content = html_content.replace(
+                        '<div id="target2"></div>',
+                        f'<div id="target2"><div class="section-title">■ [2] Inline Table</div>'
+                        f'<div class="table-container">{inline_table_html}</div></div>'
+                    )
+                    html_content = html_content.replace(
+                        '<div id="target3"></div>',
+                        f'<div id="target3"><div class="section-title">■ [3] 최근 DC측정자재 상세</div>'
+                        f'<div class="table-container">{lot_detail_html}</div></div>'
+                    )
+                    html_content = html_content.replace(
+                        '<div id="target4"></div>',
+                        ''
+                    )
+
+                    # ==================== HTML 저장 ====================
+                    with open(f'{html_save_path}{fname}', 'w', encoding='utf-8') as hf:
+                        hf.write(html_content)
+                    print(f'[INFO] HTML 저장 완료: {html_save_path}{fname}')
+
+                    # ==================== 고화질 PPT(EDM) 미사용 ====================
+
+                    # ==================== S3 업로드 (사내 환경 전용) ====================
+                    if S3_CONNECT and client:
+                        try:
+                            client.upload_file(
+                                f'{low_qual_ppt_save_path}{final_ppt_file_name_DX}',
+                                bucket_dx,
+                                f'{vehicle}/{final_ppt_file_name_DX}'
+                            )
+                            print(f'[INFO] S3 업로드 완료: {final_ppt_file_name_DX}')
+                        except Exception as s3e:
+                            print(f'[WARN] S3 업로드 스킵: {s3e}')
+
+                    log_to_file(f"{search_key} Report 발행 완료", query_log)
+                    print(f'[INFO] *****{search_key} AUTO LOT Report 발행 완료*****')
+
+                except Exception as e:
+                    print(f'[ERROR] {search_key} Report 발행 실패: {e}')
+                    traceback.print_exc()
+                    log_to_file(f"{search_key} Report 발행 실패: {e}", error_log)
+                    continue
+
+                finally:
+                    clear_temp_inside_run()
+                    clear_anomaly_inside_run()
+                    gc.collect()
+
+        else:
+            print("[INFO] dc_done_list가 비어있습니다. Report 발행 대상 없음")
+
+    else:
+        print(f"[INFO] DB_Setting_mode = {DB_Setting_mode}, report_making = {report_making}")
+        print("[INFO] Report 미발행 모드")
+
+    conn.close()
+    print(f'[INFO] ============== {vehicle} 전체 프로세스 완료 ==============')
+
+else:
+    print("[ERROR] reformatter 검증 실패. 프로그램 종료.")
