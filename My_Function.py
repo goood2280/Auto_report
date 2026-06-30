@@ -275,58 +275,146 @@ def apply_style_by_index(row):
     return styles
 
 
-def Reformatize(pivoted_data, ALIAS, FORMULA):
+def Reformatize(data, ALIAS, FORMULA):
     """ADDP(Arithmetic Derived Data Parameter) 수식 컬럼을 계산하여 DataFrame에 추가.
 
-    reformatter의 ADDP 카테고리에 정의된 수식을 파싱하여 새 컬럼을 생성합니다.
-    수식 내 ``{컬럼명}`` 참조를 실제 DataFrame 컬럼값으로 치환한 뒤 ``eval()``로
-    계산합니다.
+    reformatter의 ADDP 카테고리 수식(ADDP FORM)을 파싱하여 새 컬럼을 생성합니다.
+    수식 내 ``{ALIAS}`` 참조는 ``pivot.get("ALIAS")`` 로 치환되어 해당 컬럼값으로
+    계산됩니다.
 
     ADDP 수식 예시:
-        "1.0*({ITEM_A} - {ITEM_B})"  →  ITEM_A 값에서 ITEM_B 값을 뺀 결과
+        "1.0*(({VTH_N} + {VTH_P}) / 2)"  →  (VTH_N + VTH_P) / 2
+
+    ADDP → ADDP 재귀 참조
+    ---------------------
+    ADDP 항목의 ``{}`` 안 ALIAS가 또 다른 ADDP일 수 있습니다(ADDP가 ADDP를 참조).
+    이 함수는 고정점(fixpoint) 반복 루프로 매 패스마다 "지금 계산 가능한" 항목만
+    먼저 풀어 그 결과를 ``data`` 컬럼으로 추가합니다. 따라서 어떤 ADDP가 아직
+    계산되지 않은 다른 ADDP를 참조하면 그 패스에서는 실패(에러)로 남겨두었다가,
+    참조 대상이 채워진 다음 패스에서 해소됩니다. 결과적으로 ``{ADDP}`` → ``{ADDP}``
+    → ... → 최종 real item 까지 체인을 **재귀적으로 따라가** 계산됩니다.
+    (체인 깊이만큼 반복하도록 최대 ``max(10, ADDP수 + 1)`` 패스 수행)
 
     Parameters
     ----------
-    pivoted_data : pd.DataFrame
-        피벗 완료된 ET 데이터.
+    data : pd.DataFrame
+        피벗 완료된 ET 데이터 (REAL item이 컬럼으로 존재).
     ALIAS : list[str]
         ADDP 항목의 별칭(새 컬럼명) 리스트.
     FORMULA : list[str]
-        ADDP 수식 문자열 리스트. ``{COL}`` 형태로 기존 컬럼을 참조.
+        ADDP 수식 문자열 리스트. ``{COL}`` 형태로 다른 컬럼(REAL/ADDP)을 참조.
 
     Returns
     -------
     pd.DataFrame
-        ADDP 컬럼이 추가된 DataFrame (원본 수정 후 반환).
-
-    Notes
-    -----
-    수식 eval 시 보안을 위해 ``__builtins__``를 제한하여 ``abs``와 ``float``만 허용합니다.
+        ADDP 컬럼이 추가된 DataFrame.
     """
-    for alias, formula in zip(ALIAS, FORMULA):
-        try:
-            expr = str(formula)
-            # {COL} 형태의 컬럼 참조를 찾아 안전한 변수명으로 치환
-            refs = re.findall(r"\{([^}]+)\}", expr)
-            ns = {}
-            missing_refs = []
-            for ref in refs:
-                safe = "v_" + re.sub(r"[^a-zA-Z0-9_]", "_", ref)
-                expr = expr.replace("{" + ref + "}", safe)
-                if ref in pivoted_data.columns:
-                    ns[safe] = pd.to_numeric(pivoted_data[ref], errors="coerce")
+    def addpf(formula, data):
+        pivot = data
+        def LOG(u, df):
+            return np.log10(ABS(df))
+        def POWER(a, b):
+            return np.power(a, b)
+        def sqrt(a):
+            return np.sqrt(a)
+        def ABS(a):
+            return np.abs(a)
+        def rmax(*args):
+            df_max = pd.DataFrame()
+            for arg in args:
+                df_max = pd.concat([df_max, arg], axis=1)
+            return df_max.max(axis=1)
+        def rmin(*args):
+            df_min = pd.DataFrame()
+            for arg in args:
+                df_min = pd.concat([df_min, arg], axis=1)
+            return df_min.min(axis=1)
+        def MA_Window(*args):
+            # set data
+            x_data, y_data = [], pd.DataFrame()
+            spec, compliance = [], 10
+            for arg in args:
+                if isinstance(arg, list):
+                    x_data = np.array(arg)
+                elif isinstance(arg, str) or isinstance(arg, int) or isinstance(arg, float):
+                    if isinstance(spec, list):
+                        spec = np.log10(float(arg))
+                    else:
+                        compliance = abs(float(arg))
                 else:
-                    # 누락 참조 컬럼 → 길이가 맞는 NaN Series (스칼라 broadcast 방지)
-                    ns[safe] = pd.Series(np.nan, index=pivoted_data.index)
-                    missing_refs.append(ref)
-            if missing_refs:
-                print(f"[WARN] Reformatize: {alias} 수식의 참조 컬럼 누락 → NaN 처리: {missing_refs}")
-            # eval 보안: __builtins__ 제한, abs/float만 허용
-            result = eval(expr, {"__builtins__": {"abs": abs, "float": float}}, ns)
-            pivoted_data[alias] = result
-        except Exception as e:
-            print(f"[WARN] Reformatize error ({alias}): {e}")
-    return pivoted_data
+                    y_data = pd.concat([y_data, arg.apply(lambda a: np.log10(float(a) + 1E-14))], axis=1)
+            # check & calculate data
+            if x_data.shape[0] == y_data.shape[1]:
+                # 계수계산
+                df_coeffs = pd.DataFrame(np.polyfit(x_data, y_data.T, 2).T, index=y_data.index, columns=['a2', 'a1', 'a0'])
+                # 판별식계산
+                df_coeffs['discriminant'] = df_coeffs['a1']**2 - 4 * df_coeffs['a2'] * (df_coeffs['a0'] - spec)
+                # 양방향margin계산
+                df_coeffs['plus_margin'] = np.where(df_coeffs['discriminant']>=0, (-df_coeffs['a1'] + np.sqrt(df_coeffs['discriminant'])) / (2 * df_coeffs['a2']), np.nan)
+                df_coeffs['minus_margin'] = np.where(df_coeffs['discriminant']>=0, (-df_coeffs['a1'] - np.sqrt(df_coeffs['discriminant'])) / (2 * df_coeffs['a2']), np.nan)
+                # compliance적용
+                df_coeffs['plus_margin'] = np.where(df_coeffs['plus_margin']>compliance, compliance, df_coeffs['plus_margin'])
+                df_coeffs['minus_margin'] = np.where(df_coeffs['minus_margin']<-compliance, -compliance, df_coeffs['minus_margin'])
+                # 볼록함수예외처리
+                df_coeffs.loc[(df_coeffs['discriminant']<0)&(df_coeffs['a2']>0), ['plus_margin','minus_margin']] = 0
+                # 오목함수예외처리
+                df_coeffs.loc[df_coeffs['a2']<=0, ['plus_margin','minus_margin']] = [compliance,-compliance]
+                # ovl_index계산
+                df_coeffs['ovl_index'] = -0.5 * (df_coeffs['plus_margin'] + df_coeffs['minus_margin'])
+                # ma_window계산
+                df_coeffs[''] = df_coeffs['plus_margin'] - df_coeffs['minus_margin']
+                # NEW ma_window계산
+                df_coeffs['new'] = df_coeffs[['plus_margin', 'minus_margin']].abs().min(axis=1)
+                return df_coeffs[['minus_margin','plus_margin','ovl_index','','new']]
+            else:
+                dummy = [np.nan for _ in range(5)]
+                return pd.DataFrame([dummy for _ in range(y_data.shape[0])], index=y_data.index, columns=['minus_margin','plus_margin','ovl_index','','new'])
+        def stddev(a):
+            return a.groupby([pivot["root_lot_id"], pivot["wafer_id"], pivot["tkout_time"]]).transform(np.std)
+        def std(a):
+            return a.groupby([pivot["root_lot_id"], pivot["wafer_id"], pivot["tkout_time"]]).transform(np.std)
+        def STD(a):
+            return a.groupby([pivot["root_lot_id"], pivot["wafer_id"], pivot["tkout_time"]]).transform(np.std)
+        def AVG(a):
+            return a.groupby([pivot["root_lot_id"], pivot["wafer_id"], pivot["tkout_time"]]).transform(np.mean)
+        try:
+            a = eval(formula)
+        except Exception:
+            a = 'error'
+        return a
+
+    # pivot 된 data에 Reformatter(ADDP) 적용 — 고정점 반복으로 ADDP→ADDP 재귀 해소
+    ALIAS_LEFT = []
+    FORMULA_LEFT = []
+    max_passes = max(10, len(ALIAS) + 1)   # ADDP 참조 체인 깊이만큼 반복 보장
+    for _ in range(max_passes):
+        calnum = len(ALIAS)   # 패스 시작 시점의 미계산 항목 수
+        for alias, formula in zip(ALIAS, FORMULA):
+            formula_tmp = formula
+            formula = formula.replace('{', '(pivot.get("')
+            formula = formula.replace('}', '"))')
+            a = addpf(formula, data)   # ADDP 계산 실행
+            if str(type(a)) == "<class 'str'>":
+                # 아직 못 푼 항목(참조 ADDP가 아직 미계산 등) → 다음 패스에서 재시도
+                ALIAS_LEFT.append(alias)
+                FORMULA_LEFT.append(formula_tmp)
+                continue
+            else:
+                if isinstance(a, pd.DataFrame) and a.shape[1] > 1:
+                    data[[alias + '_' + col if col != '' else alias for col in a]] = a
+                else:
+                    data[alias] = a
+        ALIAS = ALIAS_LEFT
+        FORMULA = FORMULA_LEFT
+        ALIAS_LEFT = []
+        FORMULA_LEFT = []
+
+        if calnum == len(ALIAS):   # 한 패스 동안 진전이 없으면(더 이상 해소 불가) 종료
+            break
+
+    if ALIAS:
+        print(f"[WARN] Reformatize: 참조를 해소하지 못한 ADDP 항목: {ALIAS}")
+    return data
 
 
 def clear_temp_inside_run():
