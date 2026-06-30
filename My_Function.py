@@ -97,7 +97,7 @@ def reformatter_verify(reformatter):
         return False
 
     # 선택 컬럼(없어도 동작하나 차트 표현에 사용) — 경고만 출력
-    optional = ["UNIT", "TARGET", "REPOR LOG SCALE", "CAT1", "CAT2", "PPT_ONLY"]
+    optional = ["UNIT", "TARGET", "REPORT LOG SCALE", "CAT1", "CAT2", "PPT_ONLY"]
     opt_missing = [c for c in optional if c not in reformatter.columns]
     if opt_missing:
         print(f"[WARN] reformatter 선택 컬럼 누락(차트 표현 일부 제한): {opt_missing}")
@@ -767,10 +767,10 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             elif direction == 'LOWER':
                 spec_high = None
 
-            # REPOR LOG SCALE: 값 축 log10 적용 여부
+            # REPORT LOG SCALE: 값 축 log10 적용 여부
             log_scale = False
-            if 'REPOR LOG SCALE' in spec_data.columns:
-                _ls = spec_data.loc[item_name, 'REPOR LOG SCALE']
+            if 'REPORT LOG SCALE' in spec_data.columns:
+                _ls = spec_data.loc[item_name, 'REPORT LOG SCALE']
                 log_scale = str(_ls).strip().lower() in ('true', '1', '1.0', 'yes')
 
             # UNIT: 축 라벨 단위
