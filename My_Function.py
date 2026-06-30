@@ -474,49 +474,79 @@ def clear_anomaly_inside_run():
 # ===================================================================
 
 def make_title_page(template_path, vehicle, lot_id, step_merged):
-    """PPT 템플릿(HOL_Auto_Report_Template.pptx)을 표지로 사용하여 Presentation 반환.
+    """코드로 직접 그리는 표지(첫 페이지) Presentation을 생성하여 반환.
 
-    템플릿 파일을 그대로 열어 그 표지 슬라이드가 결과 PPT의 **가장 앞장(첫 페이지)**
-    이 되도록 합니다. 이후 scoreboard / CAT2 description / index 슬라이드는 모두
-    이 표지 뒤에 추가됩니다. 템플릿 파일이 없으면 빈 표지로 대체합니다.
+    HOL_Auto_Report_Template.pptx 파일을 읽지 않고(템플릿 의존 제거), 빈 16:9
+    슬라이드에 표지를 직접 구성합니다.
+      - 중앙 대형 제목: "{vehicle} HOL Auto Report"
+      - 그 아래: "{lot_id} / {step_merged}"  (step_merged = step_desc(step_id))
+      - 우상단: 발행 날짜(오늘)
+      - 상/하단 네이비 액센트 바 + 중앙 구분선으로 깔끔한 디자인
+
+    Args:
+        template_path: (미사용, 호환성 유지) 과거 템플릿 경로. 더 이상 읽지 않음.
+        vehicle, lot_id, step_merged: 표지에 표기할 정보.
     """
     from pptx import Presentation
     from pptx.util import Inches, Pt
-    from pptx.enum.text import PP_ALIGN
+    from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import MSO_SHAPE
+    from datetime import datetime as _dt
 
-    if template_path and os.path.exists(template_path):
-        prs = Presentation(template_path)   # 템플릿 표지가 첫 페이지가 됨
-    else:
-        print(f"[WARN] 템플릿 PPT를 찾을 수 없어 빈 표지로 대체합니다: {template_path}")
-        prs = Presentation()
+    FONT = GLOBAL_CONFIG.theme_font_family
+    NAVY = RGBColor(*GLOBAL_CONFIG.theme_title_color)
+    GREY = RGBColor(0x60, 0x6A, 0x7A)
+    RECT = MSO_SHAPE.RECTANGLE
 
-    # 와이드스크린 16:9 비율로 슬라이드 크기 설정 (13.333" x 7.5")
+    prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
+    SW, SH = prs.slide_width, prs.slide_height
 
-    # 템플릿에 슬라이드가 없으면 빈 표지 한 장 생성 (slides[0] 보장)
-    if len(prs.slides) == 0:
-        prs.slides.add_slide(prs.slide_layouts[6])
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # 빈 레이아웃
+    # 배경 흰색
+    bg = slide.background
+    bg.fill.solid(); bg.fill.fore_color.rgb = RGBColor(255, 255, 255)
 
-    # 템플릿의 첫 번째 슬라이드(표지)에 제목/lot 정보를 기입
-    slide = prs.slides[0]
-    for shape in slide.shapes:
-        if shape.has_text_frame:
-            shape.text_frame.clear()
-            p = shape.text_frame.paragraphs[0]
-            p.text = f"{vehicle} HOL Auto Report"
-            p.alignment = PP_ALIGN.CENTER
-            for run in p.runs:
-                run.font.size = Pt(32)
-                run.font.bold = True
-                run.font.name = GLOBAL_CONFIG.theme_font_family
-            p2 = shape.text_frame.add_paragraph()
-            p2.text = f"{lot_id} / {step_merged}"
-            p2.alignment = PP_ALIGN.CENTER
-            for run in p2.runs:
-                run.font.size = Pt(18)
-                run.font.name = GLOBAL_CONFIG.theme_font_family
-            break
+    def _bar(top, height):
+        b = slide.shapes.add_shape(RECT, Inches(0), top, SW, height)
+        b.fill.solid(); b.fill.fore_color.rgb = NAVY; b.line.fill.background()
+        b.shadow.inherit = False
+        return b
+
+    # 상단/하단 네이비 액센트 바
+    _bar(Inches(0), Inches(0.45))
+    _bar(SH - Inches(0.45), Inches(0.45))
+
+    # 우상단 발행 날짜
+    today = _dt.now().strftime('%Y-%m-%d')
+    date_box = slide.shapes.add_textbox(SW - Inches(3.6), Inches(0.7), Inches(3.3), Inches(0.4))
+    dp = date_box.text_frame.paragraphs[0]
+    dp.text = f"발행일  {today}"
+    dp.alignment = PP_ALIGN.RIGHT
+    dp.font.size = Pt(13); dp.font.color.rgb = GREY; dp.font.name = FONT
+
+    # 중앙 대형 제목
+    title_box = slide.shapes.add_textbox(Inches(0.6), Inches(2.55), SW - Inches(1.2), Inches(1.5))
+    ttf = title_box.text_frame; ttf.word_wrap = True
+    ttf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    tp = ttf.paragraphs[0]
+    tp.text = f"{vehicle} HOL Auto Report"
+    tp.alignment = PP_ALIGN.CENTER
+    tp.font.size = Pt(46); tp.font.bold = True; tp.font.color.rgb = NAVY; tp.font.name = FONT
+
+    # 중앙 구분선 (제목 아래)
+    line = slide.shapes.add_shape(RECT, SW / 2 - Inches(2.2), Inches(4.18), Inches(4.4), Pt(2.5))
+    line.fill.solid(); line.fill.fore_color.rgb = NAVY; line.line.fill.background()
+    line.shadow.inherit = False
+
+    # 서브타이틀: lot_id / step_desc(step_id)
+    sub_box = slide.shapes.add_textbox(Inches(0.6), Inches(4.35), SW - Inches(1.2), Inches(0.8))
+    sp = sub_box.text_frame.paragraphs[0]
+    sp.text = f"{lot_id}  /  {step_merged}"
+    sp.alignment = PP_ALIGN.CENTER
+    sp.font.size = Pt(24); sp.font.bold = False; sp.font.color.rgb = GREY; sp.font.name = FONT
 
     return prs
 
@@ -841,8 +871,14 @@ def insert_plots(merged_df, prs, description_image_info_dict,
     # 따라서 spec_data의 각 ALIAS에 대해, 그 ALIAS로 시작하는 모든 merged_df 컬럼을
     # 페이지 대상에 포함시켜 파생 항목도 빠짐없이 PPT 페이지가 생성되도록 한다.
     # plot_items: (데이터 컬럼명, spec 메타 출처 ALIAS)
+    # REPORT ORDER 오름차순(작은 값 먼저)으로 index 정렬
+    if 'REPORT ORDER' in spec_data.columns:
+        _ro = pd.to_numeric(spec_data['REPORT ORDER'], errors='coerce')
+        ordered_index = _ro.sort_values(kind='stable').index
+    else:
+        ordered_index = spec_data.index
     plot_items = []
-    for nm in spec_data.index:
+    for nm in ordered_index:
         if nm in merged_df.columns:
             plot_items.append((nm, nm))
         else:
@@ -855,6 +891,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
 
     # --- 항목별 슬라이드 생성 루프 (Per-Item Slide Generation Loop) ---
     total_items = len(plot_items)
+    summary_rows = []   # 마지막 summary 페이지용 (index별 REPORT DIRECTION 기준 집계값)
     print("=" * 60)
     print(f"[insert_plots] 차트 생성 시작 - 총 {total_items}개 index(파생 포함) 처리 예정")
     print("=" * 60)
@@ -985,6 +1022,28 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 if _u and _u.lower() != 'nan':
                     unit = _u
             y_label = f"{item_name} [{unit}]" if unit else item_name
+
+            # ---- Summary 페이지용 집계값 (REPORT DIRECTION 기준) ----
+            # BOTH→Median / UPPER→P90 / LOWER→P10 (해당 lot의 wafer 데이터 aggregation)
+            try:
+                _svals = pd.to_numeric(item_df[item_name], errors='coerce').dropna()
+                if len(_svals) > 0:
+                    if direction == 'UPPER':
+                        _sval, _sstat = _svals.quantile(0.90), 'P90'
+                    elif direction == 'LOWER':
+                        _sval, _sstat = _svals.quantile(0.10), 'P10'
+                    else:
+                        _sval, _sstat = _svals.median(), 'Median'
+                    _orig_low = spec_data.loc[spec_name, "SPECLOW"] if 'SPECLOW' in spec_data.columns else None
+                    _orig_high = spec_data.loc[spec_name, "SPECHIGH"] if 'SPECHIGH' in spec_data.columns else None
+                    summary_rows.append({
+                        'index': item_name, 'direction': direction, 'stat': _sstat,
+                        'value': float(_sval),
+                        'speclow': None if pd.isna(_orig_low) else _orig_low,
+                        'spechigh': None if pd.isna(_orig_high) else _orig_high,
+                    })
+            except Exception as _se:
+                print(f"[WARN] summary 집계 실패 ({item_name}): {_se}")
 
             slide = prs.slides.add_slide(prs.slide_layouts[6])
             
@@ -1463,6 +1522,75 @@ def insert_plots(merged_df, prs, description_image_info_dict,
     print("=" * 60)
     print(f"[insert_plots] 차트 생성 완료 - 총 {total_items}개 index 처리")
     print("=" * 60)
+
+    # ==================== 마지막 Summary 페이지 (index별 집계 테이블) ====================
+    # 값 산출 기준: REPORT DIRECTION → BOTH=Median / UPPER=P90 / LOWER=P10
+    if summary_rows:
+        try:
+            s_slide = prs.slides.add_slide(prs.slide_layouts[6])
+            sbg = s_slide.background
+            sbg.fill.solid(); sbg.fill.fore_color.rgb = RGBColor(255, 255, 255)
+
+            # 상단 헤더 바
+            hdr = s_slide.shapes.add_shape(1, Inches(0), Inches(0), prs.slide_width, Inches(0.62))
+            hdr.fill.solid(); hdr.fill.fore_color.rgb = RGBColor(*NAVY_RGB); hdr.line.fill.background()
+            htf = hdr.text_frame; htf.word_wrap = True
+            htf.margin_left = Inches(0.2)
+            hp = htf.paragraphs[0]
+            hp.text = "Summary  -  Index Aggregation (BOTH=Median / UPPER=P90 / LOWER=P10)"
+            hp.font.size = Pt(18); hp.font.bold = True
+            hp.font.color.rgb = RGBColor(255, 255, 255); hp.font.name = FONT
+            hp.alignment = PP_ALIGN.LEFT
+
+            headers = ["Index", "Direction", "Stat", "Value", "Spec Low", "Spec High"]
+            ncol = len(headers)
+            nrow = len(summary_rows) + 1
+            top = Inches(0.78)
+            tbl_h = Inches(min(6.5, max(0.30 * nrow, 0.6)))
+            table = s_slide.shapes.add_table(nrow, ncol, Inches(0.2), top,
+                                             prs.slide_width - Inches(0.4), tbl_h).table
+            col_ws = [3.7, 1.7, 1.4, 2.2, 1.95, 1.95]  # inch (합 ≈ 12.9)
+            for ci, w in enumerate(col_ws):
+                table.columns[ci].width = Inches(w)
+
+            # 헤더 행
+            for ci, h in enumerate(headers):
+                c = table.cell(0, ci); c.text = h
+                c.fill.solid(); c.fill.fore_color.rgb = RGBColor(*NAVY_RGB)
+                c.vertical_anchor = MSO_ANCHOR.MIDDLE
+                for par in c.text_frame.paragraphs:
+                    par.font.size = Pt(9); par.font.bold = True
+                    par.font.color.rgb = RGBColor(255, 255, 255); par.font.name = FONT
+                    par.alignment = PP_ALIGN.CENTER
+
+            # 본문 행
+            for ri, r in enumerate(summary_rows, start=1):
+                row_vals = [
+                    str(r['index']), str(r['direction']), str(r['stat']),
+                    f"{r['value']:.3f}",
+                    "" if r['speclow'] is None else f"{float(r['speclow']):.3f}",
+                    "" if r['spechigh'] is None else f"{float(r['spechigh']):.3f}",
+                ]
+                oos = False
+                try:
+                    if r['speclow'] is not None and r['value'] < float(r['speclow']): oos = True
+                    if r['spechigh'] is not None and r['value'] > float(r['spechigh']): oos = True
+                except Exception:
+                    pass
+                base_bg = RGBColor(245, 247, 250) if ri % 2 == 1 else RGBColor(255, 255, 255)
+                for ci, v in enumerate(row_vals):
+                    c = table.cell(ri, ci); c.text = v
+                    c.fill.solid()
+                    c.fill.fore_color.rgb = RGBColor(0xFF, 0xD6, 0xD6) if (ci == 3 and oos) else base_bg
+                    c.vertical_anchor = MSO_ANCHOR.MIDDLE
+                    for par in c.text_frame.paragraphs:
+                        par.font.size = Pt(8); par.font.name = FONT
+                        par.font.color.rgb = RGBColor(0xB0, 0x00, 0x00) if (ci == 3 and oos) else RGBColor(0, 0, 0)
+                        par.alignment = PP_ALIGN.LEFT if ci == 0 else PP_ALIGN.CENTER
+            print(f"[insert_plots] Summary 페이지 생성 완료 ({len(summary_rows)}개 index)")
+        except Exception as _e:
+            print(f"[WARN] Summary 페이지 생성 실패: {_e}")
+
     return prs, metrics_dict
 
 def etdata_query():

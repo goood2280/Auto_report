@@ -77,8 +77,10 @@ print('slides:', len(prs.slides), '| pics/slide:', pics, '| size MB:', round(siz
 print('metrics:', list(metrics.keys()))
 
 # 단언
-assert len(prs.slides) == n_items, f'expected {n_items} slides, got {len(prs.slides)}'
-assert all(p >= 6 for p in pics), f'each slide needs >=6 pictures, got {pics}'
+# 슬라이드 = index 페이지(n_items) + 마지막 summary 페이지 1장
+assert len(prs.slides) == n_items + 1, f'expected {n_items + 1} slides (incl summary), got {len(prs.slides)}'
+# 마지막 summary 페이지(표만 있음) 제외, 각 index 슬라이드는 그림 >=6개
+assert all(p >= 6 for p in pics[:-1]), f'each index slide needs >=6 pictures, got {pics}'
 assert set(spec_data.index) == set(metrics.keys()), 'metrics keys mismatch (ADDP 포함 전 항목)'
 # target 스코프: target(T1234.1)은 25 wafer, 이력/Vehicle_B는 12 → target만 쓰면 global!=target
 md = metrics['VTH_N']
