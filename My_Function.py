@@ -549,3 +549,295 @@ def Reformatize(data, ALIAS, FORMULA):
 
     return data
 
+
+# Chart Page 삽입하는 함수
+def insert_plots(  
+    merged_df,  
+    prs,  
+    description_image_info_dict,  
+    target_fab_lot_id,  
+    target_lot_id,  
+    target_DC_step,  
+    target_DC_step_id,  
+    reformatter,  
+    img_quality=100,  
+    ref=False,  
+    color_dict={  
+        '1': '#FF0000',  '2': '#00FF00',  '3': '#0000FF',  
+        '4': '#FFFF00',  '5': '#FF00FF',  '6': '#00FFFF',  
+        '7': '#800000',  '8': '#808000',  '9': '#008000',  
+        '10': '#800080','11': '#008080','12': '#000080',  
+        '13': '#FFA500','14': '#A52A2A','15': '#8B0000',  
+        '16': '#FFD700','17': '#4B0082','18': '#EE82EE',  
+        '19': '#00FF7F','20': '#FF1493','21': '#1E90FF',  
+        '22': '#D2691E','23': '#7FFF00','24': '#DC143C',  
+        '25': '#B8860B'  
+    },  
+):  
+    """  
+    Reference Lot / Wafer 를 사용하지 않는 버전.  
+    기존 인터페이스와 변수명은 그대로 유지합니다.  
+    """
+    warnings.simplefilter("ignore", UserWarning)
+
+    # --------------------------------------------------------------  
+    # 1) 보조 함수 : 문자열 → float 안전 변환  
+    # --------------------------------------------------------------  
+    def to_float(x):  
+        """NaN·문자열·None 을 모두 np.nan 로, 숫자는 float 로 반환"""  
+        if pd.isna(x):  
+            return np.nan  
+        try:  
+            return float(x)  
+        except Exception:  
+            return np.nan
+
+    # --------------------------------------------------------------  
+    # 2) 키값 생성 및 기본 데이터 준비  
+    # --------------------------------------------------------------  
+    match_key = f"{target_lot_id}_{target_DC_step_id}"  
+    search_key = f"{target_fab_lot_id}_{target_DC_step_id}"  
+    search_key_DC_step_ver = f"{target_fab_lot_id}_{target_DC_step}"
+
+    print("match_key :", match_key)  
+    print("search_key :", search_key)  
+    print("search_key_DC_step_ver :", search_key_DC_step_ver)
+
+    df = merged_df[merged_df["match_key"] == match_key].copy()
+
+    # --------------------------------------------------------------  
+    # 3) PPT 레이아웃 기본 설정  
+    # --------------------------------------------------------------  
+    slide_width = prs.slide_width  
+    slide_height = prs.slide_height  
+    slide_width_tick = slide_width / 24  
+    slide_height_tick = slide_height / 12
+
+    margin = Inches(0.1)  
+    title_space = Inches(1)  
+    slide_height -= title_space  
+    middle_of_slide = 0.65 * slide_width
+
+    # --------------------------------------------------------------  
+    # 4) 집계 함수 정의  
+    # --------------------------------------------------------------  
+    agg_funcs_dict_upper = {  
+        "P95": lambda x: x.quantile(0.95),  
+        "P90": lambda x: x.quantile(0.90),  
+        "MED": lambda x: x.median(),  
+        "P10": lambda x: x.quantile(0.10),  
+    }  
+    agg_funcs_dict_lower = {  
+        "P90": lambda x: x.quantile(0.90),  
+        "MED": lambda x: x.median(),  
+        "P10": lambda x: x.quantile(0.10),  
+        "P05": lambda x: x.quantile(0.05),  
+    }  
+    agg_funcs_dict_both = {  
+        "P90": lambda x: x.quantile(0.90),  
+        "MED": lambda x: x.median(),  
+        "AVG": lambda x: x.mean(),  
+        "P10": lambda x: x.quantile(0.10),  
+    }
+
+    # --------------------------------------------------------------  
+    # 5) X‑축 (Wafer ID) 리스트 정의 (Reference 제외)  
+    # --------------------------------------------------------------  
+    x_list = [str(i) for i in range(1, 26)]
+
+    df["WAFER_ID_str"] = df["WAFER_ID"].apply(  
+        lambda x: str(x) if isinstance(x, int) else x  
+    )
+
+    # --------------------------------------------------------------  
+    # 6) Reference 컬럼(가능성 있는 경우) 삭제 (구버전 호환)  
+    # --------------------------------------------------------------  
+    cols_to_drop = []  
+    for col in df.columns:  
+        ref_exists = df[df["WAFER_ID_str"] == "Ref."][col].notna().any()  
+        nonref_na = df[df["WAFER_ID_str"] != "Ref."][col].isna().all()  
+        if ref_exists and nonref_na:  
+            cols_to_drop.append(col)  
+    df.drop(columns=cols_to_drop, inplace=True, errors="ignore")
+
+    # --------------------------------------------------------------  
+    # 7) item_index_table 초기화 (UnboundLocalError 방지)  
+    # --------------------------------------------------------------  
+    item_index_table = pd.DataFrame()
+
+    # --------------------------------------------------------------  
+    # 8) reformatter 정렬 후 메인 루프  
+    # --------------------------------------------------------------  
+    cat2 = ""  
+    reformatter = reformatter.sort_values("REPORT ORDER")
+
+    # wafer 별 결과 축적을 위한 딕셔너리 (alias 루프 밖에서 정의)
+    wafer_anomaly_results = {}  # {wafer_id: [alias_result_lines]}
+    
+    for alias in tqdm(reformatter.index, desc="진행 중", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'):
+        try:  
+            tqdm.write(f"{alias} 에 대한 plot 삽입중..")
+            if alias not in df:  
+                continue
+
+            # ------------------------------------------------------  
+            # 8‑1) 컬럼명·단위 변환  
+            # ------------------------------------------------------  
+            target_data = alias  
+            target_data_changed = convert_target_data(  
+                target_data,  
+                suffix_list=GLOBAL_CONFIG.get("suffixes_remove"),  
+                replace_map=GLOBAL_CONFIG.get("replace_map"),  
+            )  
+            target_unit = reformatter.loc[alias, "UNIT"]  
+            df[target_data] = df[alias]
+
+            # ------------------------------------------------------  
+            # 8‑2) 반경 컬럼 리스트  
+            # ------------------------------------------------------  
+            radius_cols = [c for c in merged_df.columns if "Radius" in c]
+
+            # ------------------------------------------------------  
+            # 8‑3) 전체 데이터(다른 Lot 포함) 수집 – Reference와 무관  
+            # ------------------------------------------------------  
+            merged_df_target_data = merged_df.loc[  
+                :,  
+                [  
+                    "FAB_LOT_ID",  
+                    "MASK",  
+                    "ROOT_LOT_ID",  
+                    "WAFER_ID",  
+                    "STEP_SEQ",  
+                    "STEP_ID",  
+                    "TKOUT_TIME",  
+                    "FLAT_ZONE_POS",  
+                    "CHIP_X_POS",  
+                    "CHIP_Y_POS",  
+                    "CHIP_X_ADJ",  
+                    "CHIP_Y_ADJ",  
+                    "DC_Split",  
+                    "PGM(pt)",  
+                    "match_key",  
+                    "search_key",  
+                    target_data,  
+                ]  
+                + radius_cols,  
+            ].dropna(subset=[target_data])
+
+            # 숫자형 강제 변환 (문자열이 있으면 NaN 으로)  
+            merged_df_target_data[target_data] = pd.to_numeric(  
+                merged_df_target_data[target_data], errors="coerce"  
+            )  
+            df_target = df.dropna(subset=[target_data]).copy()  
+            df_target[target_data] = pd.to_numeric(  
+                df_target[target_data], errors="coerce"  
+            )
+
+            # ------------------------------------------------------  
+            # 8‑4) 색상 맵 설정 (Reference 색상 제외)  
+            # ------------------------------------------------------  
+            direction = reformatter.loc[alias, "REPORT DIRECTION"]  
+            if direction == "UPPER":  
+                color_list = ["blue", "grey", "red"]  
+            elif direction == "LOWER":  
+                color_list = ["red", "grey", "blue"]  
+            else:  
+                color_list = ["yellow", "blue", "red"]  
+            cmap = LinearSegmentedColormap.from_list(  
+                "custom_color_list", color_list, N=10  
+            )
+
+            # ------------------------------------------------------  
+            # 8‑5) 그룹화 (DC_Split, TEMPERATURE, FLAT_ZONE_POS)  
+            # ------------------------------------------------------  
+            df_groups = df_target.groupby(  
+                ["DC_Split", "TEMPERATURE", "FLAT_ZONE_POS"], observed=False  
+            )
+            for group_name, df_group in df_groups:  
+                # ---------- CAT2 슬라이드 ----------  
+                now_cat2 = reformatter.loc[alias, "CAT2"]  
+                if now_cat2 != cat2:  
+                    slide = prs.slides.add_slide(prs.slide_layouts[5])  
+                    title = slide.shapes.title  
+                    title.text = now_cat2  
+                    title.width, title.height = slide_width, Inches(1.75)  
+                    title.text_frame.paragraphs[0].font.size = Pt(80)  
+                    title.text_frame.paragraphs[0].font.name = "Arial Black"  
+                    title.left, title.top = 0, 0
+
+                    if now_cat2 in description_image_info_dict:  
+                        img = description_image_info_dict[now_cat2]  
+                        slide.shapes.add_picture(  
+                            img["stream"], img["left"], img["top"], img["width"], img["height"]  
+                        )  
+                    cat2 = now_cat2
+
+                # ---------- 그룹명 문자열 ----------  
+                group_name_str = ", ".join(  
+                    [  
+                        f"{val}°C"  
+                        if i == 1  
+                        else f"Rotation({val}°)"  
+                        if i == 2  
+                        else val  
+                        for i, val in enumerate(group_name)  
+                        if (i == 0)  
+                        or (i == 1 and int(val) != 25)  
+                        or (i == 2 and int(val) != 0)  
+                    ]  
+                )
+
+                # =======================================================  
+                # 9) 개별 차트 (Box, Trend, Table, Legend, Radius, CDF, MAP)  
+                # =======================================================
+
+                # ------------------- 9‑1) Box Plot -------------------  
+                slide = prs.slides.add_slide(prs.slide_layouts[6])  
+                title_box = slide.shapes.add_textbox(  
+                    margin, margin, prs.slide_width - 2 * margin, title_space  
+                )  
+                tf = title_box.text_frame  
+                tf.text = f"{target_data_changed}[{target_unit}]"  
+                tf.paragraphs[0].font.size = Pt(30)  
+                tf.paragraphs[0].font.name = "Arial"  
+                tf.paragraphs[0].font.color.rgb = RGBColor(0, 0, 255)
+
+                # 컬럼을 숫자형으로 변환 (이미 변환했지만 safety)  
+                df_group[target_data] = pd.to_numeric(df_group[target_data], errors="coerce")
+
+                fig, ax = plt.subplots(figsize=(15, 5))  
+                sns.boxplot(  
+                    x="WAFER_ID_str",  
+                    y=target_data,  
+                    hue="WAFER_ID_str",  
+                    data=df_group,  
+                    ax=ax,  
+                    palette=color_dict,  
+                    linewidth=2.5,  
+                    fliersize=5,  
+                    whis=[10, 90],  
+                    order=x_list,  
+                    legend=False,  
+                )
+
+                # -------------------------------------------------  
+                # SPEC / TARGET 값 → float 변환  
+                # -------------------------------------------------  
+                spec_low = to_float(  
+                    reformatter.loc[alias, "SPECLOW"]  
+                    if reformatter.loc[alias, "REPORT LOG SCALE"]  
+                    else reformatter.loc[alias, "SPECLOW"]  
+                )  
+                spec_high = to_float(  
+                    reformatter.loc[alias, "SPECHIGH"]  
+                    if reformatter.loc[alias, "REPORT LOG SCALE"]  
+                    else reformatter.loc[alias, "SPECHIGH"]  
+                )  
+                tg = to_float(reformatter.loc[alias, "TARGET"])
+
+                # -------------------------------------------------  
+                # ③ 로그 스케일 보정 (0 이하가 있으면 오류 발생)  
+                # -------------------------------------------------  
+                log_scale = bool(reformatter.loc[alias, "REPORT LOG SCALE"])  
+                if log_scale:  
+                    ax.set_yscale("log")  
