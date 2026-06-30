@@ -63,14 +63,18 @@ def reformatter_verify(reformatter):
     spec 표시·차트)에 필요한 컬럼을 모두 갖추고 있는지, REAL/ADDP 행이 올바른지
     확인합니다.
 
+    각 단계는 통과 여부를 ``[CHECK n] ... OK/FAIL`` 형태로 터미널에 출력합니다.
+
     검증 항목
     ---------
-    1. 필수 컬럼 존재 여부 (CATEGORY, ITEMID, ALIAS, SCALE FACTOR, ABSOLUTE,
-       ADDP FORM, REPORT ORDER, SPECLOW, SPECHIGH, REPORT DIRECTION).
-    2. DataFrame 비어 있지 않음.
-    3. ITEMID 중복 없음 (ITEMID는 유일 / ALIAS 중복은 허용).
-    4. CATEGORY 값이 {'REAL', 'ADDP'} 범위 내.
-    5. REAL 행은 ITEMID 보유, ADDP 행은 ADDP FORM(수식) 보유.
+    [CHECK 1] DataFrame 비어 있지 않음.
+    [CHECK 2] 필수 컬럼 존재 (CATEGORY, ITEMID, ALIAS, SCALE FACTOR, ABSOLUTE,
+              ADDP FORM, REPORT ORDER, SPECLOW, SPECHIGH, REPORT DIRECTION).
+    [CHECK 3] 선택 컬럼 존재 (UNIT, TARGET, REPORT LOG SCALE, CAT1, CAT2, PPT_ONLY) — 누락 시 경고만.
+    [CHECK 4] ITEMID 중복 없음 (ITEMID는 유일 / ALIAS 중복은 허용).
+    [CHECK 5] CATEGORY 값이 {'REAL', 'ADDP'} 범위 내.
+    [CHECK 6] REAL 행은 ITEMID 보유.
+    [CHECK 7] ADDP 행은 ADDP FORM(수식) 보유.
 
     Parameters
     ----------
@@ -82,57 +86,87 @@ def reformatter_verify(reformatter):
     bool
         모든 필수 검증을 통과하면 True, 아니면 False.
     """
-    if reformatter is None or reformatter.empty:
-        print("[ERROR] reformatter가 비어 있습니다.")
-        return False
+    print("=" * 60)
+    print("[reformatter_verify] reformatter 검증 시작")
+    print("=" * 60)
 
-    # 1. 하위 코드(Main.py/insert_plots)가 직접 참조하는 필수 컬럼
+    # ── [CHECK 1] DataFrame 비어 있지 않음 ──
+    print("[CHECK 1] DataFrame 비어있지 않음 검사...", end=" ")
+    if reformatter is None or reformatter.empty:
+        print("FAIL")
+        print("  -> [ERROR] reformatter가 비어 있습니다.")
+        return False
+    print(f"OK (행 {len(reformatter)}개)")
+
+    # ── [CHECK 2] 필수 열 존재 검사 ──
+    # 하위 코드(Main.py/insert_plots)가 직접 참조하는 필수 컬럼
     required = [
         "CATEGORY", "ITEMID", "ALIAS", "SCALE FACTOR", "ABSOLUTE",
         "ADDP FORM", "REPORT ORDER", "SPECLOW", "SPECHIGH", "REPORT DIRECTION",
     ]
+    print("[CHECK 2] 필수 열 존재 검사...", end=" ")
     missing = [c for c in required if c not in reformatter.columns]
     if missing:
-        print(f"[ERROR] reformatter에 필수 컬럼이 없습니다: {missing}")
+        print("FAIL")
+        print(f"  -> [ERROR] reformatter에 필수 컬럼이 없습니다: {missing}")
         return False
+    print(f"OK ({len(required)}개 모두 존재)")
 
-    # 선택 컬럼(없어도 동작하나 차트 표현에 사용) — 경고만 출력
+    # ── [CHECK 3] 선택 열 존재 검사 (없어도 동작하나 차트 표현에 사용) ──
     optional = ["UNIT", "TARGET", "REPORT LOG SCALE", "CAT1", "CAT2", "PPT_ONLY"]
+    print("[CHECK 3] 선택 열 존재 검사...", end=" ")
     opt_missing = [c for c in optional if c not in reformatter.columns]
     if opt_missing:
-        print(f"[WARN] reformatter 선택 컬럼 누락(차트 표현 일부 제한): {opt_missing}")
+        print(f"WARN (누락: {opt_missing} → 차트 표현 일부 제한)")
+    else:
+        print(f"OK ({len(optional)}개 모두 존재)")
 
-    # 3. ITEMID 중복 검사 (ITEMID는 유일해야 함 / ALIAS 중복은 허용)
+    # ── [CHECK 4] ITEMID 중복 검사 (ITEMID는 유일 / ALIAS 중복은 허용) ──
+    print("[CHECK 4] ITEMID 중복 검사 (ALIAS 중복은 허용)...", end=" ")
     itemid_nonnull = reformatter["ITEMID"].dropna().astype(str)
     itemid_nonnull = itemid_nonnull[itemid_nonnull.str.strip() != ""]
     dup_itemid = itemid_nonnull[itemid_nonnull.duplicated()].unique().tolist()
     if dup_itemid:
-        print(f"[ERROR] reformatter ITEMID가 중복되었습니다(유일해야 함): {dup_itemid}")
+        print("FAIL")
+        print(f"  -> [ERROR] reformatter ITEMID가 중복되었습니다(유일해야 함): {dup_itemid}")
         return False
+    print(f"OK (ITEMID {itemid_nonnull.nunique()}개 모두 유일)")
 
-    # 4. CATEGORY 값 검증
+    # ── [CHECK 5] CATEGORY 값 검사 ({'REAL', 'ADDP'} 범위) ──
+    print("[CHECK 5] CATEGORY 값 검사...", end=" ")
     cats = set(reformatter["CATEGORY"].dropna().astype(str).str.upper().unique())
     unknown = cats - {"REAL", "ADDP"}
     if unknown:
-        print(f"[ERROR] reformatter CATEGORY에 알 수 없는 값이 있습니다: {unknown}")
+        print("FAIL")
+        print(f"  -> [ERROR] reformatter CATEGORY에 알 수 없는 값이 있습니다: {unknown}")
         return False
+    print(f"OK (CATEGORY={sorted(cats)})")
 
     cat_upper = reformatter["CATEGORY"].astype(str).str.upper()
 
-    # 5-1. REAL 행은 ITEMID 필수
+    # ── [CHECK 6] REAL 행 ITEMID 보유 검사 ──
+    print("[CHECK 6] REAL 행 ITEMID 보유 검사...", end=" ")
     real_rows = reformatter[cat_upper == "REAL"]
     if real_rows["ITEMID"].isna().any():
         bad = real_rows[real_rows["ITEMID"].isna()]["ALIAS"].tolist()
-        print(f"[ERROR] REAL 항목에 ITEMID가 비어 있습니다: {bad}")
+        print("FAIL")
+        print(f"  -> [ERROR] REAL 항목에 ITEMID가 비어 있습니다: {bad}")
         return False
+    print(f"OK (REAL {len(real_rows)}행)")
 
-    # 5-2. ADDP 행은 ADDP FORM(수식) 필수
+    # ── [CHECK 7] ADDP 행 ADDP FORM(수식) 보유 검사 ──
+    print("[CHECK 7] ADDP 행 ADDP FORM(수식) 보유 검사...", end=" ")
     addp_rows = reformatter[cat_upper == "ADDP"]
     if addp_rows["ADDP FORM"].isna().any():
         bad = addp_rows[addp_rows["ADDP FORM"].isna()]["ALIAS"].tolist()
-        print(f"[ERROR] ADDP 항목에 ADDP FORM(수식)이 비어 있습니다: {bad}")
+        print("FAIL")
+        print(f"  -> [ERROR] ADDP 항목에 ADDP FORM(수식)이 비어 있습니다: {bad}")
         return False
+    print(f"OK (ADDP {len(addp_rows)}행)")
 
+    print("-" * 60)
+    print("[reformatter_verify] [PASS] 모든 검사 통과")
+    print("=" * 60)
     return True
 
 

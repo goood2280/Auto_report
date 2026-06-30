@@ -954,29 +954,42 @@ if reformatter_check :
                     lot_detail_html = et_log_styled.set_table_attributes('class="lot-detail-table"').to_html()
 
                     # ==================== Anomaly Detection & GPT 요약 ====================
+                    # GPT 연동 기능은 My_config.py의 플래그로 ON/OFF 제어합니다.
+                    #   - GLOBAL_CONFIG.use_gpt_summary      : GPT 요약(Top 항목 선정/요약문)
+                    #   - GLOBAL_CONFIG.use_gpt_anomaly_chart: GPT 선정 항목 기반 이상차트(3x2)
+                    # False면 해당 GPT 기능 호출 자체를 하지 않고 완전히 스킵합니다.
                     anomaly_html = ""
                     gpt_summary_html = ""
-                    try:
-                        import base64
-                        
-                        # 1. GPT OSS 120B 우회 호출 (Top 6 선정 및 요약)
-                        gpt_summary_html, top_item_names = generate_report_summary(metrics_dict)
-                        
-                        # 2. HTML 3x2 Grid 차트 생성
-                        if top_item_names:
-                            anomaly_html = '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">'
-                            for item in top_item_names:
-                                img_path = f"RUN/TEMP/Trend_{item}.png"
-                                if os.path.exists(img_path):
-                                    with open(img_path, "rb") as f:
-                                        img_b64 = base64.b64encode(f.read()).decode('utf-8')
-                                    anomaly_html += f'<div style="text-align:center;"><img src="data:image/png;base64,{img_b64}" style="max-width:100%; border:1px solid #ddd;"/><br><b>{item}</b></div>'
-                            anomaly_html += '</div>'
-                        else:
-                            anomaly_html = '<p>이상항목 없음</p>'
-                            
-                    except Exception as ae:
-                        print(f"[WARN] Anomaly pipeline/GPT skipped: {ae}")
+                    top_item_names = []
+
+                    # 1. GPT OSS 120B 우회 호출 (Top 6 선정 및 요약)
+                    if GLOBAL_CONFIG.use_gpt_summary:
+                        try:
+                            gpt_summary_html, top_item_names = generate_report_summary(metrics_dict)
+                        except Exception as ae:
+                            print(f"[WARN] GPT 요약 스킵 (오류): {ae}")
+                    else:
+                        print("[INFO] use_gpt_summary=False → GPT 요약 스킵")
+
+                    # 2. HTML 3x2 Grid 이상차트 생성 (GPT가 선정한 top_item_names 기반)
+                    if GLOBAL_CONFIG.use_gpt_anomaly_chart:
+                        try:
+                            import base64
+                            if top_item_names:
+                                anomaly_html = '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">'
+                                for item in top_item_names:
+                                    img_path = f"RUN/TEMP/Trend_{item}.png"
+                                    if os.path.exists(img_path):
+                                        with open(img_path, "rb") as f:
+                                            img_b64 = base64.b64encode(f.read()).decode('utf-8')
+                                        anomaly_html += f'<div style="text-align:center;"><img src="data:image/png;base64,{img_b64}" style="max-width:100%; border:1px solid #ddd;"/><br><b>{item}</b></div>'
+                                anomaly_html += '</div>'
+                            else:
+                                anomaly_html = '<p>이상항목 없음</p>'
+                        except Exception as ae:
+                            print(f"[WARN] 이상차트 생성 스킵 (오류): {ae}")
+                    else:
+                        print("[INFO] use_gpt_anomaly_chart=False → 이상차트 스킵")
 
                     # ==================== HTML 조립 ====================
                     sub_title = f'{target_lot_id} / {target_step_merged}'

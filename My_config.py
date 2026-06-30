@@ -157,6 +157,15 @@ class Config:
         self.plot_wafer_colors = 'tab20'           # Wafer 구분을 위한 컬러 팔레트
 
         # ──────────────────────────────────────────────────────
+        # GPT 연동 기능 ON/OFF (GPT feature toggles)
+        # GPT(gpt_oss_client) 연결이 필요한 기능을 끄거나 켭니다.
+        # False로 두면 해당 GPT 기능을 완전히 스킵합니다(호출 자체를 하지 않음).
+        # 오프라인/사내망 외 환경이거나 GPT 미사용 시 False로 설정하세요.
+        # ──────────────────────────────────────────────────────
+        self.use_gpt_summary = True        # GPT 리포트 요약(Top 항목 선정 및 요약문) 사용 여부
+        self.use_gpt_anomaly_chart = True  # GPT 선정 항목 기반 이상차트(3x2 Grid) 삽입 여부
+
+        # ──────────────────────────────────────────────────────
         # PPT 차트 렌더링 설정 (Chart rendering settings for PPT)
         # 엔지니어가 PPT에 삽입되는 차트의 해상도/압축 품질을 직접 조정합니다.
         # 화질↑ 시 용량도 함께 증가하므로 PPT 10MB 한도(목표 5~7MB)를 고려해 조정하세요.
