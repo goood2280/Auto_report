@@ -690,10 +690,10 @@ if reformatter_check :
                     # VIP_group 생성 *presentation 생성용 dataframe
                     VIP_group.index = VIP_group.index.str.replace('pass_rate_', '') 
 
-                    # VIP_group_HTML 생성 *VIP_group copy (HTML 카테고리 구분자는 CAT1 기준)
-                    VIP_group_HTML = pd.merge(VIP_group_raw,reformatter[['CAT1','REPORT ORDER']].dropna(subset=['REPORT ORDER']).drop('REPORT ORDER',axis=1)\
+                    # VIP_group_HTML 생성 *VIP_group copy (HTML 카테고리 구분자는 CAT2 기준)
+                    VIP_group_HTML = pd.merge(VIP_group_raw,reformatter[['CAT2','REPORT ORDER']].dropna(subset=['REPORT ORDER']).drop('REPORT ORDER',axis=1)\
                                             ,right_index=True, left_index=True, how='left').reset_index()
-                    VIP_group_HTML = VIP_group_HTML.rename(columns={'CAT1': 'CATEGORY', 'index': 'ITEM_ID', 'pass_rate': 'ITEM_ID'})
+                    VIP_group_HTML = VIP_group_HTML.rename(columns={'CAT2': 'CATEGORY', 'index': 'ITEM_ID', 'pass_rate': 'ITEM_ID'})
                     VIP_group_HTML['ITEM_ID'] = VIP_group_HTML['ITEM_ID'].str.replace('pass_rate_', '')
                     VIP_group_HTML = VIP_group_HTML.set_index(['CATEGORY', 'ITEM_ID'])
                     VIP_group_HTML = VIP_group_HTML.drop('REPORT ORDER',axis=1)
@@ -847,32 +847,48 @@ if reformatter_check :
 
                     # ==================== Score Board HTML 렌더링 (Manual) ====================
                     # Pandas의 to_html()이 만드는 불안정한 멀티인덱스 태그를 방지하기 위해 HTML 태그를 한 땀 한 땀 생성
+                    # - 좌측 고정열(LOT_ID/category/Item)은 클래스 기반 sticky (rowspan 사용해도 안깨짐)
+                    # - category(CAT2) 연속 동일값은 rowspan으로 병합
+                    sb_rows = list(VIP_group_HTML.iterrows())
+                    sb_cats = [idx[0] for idx, _ in sb_rows]
+                    # 연속 동일 category 묶음의 시작 위치 → rowspan 수 계산
+                    cat_span = {}
+                    _j = 0
+                    while _j < len(sb_cats):
+                        _k = _j
+                        while _k + 1 < len(sb_cats) and sb_cats[_k + 1] == sb_cats[_j]:
+                            _k += 1
+                        cat_span[_j] = _k - _j + 1
+                        _j = _k + 1
+
                     sb_html = '<table class="score-board">\n'
                     sb_html += '  <thead>\n'
-                    # 헤더 첫번째 줄
+                    # 헤더 첫번째 줄 (LOT_ID는 category+Item 위에 colspan=2, 좌측 고정)
                     sb_html += '    <tr>\n'
-                    sb_html += f'      <th colspan="2" class="row_heading" style="text-align:center; background-color:#d9e1f2;">LOT_ID</th>\n'
+                    sb_html += f'      <th colspan="2" class="sb-frozen-lot" style="text-align:center; background-color:#d9e1f2;">LOT_ID</th>\n'
                     sb_html += f'      <th colspan="{len(VIP_group_HTML.columns)}" style="text-align:center; background-color:#f0f0f0;">{target_lot_id}</th>\n'
                     sb_html += '    </tr>\n'
                     # 헤더 두번째 줄
                     sb_html += '    <tr>\n'
-                    sb_html += '      <th style="background-color:#d9e1f2;">category</th>\n'
-                    sb_html += '      <th style="background-color:#d9e1f2;">Item</th>\n'
+                    sb_html += '      <th class="sb-cat" style="background-color:#d9e1f2;">category</th>\n'
+                    sb_html += '      <th class="sb-item" style="background-color:#d9e1f2;">Item</th>\n'
                     for col in VIP_group_HTML.columns:
-                        sb_html += f'      <th style="background-color:#f0f0f0; width:70px; min-width:70px; max-width:70px;">{col}</th>\n'
+                        sb_html += f'      <th class="sb-waf" style="background-color:#f0f0f0;">{col}</th>\n'
                     sb_html += '    </tr>\n'
                     sb_html += '  </thead>\n'
                     sb_html += '  <tbody>\n'
-                    
-                    for idx, row in VIP_group_HTML.iterrows():
+
+                    for _i, (idx, row) in enumerate(sb_rows):
                         cat, item = idx
                         sb_html += '    <tr>\n'
-                        sb_html += f'      <td class="row_heading" style="font-weight:bold; background-color:#ebf4ff;">{cat}</td>\n'
-                        sb_html += f'      <td class="row_heading" style="font-weight:bold; background-color:#ebf4ff;">{item}</td>\n'
+                        # category 셀은 연속 동일값 묶음의 시작행에서만 rowspan으로 1회 출력 (셀 병합)
+                        if _i in cat_span:
+                            sb_html += f'      <td class="sb-cat row_heading" rowspan="{cat_span[_i]}" style="font-weight:bold; background-color:#ebf4ff; vertical-align:middle;">{cat}</td>\n'
+                        sb_html += f'      <td class="sb-item row_heading" style="font-weight:bold; background-color:#ebf4ff;">{item}</td>\n'
                         for col in VIP_group_HTML.columns:
                             val = row[col]
                             if pd.isna(val) or val == "":
-                                sb_html += '      <td style="background-color:#555555;"></td>\n'
+                                sb_html += '      <td class="sb-val" style="background-color:#555555;"></td>\n'
                             else:
                                 # Score Board 색상 임계값 (config에서 로드)
                                 _thresholds = GLOBAL_CONFIG.score_thresholds  # [100.0, 90.0, 70.0, 50.0]
@@ -894,7 +910,7 @@ if reformatter_check :
                                 else:                           # < 50
                                     bg_color = _colors[0]['bg']
                                     color = _colors[0].get('fg', '#ffffff')
-                                sb_html += f'      <td style="background-color:{bg_color}; color:{color}; font-weight:bold; width:70px; min-width:70px; max-width:70px;">{val:.1f}</td>\n'
+                                sb_html += f'      <td class="sb-val" style="background-color:{bg_color}; color:{color}; font-weight:bold;">{val:.1f}</td>\n'
                         sb_html += '    </tr>\n'
                     sb_html += '  </tbody>\n'
                     sb_html += '</table>\n'
