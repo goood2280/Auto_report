@@ -348,4 +348,95 @@ def et_LOTWF_generator():
     print(f'@@@Inform@@@ {GLOBAL_CONFIG.get("vehicle")} 전체 정리 완료!!!!!!!!!!!!!!!!!!')     
 
 
-def Reformatize(data, ALIAS, FORMULA):
+def reformatter_verify(reformatter):
+    
+    # client = boto3.client(
+    #     service_name='s3', region_name='DS',
+    #     aws_access_key_id='simyung.woo',
+    #     aws_secret_access_key=GLOBAL_CONFIG.get("s3_aws_secret_access_key"),
+    #     endpoint_url='http://s3.api.dscloud.samsungds.net:9090')
+
+    print("=" * 80)
+    print(f"{GLOBAL_CONFIG.get('vehicle')} Reformatter Verification Start")
+    print("=" * 80)
+    
+    Uniqueness_Verification_col = ["CATEGORY", "ITEMID", "ALIAS"]
+    reformatter = reformatter.dropna(subset=Uniqueness_Verification_col, how='all')
+    reformatter["Uniqueness_Verification_check"] = reformatter.apply(generate_sha256_key, axis=1, columns_to_use=Uniqueness_Verification_col)
+
+    # CHECK 1: CATEGORY_ITEMID_ALIAS 유일성 검증
+    print("\n[CHECK 1] Verifying CATEGORY_ITEMID_ALIAS uniqueness...")
+    check1 = check_duplicates(reformatter, "Uniqueness_Verification_check")
+    if check1:
+        print(f"  ❌ FAIL: CATEGORY_ITEMID_ALIAS must be unique. Found duplicates:")
+        print(f"  {check1}")
+        log_to_file(f"[!!!!{GLOBAL_CONFIG.get('vehicle')} Reformatter ERROR!!!!] 유일성에 에러가 있습니다. *CATEGORY_ITEMID_ALIAS 유일하여야함.\n {check1}" , GLOBAL_CONFIG.get("running_log"))
+        return False
+    else:
+        print(f"  ✅ PASS: All CATEGORY_ITEMID_ALIAS combinations are unique.")
+
+    # CHECK 2: REPORT ORDER 중복 검증
+    print("\n[CHECK 2] Verifying REPORT ORDER uniqueness...")
+    check2 = check_duplicates(reformatter, "REPORT ORDER")
+    if check2:
+        print(f"  ❌ FAIL: REPORT ORDER has duplicates:")
+        print(f"  {check2}")
+        log_to_file(f"[!!!!{GLOBAL_CONFIG.get('vehicle')} Reformatter ERROR!!!!] Auto_REPORT 발행 항목에 중복이 있습니다.\n {check2}" , GLOBAL_CONFIG.get("running_log"))
+        return False
+    else:
+        print(f"  ✅ PASS: All REPORT ORDER values are unique.")
+
+    # CHECK 3: REPORT ORDER(CS) 중복 검증 (주석 처리됨)
+    # print("\n[CHECK 3] Verifying REPORT ORDER(CS) uniqueness...")
+    # check3 = check_duplicates(reformatter, "REPORT ORDER(CS)")
+    # if check3:
+    #     print(f"  ❌ FAIL: REPORT ORDER(CS) has duplicates:")
+    #     print(f"  {check3}")
+    #     log_to_file(f"[!!!!{GLOBAL_CONFIG.get('vehicle')} Reformatter ERROR!!!!] CS_REPORT 발행 항목에 중복이 있습니다.\n {check3}" , GLOBAL_CONFIG.get("running_log"))
+    #     return False
+    # else:
+    #     print(f"  ✅ PASS: All REPORT ORDER(CS) values are unique.")
+
+    # CHECK 4: REPORT ORDER 필수 컬럼 누락 검증
+    print("\n[CHECK 4] Verifying required columns for REPORT ORDER...")
+    print(f"  Checking columns: SPECLOW, SPECHIGH, TARGET, REPORT LOG SCALE, REPORT DIRECTION, CAT1, CAT2")
+    check4 = check_non_empty(reformatter, "REPORT ORDER", ["SPECLOW","SPECHIGH","TARGET","REPORT LOG SCALE","REPORT DIRECTION","CAT1","CAT2"])
+    if not check4:
+        print(f"  ❌ FAIL: Missing required values for REPORT ORDER:")
+        print(f"  {check4}")
+        log_to_file(f"[!!!!{GLOBAL_CONFIG.get('vehicle')} Reformatter ERROR!!!!] Auto_REPORT 발행 항목에 누락설정값이 있습니다.\n {check4}" , GLOBAL_CONFIG.get("running_log"))
+        return False
+    else:
+        print(f"  ✅ PASS: All required columns have values for REPORT ORDER rows.")
+
+    # CHECK 5: REPORT ORDER(CS) 필수 컬럼 누락 검증 (주석 처리됨)
+    # print("\n[CHECK 5] Verifying required columns for REPORT ORDER(CS)...")
+    # print(f"  Checking columns: SPECLOW, SPECHIGH, TARGET, REPORT LOG SCALE, REPORT DIRECTION, CAT1(CS), CAT2(CS)")
+    # check5 = check_non_empty(reformatter, "REPORT ORDER(CS)", ["SPECLOW","SPECHIGH","TARGET","REPORT LOG SCALE","REPORT DIRECTION","CAT1(CS)","CAT2(CS)"] )
+    # if not check5:
+    #     print(f"  ❌ FAIL: Missing required values for REPORT ORDER(CS):")
+    #     print(f"  {check5}")
+    #     log_to_file(f"[!!!!{GLOBAL_CONFIG.get('vehicle')} Reformatter ERROR!!!!] CS_REPORT 발행 항목에 누락설정값이 있습니다.\n {check5}" , GLOBAL_CONFIG.get("running_log"))
+    #     return False
+    # else:
+    #     print(f"  ✅ PASS: All required columns have values for REPORT ORDER(CS) rows.")
+
+    print("\n" + "=" * 80)
+    print(f"✅ {GLOBAL_CONFIG.get('vehicle')} Reformatter ALL CHECKS PASSED")
+    print("=" * 80)
+    
+    # save_reformatter_file_name = GLOBAL_CONFIG.get('DB')+f"{GLOBAL_CONFIG.get('vehicle')}_reformatter.csv"
+    # save_reformatter_file_name_only = f"{GLOBAL_CONFIG.get('vehicle')}_reformatter.csv"
+    # reformatter.to_csv(save_reformatter_file_name, index = False)
+    # bucket_simyung = 'simyung.woo'
+    # try :
+    #     client.delete_object(Bucket=bucket_simyung, Key=f'C_DEP_Visual/{save_reformatter_file_name_only}')
+    #     client.upload_file(f'{save_reformatter_file_name}', bucket_simyung, f'C_DEP_Visual/{save_reformatter_file_name_only}')
+    #     print(f"기존 reformatter s3 DB에 파일 reformatter 삭제 후 upload 완료.")
+    # except Exception as e:
+    #     print(f"{save_reformatter_file_name}_s3 DB에 해당파일 없습니다.")
+    #     client.upload_file(f'{save_reformatter_file_name}', bucket_simyung, f'C_DEP_Visual/{save_reformatter_file_name_only}')
+    #     print(f"기존 reformatter s3 DB에 파일 reformatter 삭제 후 upload 완료.")
+
+    return True   
+
