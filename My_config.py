@@ -256,13 +256,29 @@ class Config:
         # 원본 설정 저장 (Store raw YAML settings)
         self.settings = config_data[item_name]
 
+        # ── dc_step_to_ids: 루트 config.yaml에서 로드 (공통 관리 항목) ──
+        # DC Step 매핑(step_id → DC layer)은 사내 공통 설정파일인 루트 config.yaml
+        # 에서 vehicle별로 관리합니다. (reformatter/config.yaml이 아님)
+        # 이 파일은 setup.py 번들에서 제외되어 사내에서 별도 관리됩니다.
+        root_config_path = os.path.join(self.base_path, 'config.yaml')
+        dc_step_to_ids = {}
+        if os.path.exists(root_config_path):
+            with open(root_config_path, "r", encoding='utf-8') as f:
+                root_config = yaml.safe_load(f) or {}
+            vehicle_cfg = root_config.get(item_name, {}) or {}
+            dc_step_to_ids = vehicle_cfg.get('dc_step_to_ids', {}) or {}
+        else:
+            print(f"[WARN] 루트 config.yaml을 찾을 수 없습니다: {root_config_path}")
+
+        # 하위 코드(get_step_ids_from_dc_step 등)와의 호환을 위해 settings에 주입
+        self.settings['dc_step_to_ids'] = dc_step_to_ids
+
         # ── dc_step_to_ids → dc_dict 역매핑 생성 ──
-        # YAML의 dc_step_to_ids에서 step_id → DC step 역매핑 딕셔너리를 생성합니다.
         # 예: {'MFDC': ['test']} → {'test': 'MFDC'}
-        if 'dc_step_to_ids' in self.settings:
+        if dc_step_to_ids:
             self.dc_dict = {
                 sid: dc
-                for dc, sids in self.settings['dc_step_to_ids'].items()
+                for dc, sids in dc_step_to_ids.items()
                 for sid in sids
             }
         else:
