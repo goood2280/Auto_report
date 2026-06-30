@@ -1,6 +1,7 @@
 # ----- Python 표준 라이브러리
 import gc
 import os
+import re
 import sys
 import traceback
 import uuid
@@ -978,7 +979,9 @@ if reformatter_check :
                             if top_item_names:
                                 anomaly_html = '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">'
                                 for item in top_item_names:
-                                    img_path = f"RUN/TEMP/{item}.png"
+                                    # 저장 시와 동일한 파일명 안전화('/' 등 → '_')
+                                    safe_item = re.sub(r'[\\/:*?"<>|]', '_', str(item))
+                                    img_path = f"RUN/TEMP/{safe_item}.png"
                                     if os.path.exists(img_path):
                                         with open(img_path, "rb") as f:
                                             img_b64 = base64.b64encode(f.read()).decode('utf-8')

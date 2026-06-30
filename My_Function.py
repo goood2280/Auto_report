@@ -474,14 +474,27 @@ def clear_anomaly_inside_run():
 # ===================================================================
 
 def make_title_page(template_path, vehicle, lot_id, step_merged):
-    """PPT 템플릿을 열어 타이틀 페이지를 설정하고 Presentation 객체 반환."""
+    """PPT 템플릿(HOL_Auto_Report_Template.pptx)을 표지로 사용하여 Presentation 반환.
+
+    템플릿 파일을 그대로 열어 그 표지 슬라이드가 결과 PPT의 **가장 앞장(첫 페이지)**
+    이 되도록 합니다. 이후 scoreboard / CAT2 description / index 슬라이드는 모두
+    이 표지 뒤에 추가됩니다. 템플릿 파일이 없으면 빈 표지로 대체합니다.
+    """
     from pptx import Presentation
     from pptx.util import Inches, Pt
     from pptx.enum.text import PP_ALIGN
 
-    prs = Presentation(template_path)
+    if template_path and os.path.exists(template_path):
+        prs = Presentation(template_path)   # 템플릿 표지가 첫 페이지가 됨
+    else:
+        print(f"[WARN] 템플릿 PPT를 찾을 수 없어 빈 표지로 대체합니다: {template_path}")
+        prs = Presentation()
 
-    # 첫 번째 슬라이드의 텍스트 박스를 업데이트
+    # 템플릿에 슬라이드가 없으면 빈 표지 한 장 생성 (slides[0] 보장)
+    if len(prs.slides) == 0:
+        prs.slides.add_slide(prs.slide_layouts[6])
+
+    # 템플릿의 첫 번째 슬라이드(표지)에 제목/lot 정보를 기입
     slide = prs.slides[0]
     for shape in slide.shapes:
         if shape.has_text_frame:
@@ -817,20 +830,36 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             continue
         print(f"[{idx}/{total_items}] {item_name} 처리 중...")
 
+        # 파일명 안전화: index명에 '/' 등 경로/금지문자가 있으면 '_'로 치환
+        # (예: 'IDSAT_N/IDSAT_P' → 'IDSAT_N_IDSAT_P') → 저장 시 에러 방지
+        safe_name = re.sub(r'[\\/:*?"<>|]', '_', str(item_name))
+
         # ---- 카테고리 간지(Description) 슬라이드 삽입 ----
         if 'CAT2' in spec_data.columns:
             cat2 = str(spec_data.loc[item_name, 'CAT2']).strip()
             if cat2 != current_cat and cat2.lower() != 'nan':
                 current_cat = cat2
                 matched_img = None
+                ck = cat2.lower().strip()
+                # 1) CAT2 글자와 정확히 일치하는 description 페이지 우선
                 for key, img_path in description_image_info_dict.items():
-                    if key.lower() == cat2.lower():
+                    if key.lower().strip() == ck:
                         matched_img = img_path
                         break
-                
+                # 2) 없으면 CAT2 글자가 포함(부분일치)된 description 페이지 탐색
+                if matched_img is None and ck:
+                    for key, img_path in description_image_info_dict.items():
+                        kl = key.lower().strip()
+                        if ck in kl or kl in ck:
+                            matched_img = img_path
+                            break
+
+                # CAT2 그룹 시작 전에 description 페이지를 한 장 삽입
                 if matched_img and os.path.exists(matched_img):
                     desc_slide = prs.slides.add_slide(prs.slide_layouts[6])
                     desc_slide.shapes.add_picture(matched_img, Inches(0), Inches(0), prs.slide_width, prs.slide_height)
+                else:
+                    print(f"[WARN] CAT2 '{cat2}' description 페이지를 찾지 못해 간지 생략")
 
         try:
             # ---- 데이터 준비 (Data Preparation) ----
@@ -1068,12 +1097,12 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                         par.alignment = PP_ALIGN.CENTER
 
             # ---- 차트 임시 파일 경로 설정 (JPEG 압축 적용하여 PPTX 용량 다이어트) ----
-            tmp_box = f"tmp_box_{item_name}.jpg"
-            tmp_map = f"tmp_map_{item_name}.jpg"
-            tmp_trend = f"tmp_trend_{item_name}.jpg"
-            tmp_rad = f"tmp_rad_{item_name}.jpg"
-            tmp_cum = f"tmp_cum_{item_name}.jpg"
-            tmp_leg = f"tmp_leg_{item_name}.jpg"
+            tmp_box = f"tmp_box_{safe_name}.jpg"
+            tmp_map = f"tmp_map_{safe_name}.jpg"
+            tmp_trend = f"tmp_trend_{safe_name}.jpg"
+            tmp_rad = f"tmp_rad_{safe_name}.jpg"
+            tmp_cum = f"tmp_cum_{safe_name}.jpg"
+            tmp_leg = f"tmp_leg_{safe_name}.jpg"
             
             plt.rcParams['axes.linewidth'] = 0.6
             plt.rcParams['font.size'] = 7.5
@@ -1149,7 +1178,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 ax_box.legend(fontsize=6, loc='best', frameon=False)
             _remove_spines(ax_box)
             ax_box.set_axisbelow(True)
-            ax_box.grid(True, which='both', axis='both', color=C_GRID, linestyle='-', linewidth=0.5)
+            ax_box.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
+            ax_box.grid(True, which='major', axis='both', color=C_GRID, linestyle='-', linewidth=0.5)
             # 용량 다이어트를 위한 JPG 포맷 저장 및 quality 옵션 적용
             fig_box.savefig(tmp_box, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
             plt.close(fig_box)
@@ -1276,7 +1306,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 if log_scale: ax.set_yscale('log')
                 ax.legend(fontsize=6, loc='best', frameon=False)
                 _remove_spines(ax)
-                ax.grid(True, which='both', color=C_GRID, linestyle='-', linewidth=0.5)
+                ax.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
+                ax.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
 
             fig_trend, ax_trend = plt.subplots(figsize=(4.55, 1.75))
             _draw_trend(ax_trend)
@@ -1288,10 +1319,10 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             try:
                 fig_trend_png, ax_trend_png = plt.subplots(figsize=(4.55, 2.0))
                 _draw_trend(ax_trend_png)
-                fig_trend_png.savefig(f"RUN/TEMP/{item_name}.png", dpi=100, bbox_inches="tight")
+                fig_trend_png.savefig(f"RUN/TEMP/{safe_name}.png", dpi=100, bbox_inches="tight")
                 plt.close(fig_trend_png)
             except Exception as e:
-                print(f"[WARN] Failed to save RUN/TEMP/{item_name}.png: {e}")
+                print(f"[WARN] Failed to save RUN/TEMP/{safe_name}.png: {e}")
 
             # 지표 (Metrics) 계산 및 저장
             try:
@@ -1353,7 +1384,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             if spec_low is not None or spec_high is not None:
                 ax_rad.legend(fontsize=6, loc='best', frameon=False)
             _remove_spines(ax_rad)
-            ax_rad.grid(True, which='both', color=C_GRID, linestyle='-', linewidth=0.5)
+            ax_rad.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
+            ax_rad.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
             fig_rad.savefig(tmp_rad, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
             plt.close(fig_rad)
             slide.shapes.add_picture(tmp_rad, Inches(RX), Inches(Y_RAD), Inches(RW), Inches(1.75))
@@ -1377,7 +1409,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             if spec_low is not None or spec_high is not None:
                 ax_cum.legend(fontsize=6, loc='best', frameon=False)
             _remove_spines(ax_cum)
-            ax_cum.grid(True, which='both', color=C_GRID, linestyle='-', linewidth=0.5)
+            ax_cum.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
+            ax_cum.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
             fig_cum.savefig(tmp_cum, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
             plt.close(fig_cum)
             slide.shapes.add_picture(tmp_cum, Inches(RX), Inches(Y_CUM), Inches(RW), Inches(1.85))
