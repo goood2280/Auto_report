@@ -440,3 +440,112 @@ def reformatter_verify(reformatter):
 
     return True   
 
+def Reformatize(data, ALIAS, FORMULA):
+    def addpf(formula,data):
+        pivot = data
+        def LOG(u, df):
+            return np.log10(ABS(df))
+        def POWER(a,b):
+            return np.power(a,b)    
+        def sqrt(a):
+            return np.sqrt(a)
+        def ABS(a):
+            return np.abs(a)
+        def rmax(*args):
+            df_max=pd.DataFrame()
+            for arg in args:
+                df_max=pd.concat([df_max,arg],axis=1)
+            return df_max.max(axis=1)
+        def rmin(*args):
+            df_min=pd.DataFrame()
+            for arg in args:
+                df_min=pd.concat([df_min,arg],axis=1)
+            return df_min.min(axis=1)
+        def MA_Window(*args):
+            # set data 
+            x_data,y_data = [],pd.DataFrame()
+            spec,compliance = [],10
+            for arg in args:
+                if isinstance(arg,list):
+                    x_data = np.array(arg)
+                elif isinstance(arg,str) or isinstance(arg,int) or isinstance(arg,float):
+                    if isinstance(spec,list):
+                        spec = np.log10(float(arg))
+                    else:
+                        compliance = abs(float(arg))
+                else:
+                    y_data = pd.concat([y_data,arg.apply(lambda a: np.log10(float(a)+1E-14))],axis=1)
+            # check & calculate data
+            if x_data.shape[0] == y_data.shape[1]:
+                # 계수계산
+                df_coeffs = pd.DataFrame(np.polyfit(x_data, y_data.T, 2).T, index=y_data.index, columns=['a2', 'a1', 'a0'])
+                # 판별식계산
+                df_coeffs['discriminant'] = df_coeffs['a1']**2 - 4 * df_coeffs['a2'] * (df_coeffs['a0'] - spec)
+                # 양방향margin계산
+                df_coeffs['plus_margin'] = np.where(df_coeffs['discriminant']>=0, (-df_coeffs['a1'] + np.sqrt(df_coeffs['discriminant'])) / (2 * df_coeffs['a2']), np.nan)
+                df_coeffs['minus_margin'] = np.where(df_coeffs['discriminant']>=0, (-df_coeffs['a1'] - np.sqrt(df_coeffs['discriminant'])) / (2 * df_coeffs['a2']), np.nan)
+                # compliance적용
+                df_coeffs['plus_margin'] = np.where(df_coeffs['plus_margin']>compliance, compliance, df_coeffs['plus_margin'])
+                df_coeffs['minus_margin'] = np.where(df_coeffs['minus_margin']<-compliance, -compliance, df_coeffs['minus_margin'])
+                # 볼록함수예외처리
+                df_coeffs.loc[(df_coeffs['discriminant']<0)&(df_coeffs['a2']>0), ['plus_margin','minus_margin']] = 0
+                # 오목함수예외처리
+                df_coeffs.loc[df_coeffs['a2']<=0, ['plus_margin','minus_margin']] = [compliance,-compliance]
+                # ovl_index계산
+                df_coeffs['ovl_index'] = -0.5 * (df_coeffs['plus_margin'] + df_coeffs['minus_margin'])
+                # ma_window계산
+                df_coeffs[''] = df_coeffs['plus_margin'] - df_coeffs['minus_margin']
+                # NEW ma_window계산
+                df_coeffs['new'] = df_coeffs[['plus_margin', 'minus_margin']].abs().min(axis=1)
+                #print("WINDOW 계산완료")
+                return df_coeffs[['minus_margin','plus_margin','ovl_index','','new']]
+            else:
+                dummy = [np.nan for _ in range(5)]
+                return pd.DataFrame([dummy for _ in range(y_data.shape[0])], index=y_data.index, columns=['minus_margin','plus_margin','ovl_index','','new'])
+        def stddev(a):
+            return a.groupby([pivot["root_lot_id"],pivot["wafer_id"],pivot["tkout_time"]]).transform(np.std)
+        def std(a):
+            return a.groupby([pivot["root_lot_id"],pivot["wafer_id"],pivot["tkout_time"]]).transform(np.std)
+        def STD(a):
+            return a.groupby([pivot["root_lot_id"],pivot["wafer_id"],pivot["tkout_time"]]).transform(np.std)
+        def AVG(a):
+            return a.groupby([pivot["root_lot_id"],pivot["wafer_id"],pivot["tkout_time"]]).transform(np.mean)
+        try:
+            a = eval(formula)
+        except:
+            a = 'error'
+        return a
+
+    #pivot 된 data에 Reformatter 적용
+    ALIAS_LEFT=[]
+    FORMULA_LEFT=[]
+    i= 0
+
+    for i in range(10):
+        calnum = len(ALIAS) #미계산 항목 수 update
+        for alias, formula in zip(ALIAS, FORMULA):
+            formula_tmp = formula
+            formula = formula.replace('{','(pivot.get("')
+            formula = formula.replace('}','"))')
+            a = addpf(formula,data)  #addp 계산 실행
+            if str(type(a)) == "<class 'str'>":  #에러면 에러 항목에 넣고 아니면 계산 완료
+                ALIAS_LEFT.append(alias)
+                FORMULA_LEFT.append(formula_tmp)
+                continue
+            else:
+                if isinstance(a,pd.DataFrame) and a.shape[1] > 1:
+                    data[[alias+'_'+col if col!='' else alias for col in a]] = a
+                else:
+                    data[alias] = a
+        ALIAS = ALIAS_LEFT
+        FORMULA = FORMULA_LEFT
+        ALIAS_LEFT = []
+        FORMULA_LEFT = []
+
+        if calnum==len(ALIAS):  #모든 항목이 계산되었는지 확인
+            break
+        else:
+            continue
+
+    return data
+
