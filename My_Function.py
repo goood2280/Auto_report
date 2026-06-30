@@ -778,6 +778,20 @@ def insert_plots(merged_df, prs, description_image_info_dict,
 
     # 고정된 25매 웨이퍼 리스트
     fixed_wafers = [str(i) for i in range(1, 26)]
+
+    # ── Wafer ID별 고정 컬러 팔레트 (25색, 시각적으로 잘 구분되는 색) ──
+    # wafer #1 → WAFER_PALETTE[0], #2 → [1] ... 처럼 wafer 번호를 고정 색에 매핑합니다.
+    # 따라서 동일 wafer 번호는 모든 차트/리포트에서 항상 같은 색으로 표시됩니다.
+    # (Legend / Box / Trend / Radius / CDF 전부 이 w_colors를 공통 사용)
+    WAFER_PALETTE = [
+        '#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
+        '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990',
+        '#dcbeff', '#9a6324', '#bcbd22', '#800000', '#aaffc3',
+        '#808000', '#ffd8b1', '#000075', '#a9a9a9', '#ffe119',
+        '#1a1aff', '#ff4dd2', '#00cca3', '#b35900', '#5c5c8a',
+    ]
+    w_colors = {str(i): WAFER_PALETTE[(i - 1) % len(WAFER_PALETTE)] for i in range(1, 26)}
+
     current_cat = None
     metrics_dict = {}
 
@@ -793,10 +807,16 @@ def insert_plots(merged_df, prs, description_image_info_dict,
         ax.spines['bottom'].set_linewidth(0.6)
 
     # --- 항목별 슬라이드 생성 루프 (Per-Item Slide Generation Loop) ---
-    for item_name in spec_data.index:
+    total_items = len(spec_data.index)
+    print("=" * 60)
+    print(f"[insert_plots] 차트 생성 시작 - 총 {total_items}개 index(alias) 처리 예정")
+    print("=" * 60)
+    for idx, item_name in enumerate(spec_data.index, start=1):
         if item_name not in merged_df.columns:
+            print(f"[{idx}/{total_items}] {item_name} 건너뜀 (merged_df에 데이터 없음)")
             continue
-            
+        print(f"[{idx}/{total_items}] {item_name} 처리 중...")
+
         # ---- 카테고리 간지(Description) 슬라이드 삽입 ----
         if 'CAT2' in spec_data.columns:
             cat2 = str(spec_data.loc[item_name, 'CAT2']).strip()
@@ -1071,9 +1091,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 if ylabel is not None:
                     ax.set_ylabel(ylabel, fontsize=7, color=C_NAVY, fontname=FONT)
 
-            # Wafer 색상 고정 매핑
-            cmap = plt.get_cmap('tab20')
-            w_colors = {str(i): cmap((i-1)/25) for i in range(1, 26)}
+            # Wafer 색상 고정 매핑은 루프 밖에서 WAFER_PALETTE로 1회 정의됨(w_colors)
 
             # ---- Wafer Color Legend ----
             fig_leg, ax_leg = plt.subplots(figsize=(8.0, 0.2))
@@ -1374,6 +1392,9 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             print(f"[ERROR] {item_name} 차트 생성 중 에러 발생: {e}")
             traceback.print_exc()
 
+    print("=" * 60)
+    print(f"[insert_plots] 차트 생성 완료 - 총 {total_items}개 index 처리")
+    print("=" * 60)
     return prs, metrics_dict
 
 def etdata_query():
