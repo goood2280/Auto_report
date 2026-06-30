@@ -61,6 +61,10 @@ spec_data = pd.DataFrame({
 }, index=['VTH_N', 'VTH_P', 'IDSAT_N', 'IDSAT_P', 'VTH_AVG', 'IDSAT_SUM'])
 
 prs = Presentation()
+# 와이드스크린 16:9로 설정 (실제 리포트와 동일한 레이아웃 검증)
+from pptx.util import Inches as _In
+prs.slide_width = _In(13.333)
+prs.slide_height = _In(7.5)
 prs, metrics = MF.insert_plots(merged, prs, {}, 'T1234.1', 'T1234', 'MFDC', 'test', spec_data, dpi=None)
 
 out = os.path.join(os.environ.get('TEMP', '.'), 'smoke_report_out.pptx')

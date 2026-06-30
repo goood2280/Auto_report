@@ -490,6 +490,10 @@ def make_title_page(template_path, vehicle, lot_id, step_merged):
         print(f"[WARN] 템플릿 PPT를 찾을 수 없어 빈 표지로 대체합니다: {template_path}")
         prs = Presentation()
 
+    # 와이드스크린 16:9 비율로 슬라이드 크기 설정 (13.333" x 7.5")
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+
     # 템플릿에 슬라이드가 없으면 빈 표지 한 장 생성 (slides[0] 보장)
     if len(prs.slides) == 0:
         prs.slides.add_slide(prs.slide_layouts[6])
@@ -961,13 +965,15 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             slide_bg.fill.solid()
             slide_bg.fill.fore_color.rgb = RGBColor(255, 255, 255)
             
-            # ---- 레이아웃 상수 (좌/우 2열, 타이틀↔그림 정렬 통일) ----
-            LX, RX = 0.25, 8.55          # 좌/우 열 X 좌표 (테이블·그림·타이틀 공통)
-            LW, RW = 8.0, 4.55           # 좌/우 열 폭
-            TITLE_GAP = 0.25             # 타이틀과 바로 아래 그림 사이 간격
+            # ---- 레이아웃 상수 (와이드 16:9 13.333x7.5, 여백 최소화·꽉 채움) ----
+            # 좌/우 2열을 슬라이드 폭(13.333")에 꽉 차게 배치, 여백 최소화
+            LX, RX = 0.12, 8.50          # 좌/우 열 X 좌표 (테이블·그림·타이틀 공통)
+            LW, RW = 8.30, 4.70          # 좌/우 열 폭 (LX+LW=8.42, RX+RW=13.20)
+            TITLE_GAP = 0.22             # 타이틀과 바로 아래 그림 사이 간격
+            SLIDE_BOTTOM = 7.40          # 차트가 채울 슬라이드 하단 경계 (7.5" - 하단여백)
             # 그림 top Y 좌표 (좌열: 통계표/레전드/Box/WFMAP, 우열: Trend/Radius/CDF)
-            Y_TABLE, Y_LEG, Y_BOX, Y_MAP = 0.80, 2.05, 2.55, 4.75
-            Y_TREND, Y_RAD, Y_CUM = 1.05, 3.05, 5.05
+            Y_TABLE, Y_LEG, Y_BOX, Y_MAP = 0.68, 2.00, 2.58, 4.92
+            Y_TREND, Y_RAD, Y_CUM = 0.92, 3.08, 5.24
 
             # 타이틀 카드 타이틀 생성 헬퍼 함수 (그림 top - TITLE_GAP 위치에 배치)
             def add_card_title(text, l, pic_top):
@@ -1183,7 +1189,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             # 용량 다이어트를 위한 JPG 포맷 저장 및 quality 옵션 적용
             fig_box.savefig(tmp_box, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
             plt.close(fig_box)
-            slide.shapes.add_picture(tmp_box, Inches(LX), Inches(Y_BOX), Inches(LW), Inches(1.9))
+            slide.shapes.add_picture(tmp_box, Inches(LX), Inches(Y_BOX), Inches(LW), Inches(2.05))
 
             # ---- 4. WF MAP (PGM/Wafer 다중 분할, 모자이크 타일 방식 적용, 3행 기준 고정 비율) ----
             # Wafer 좌표: flat-zone 회전이 반영된 보정 좌표(CHIP_X_ADJ/CHIP_Y_ADJ)가
@@ -1245,8 +1251,12 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             fig_map.savefig(tmp_map, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': map_q})
             plt.close(fig_map)
             
-            h_row = 2.35 / 3.0
-            pic_height = n_pgm * h_row
+            # WF MAP을 좌열 하단까지 꽉 채움 (PGM 행 수에 비례, 슬라이드 하단 경계로 클램프)
+            map_avail = SLIDE_BOTTOM - Y_MAP
+            h_row = 0.95
+            pic_height = min(n_pgm * h_row, map_avail)
+            if pic_height <= 0:
+                pic_height = map_avail
             slide.shapes.add_picture(tmp_map, Inches(LX), Inches(Y_MAP), Inches(LW), Inches(pic_height))
 
             # ---- 5. Trend Chart (우측 상단 - vehicle/with_vehicle/target 비교 + vehicle 1~99% 구름대) ----
@@ -1313,7 +1323,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             _draw_trend(ax_trend)
             fig_trend.savefig(tmp_trend, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
             plt.close(fig_trend)
-            slide.shapes.add_picture(tmp_trend, Inches(RX), Inches(Y_TREND), Inches(RW), Inches(1.75))
+            slide.shapes.add_picture(tmp_trend, Inches(RX), Inches(Y_TREND), Inches(RW), Inches(1.95))
 
             # index(alias) Trend scatter 차트만 RUN/TEMP에 alias명.png로 저장 (Anomaly/HTML 재사용)
             try:
@@ -1388,7 +1398,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             ax_rad.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
             fig_rad.savefig(tmp_rad, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
             plt.close(fig_rad)
-            slide.shapes.add_picture(tmp_rad, Inches(RX), Inches(Y_RAD), Inches(RW), Inches(1.75))
+            slide.shapes.add_picture(tmp_rad, Inches(RX), Inches(Y_RAD), Inches(RW), Inches(1.95))
 
             # ---- 7. Cumulative Plot (누적 분포) ----
             fig_cum, ax_cum = plt.subplots(figsize=(4.55, 1.85))
@@ -1413,7 +1423,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             ax_cum.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
             fig_cum.savefig(tmp_cum, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
             plt.close(fig_cum)
-            slide.shapes.add_picture(tmp_cum, Inches(RX), Inches(Y_CUM), Inches(RW), Inches(1.85))
+            slide.shapes.add_picture(tmp_cum, Inches(RX), Inches(Y_CUM), Inches(RW), Inches(2.15))
 
             # ---- 임시 차트 이미지 정리 ----
             for f in [tmp_box, tmp_map, tmp_trend, tmp_rad, tmp_cum, tmp_leg]:
