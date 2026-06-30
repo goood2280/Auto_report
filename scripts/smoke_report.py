@@ -55,7 +55,7 @@ spec_data = pd.DataFrame({
     'SPECLOW':   [0.3, 0.3, 300.0, 300.0, 0.3, 600.0],
     'SPECHIGH':  [0.7, 0.7, 800.0, 800.0, 0.7, 1600.0],
     'col_unit':  ['V', 'V', 'uA', 'uA', 'V', 'uA'],
-    'col_direction': ['BOTH', 'LOWER', 'UPPER', 'BOTH', 'BOTH', 'BOTH'],
+    'REPORT DIRECTION': ['BOTH', 'LOWER', 'UPPER', 'BOTH', 'BOTH', 'BOTH'],
     'REPORT LOG SCALE': [False, False, False, False, False, True],
     'CAT2': ['VTH', 'VTH', 'IDSAT', 'IDSAT', 'VTH', 'IDSAT'],
 }, index=['VTH_N', 'VTH_P', 'IDSAT_N', 'IDSAT_P', 'VTH_AVG', 'IDSAT_SUM'])

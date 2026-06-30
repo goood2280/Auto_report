@@ -66,7 +66,7 @@ def reformatter_verify(reformatter):
     검증 항목
     ---------
     1. 필수 컬럼 존재 여부 (CATEGORY, ITEMID, ALIAS, SCALE FACTOR, ABSOLUTE,
-       ADDP FORM, REPORT ORDER, SPECLOW, SPECHIGH, col_direction).
+       ADDP FORM, REPORT ORDER, SPECLOW, SPECHIGH, REPORT DIRECTION).
     2. DataFrame 비어 있지 않음.
     3. ALIAS 중복 없음 (피벗 컬럼명 충돌 방지).
     4. CATEGORY 값이 {'REAL', 'ADDP'} 범위 내.
@@ -89,7 +89,7 @@ def reformatter_verify(reformatter):
     # 1. 하위 코드(Main.py/insert_plots)가 직접 참조하는 필수 컬럼
     required = [
         "CATEGORY", "ITEMID", "ALIAS", "SCALE FACTOR", "ABSOLUTE",
-        "ADDP FORM", "REPORT ORDER", "SPECLOW", "SPECHIGH", "col_direction",
+        "ADDP FORM", "REPORT ORDER", "SPECLOW", "SPECHIGH", "REPORT DIRECTION",
     ]
     missing = [c for c in required if c not in reformatter.columns]
     if missing:
@@ -755,10 +755,10 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             if pd.isna(spec_low): spec_low = None
             if pd.isna(spec_high): spec_high = None
 
-            # col_direction(REPORT DIRECTION): UPPER=상한만, LOWER=하한만, BOTH=둘 다
+            # REPORT DIRECTION: UPPER=상한만, LOWER=하한만, BOTH=둘 다
             direction = 'BOTH'
-            if 'col_direction' in spec_data.columns:
-                _d = str(spec_data.loc[item_name, 'col_direction']).strip().upper()
+            if 'REPORT DIRECTION' in spec_data.columns:
+                _d = str(spec_data.loc[item_name, 'REPORT DIRECTION']).strip().upper()
                 if _d in ('UPPER', 'LOWER', 'BOTH'):
                     direction = _d
             if direction == 'UPPER':
@@ -1117,7 +1117,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                     for w in measured_wafers:
                         grp = tdf[tdf[w_col] == w] if w_col in tdf.columns else tdf.iloc[0:0]
                         ax.scatter(grp['tkout_time'], grp[item_name], s=10, alpha=0.7, color=w_colors.get(str(w), 'blue'))
-                # spec line(s) — 방향(col_direction) 반영된 spec_low/high
+                # spec line(s) — 방향(REPORT DIRECTION) 반영된 spec_low/high
                 _sl = 'Spec Limit'
                 if spec_low is not None:
                     ax.axhline(y=float(spec_low), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7, label=_sl); _sl = None

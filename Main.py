@@ -625,10 +625,10 @@ if reformatter_check :
 
                     spec_data = reformatter[(~reformatter['REPORT ORDER'].isnull())] #Report order가 존재하는 item만 spec data확인
                     spec_dict = {row['ALIAS']: (row['SPECLOW'], row['SPECHIGH']) for _, row in spec_data.iterrows()} #dict형식으로 빠른 접근가능
-                    # col_direction(REPORT DIRECTION): UPPER=상한만, LOWER=하한만, BOTH=둘 다 (합격판정에 반영)
+                    # REPORT DIRECTION: UPPER=상한만, LOWER=하한만, BOTH=둘 다 (합격판정에 반영)
                     spec_dir = {}
                     for _, _r in spec_data.iterrows():
-                        _d = str(_r['col_direction']).strip().upper() if 'col_direction' in spec_data.columns and pd.notna(_r.get('col_direction')) else 'BOTH'
+                        _d = str(_r['REPORT DIRECTION']).strip().upper() if 'REPORT DIRECTION' in spec_data.columns and pd.notna(_r.get('REPORT DIRECTION')) else 'BOTH'
                         spec_dir[_r['ALIAS']] = _d if _d in ('UPPER', 'LOWER', 'BOTH') else 'BOTH'
                     spec_data = spec_data.set_index('ALIAS')
 
