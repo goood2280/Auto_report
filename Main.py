@@ -978,7 +978,7 @@ if reformatter_check :
                             if top_item_names:
                                 anomaly_html = '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">'
                                 for item in top_item_names:
-                                    img_path = f"RUN/TEMP/Trend_{item}.png"
+                                    img_path = f"RUN/TEMP/{item}.png"
                                     if os.path.exists(img_path):
                                         with open(img_path, "rb") as f:
                                             img_b64 = base64.b64encode(f.read()).decode('utf-8')

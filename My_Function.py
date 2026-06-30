@@ -680,7 +680,9 @@ def calcaulate_description_image_info_dict(description_ppt_path, img_quality=20)
         abs_path = os.path.abspath(description_ppt_path)
         presentation = ppt_app.Presentations.Open(abs_path, WithWindow=False)
         
-        tmp_dir = os.path.join(os.path.dirname(abs_path), "temp_desc_images")
+        # 설명 슬라이드 PNG는 별도 폴더(temp_desc_images)를 만들지 않고
+        # 런타임 임시 영역(RUN/TEMP)에 저장합니다.
+        tmp_dir = os.path.join("RUN", "TEMP")
         os.makedirs(tmp_dir, exist_ok=True)
         
         for i, slide in enumerate(presentation.Slides):
@@ -1220,9 +1222,10 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                         daily['date'] = pd.to_datetime(daily['date'])
                         daily = daily.set_index('date').sort_index()
                         roll = daily.rolling('3D', min_periods=1).mean()
-                        ax.fill_between(roll.index, roll['q01'], roll['q99'], color=C_BAND, alpha=0.6, label='Vehicle 1~99%')
-                        ax.plot(roll.index, roll['median'], color=C_NEUTRAL, linewidth=1.3, alpha=1.0)
+                        ax.fill_between(roll.index, roll['q01'], roll['q99'], color=C_BAND, alpha=0.6, label='Vehicle 1~99%', zorder=1)
+                        ax.plot(roll.index, roll['median'], color=C_NEUTRAL, linewidth=1.3, alpha=1.0, zorder=1.5)
                 # scatter 겹침 순서: vehicle(초록) → with_vehicle(회색) → target lot(빨강, 최상단)
+                # 모든 마커는 얇은 검정 테두리(edgecolors='black', linewidths 얇게)를 적용
                 if has_lot:
                     if has_mask:
                         veh_other = tdf[(tdf['mask'] == main_vehicle) & (tdf['fab_lot_id'] != target_lot_id)]
@@ -1231,15 +1234,16 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                         veh_other = tdf[tdf['fab_lot_id'] != target_lot_id]; wv = tdf.iloc[0:0]
                     tgt = tdf[tdf['fab_lot_id'] == target_lot_id]
                     if len(veh_other) > 0:
-                        ax.scatter(veh_other['tkout_time'], veh_other[item_name], s=10, alpha=0.5, color=C_VEHICLE, label='Vehicle')
+                        ax.scatter(veh_other['tkout_time'], veh_other[item_name], s=10, alpha=0.5, color=C_VEHICLE, label='Vehicle', edgecolors='black', linewidths=0.3, zorder=2)
                     if len(wv) > 0:
-                        ax.scatter(wv['tkout_time'], wv[item_name], s=10, alpha=0.5, color=C_WV, label='With-Vehicle')
+                        ax.scatter(wv['tkout_time'], wv[item_name], s=10, alpha=0.5, color=C_WV, label='With-Vehicle', edgecolors='black', linewidths=0.3, zorder=3)
                     if len(tgt) > 0:
-                        ax.scatter(tgt['tkout_time'], tgt[item_name], s=16, alpha=0.95, color=C_ACCENT, label='Target Lot')
+                        # target lot(=리포팅 대상 lot id) 데이터: 빨간색 + 최상단(zorder 높게)로 강조
+                        ax.scatter(tgt['tkout_time'], tgt[item_name], s=24, alpha=1.0, color='red', label='Target Lot', edgecolors='black', linewidths=0.4, zorder=10)
                 else:
                     for w in measured_wafers:
                         grp = tdf[tdf[w_col] == w] if w_col in tdf.columns else tdf.iloc[0:0]
-                        ax.scatter(grp['tkout_time'], grp[item_name], s=10, alpha=0.7, color=w_colors.get(str(w), 'blue'))
+                        ax.scatter(grp['tkout_time'], grp[item_name], s=10, alpha=0.7, color=w_colors.get(str(w), 'blue'), edgecolors='black', linewidths=0.3, zorder=2)
                 # spec line(s) — 방향(REPORT DIRECTION) 반영된 spec_low/high
                 _sl = 'Spec Limit'
                 if spec_low is not None:
@@ -1262,14 +1266,14 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             plt.close(fig_trend)
             slide.shapes.add_picture(tmp_trend, Inches(RX), Inches(Y_TREND), Inches(RW), Inches(1.75))
 
-            # RUN/TEMP PNG 사본 (Anomaly/HTML 재사용)
+            # index(alias) Trend scatter 차트만 RUN/TEMP에 alias명.png로 저장 (Anomaly/HTML 재사용)
             try:
                 fig_trend_png, ax_trend_png = plt.subplots(figsize=(4.55, 2.0))
                 _draw_trend(ax_trend_png)
-                fig_trend_png.savefig(f"RUN/TEMP/Trend_{item_name}.png", dpi=100, bbox_inches="tight")
+                fig_trend_png.savefig(f"RUN/TEMP/{item_name}.png", dpi=100, bbox_inches="tight")
                 plt.close(fig_trend_png)
             except Exception as e:
-                print(f"[WARN] Failed to copy Trend_{item_name}.png to RUN/TEMP: {e}")
+                print(f"[WARN] Failed to save RUN/TEMP/{item_name}.png: {e}")
 
             # 지표 (Metrics) 계산 및 저장
             try:
