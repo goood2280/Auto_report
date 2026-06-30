@@ -346,3 +346,6 @@ def et_LOTWF_generator():
         print(f'@@@Inform@@@ {GLOBAL_CONFIG.get("vehicle")}__{num}/{length_of_list}일 정리 완료!!!!!!!!!!!!!!!!!!')
         
     print(f'@@@Inform@@@ {GLOBAL_CONFIG.get("vehicle")} 전체 정리 완료!!!!!!!!!!!!!!!!!!')     
+
+
+def Reformatize(data, ALIAS, FORMULA):
