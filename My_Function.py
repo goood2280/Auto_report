@@ -823,12 +823,42 @@ def insert_plots(merged_df, prs, description_image_info_dict,
         ax.spines['left'].set_linewidth(0.6)
         ax.spines['bottom'].set_linewidth(0.6)
 
+    # 대상 lot 선택 헬퍼: fab_lot_id 정확일치 → 실패 시 root_lot prefix.
+    # (전체 vehicle로 확장하지 않음 — Box/Radius/CDF/Trend의 target은 해당 lot만)
+    def _select_target_lot(frame):
+        if 'fab_lot_id' not in frame.columns:
+            return frame
+        flid = frame['fab_lot_id'].astype(str)
+        sel = frame[flid == str(target_lot_id)]
+        if len(sel) == 0 and target_root_lot_id:
+            sel = frame[flid.str.startswith(str(target_root_lot_id))]
+        return sel
+
+    # --- 페이지 index 목록 구성 (spec_data 항목 + Reformatize 파생 항목 포함) ---
+    # Reformatize는 ADDP FORM으로 단일/다중 컬럼 파생 index를 만든다.
+    #  - 단일컬럼 파생(예: VTH_AVG)  → merged_df에 'VTH_AVG' 컬럼 그대로 존재
+    #  - 다중컬럼 파생(예: window)   → 'WINDOW_ovl_index', 'WINDOW_new' 등 접두어_컬럼으로 존재
+    # 따라서 spec_data의 각 ALIAS에 대해, 그 ALIAS로 시작하는 모든 merged_df 컬럼을
+    # 페이지 대상에 포함시켜 파생 항목도 빠짐없이 PPT 페이지가 생성되도록 한다.
+    # plot_items: (데이터 컬럼명, spec 메타 출처 ALIAS)
+    plot_items = []
+    for nm in spec_data.index:
+        if nm in merged_df.columns:
+            plot_items.append((nm, nm))
+        else:
+            derived = [c for c in merged_df.columns if str(c).startswith(str(nm) + "_")]
+            if derived:
+                for d in derived:
+                    plot_items.append((d, nm))
+            else:
+                plot_items.append((nm, nm))  # 데이터 없음 → 루프에서 skip
+
     # --- 항목별 슬라이드 생성 루프 (Per-Item Slide Generation Loop) ---
-    total_items = len(spec_data.index)
+    total_items = len(plot_items)
     print("=" * 60)
-    print(f"[insert_plots] 차트 생성 시작 - 총 {total_items}개 index(alias) 처리 예정")
+    print(f"[insert_plots] 차트 생성 시작 - 총 {total_items}개 index(파생 포함) 처리 예정")
     print("=" * 60)
-    for idx, item_name in enumerate(spec_data.index, start=1):
+    for idx, (item_name, spec_name) in enumerate(plot_items, start=1):
         if item_name not in merged_df.columns:
             print(f"[{idx}/{total_items}] {item_name} 건너뜀 (merged_df에 데이터 없음)")
             continue
@@ -840,7 +870,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
 
         # ---- 카테고리 간지(Description) 슬라이드 삽입 ----
         if 'CAT2' in spec_data.columns:
-            cat2 = str(spec_data.loc[item_name, 'CAT2']).strip()
+            cat2 = str(spec_data.loc[spec_name, 'CAT2']).strip()
             if cat2 != current_cat and cat2.lower() != 'nan':
                 current_cat = cat2
                 matched_img = None
@@ -913,30 +943,28 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             # ---- 데이터 스코프 분리 ----
             # item_df_full: 전 vehicle·전 lot (Trend 비교 전용)
             # item_df(=target_df): 리포팅 대상 lot만 (Box/WF MAP/통계표/Radius/CDF/통계)
+            # NOTE: 대상 lot 매칭 실패 시에도 전체 vehicle 데이터로 확장하지 않는다.
+            #       (Box/Radius/CDF는 반드시 해당 lot의 wafer만 표시되어야 함)
             item_df_full = item_df
-            if 'fab_lot_id' in item_df.columns:
-                target_df = item_df[item_df['fab_lot_id'] == target_lot_id]
-                if len(target_df) == 0 and 'mask' in item_df.columns:
-                    target_df = item_df[item_df['mask'] == main_vehicle]
-                if len(target_df) == 0:
-                    target_df = item_df
-            else:
-                target_df = item_df
+            target_df = _select_target_lot(item_df)
             item_df = target_df
+            if len(item_df) == 0:
+                print(f"[{idx}/{total_items}] {item_name} 건너뜀 (대상 lot '{target_lot_id}' 데이터 없음)")
+                continue
 
             measured_wafers = sorted(item_df[w_col].unique(), key=lambda x: int(x) if str(x).isdigit() else x)
             grouped = item_df.groupby(w_col)[item_name]
 
             # ---- 스펙 범위 추출 (Spec Limits) + 방향/로그/단위 ----
-            spec_low = spec_data.loc[item_name, "SPECLOW"]
-            spec_high = spec_data.loc[item_name, "SPECHIGH"]
+            spec_low = spec_data.loc[spec_name, "SPECLOW"]
+            spec_high = spec_data.loc[spec_name, "SPECHIGH"]
             if pd.isna(spec_low): spec_low = None
             if pd.isna(spec_high): spec_high = None
 
             # REPORT DIRECTION: UPPER=상한만, LOWER=하한만, BOTH=둘 다
             direction = 'BOTH'
             if 'REPORT DIRECTION' in spec_data.columns:
-                _d = str(spec_data.loc[item_name, 'REPORT DIRECTION']).strip().upper()
+                _d = str(spec_data.loc[spec_name, 'REPORT DIRECTION']).strip().upper()
                 if _d in ('UPPER', 'LOWER', 'BOTH'):
                     direction = _d
             if direction == 'UPPER':
@@ -947,13 +975,13 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             # REPORT LOG SCALE: 값 축 log10 적용 여부
             log_scale = False
             if 'REPORT LOG SCALE' in spec_data.columns:
-                _ls = spec_data.loc[item_name, 'REPORT LOG SCALE']
+                _ls = spec_data.loc[spec_name, 'REPORT LOG SCALE']
                 log_scale = str(_ls).strip().lower() in ('true', '1', '1.0', 'yes')
 
             # UNIT: 축 라벨 단위
             unit = ''
             if 'UNIT' in spec_data.columns:
-                _u = str(spec_data.loc[item_name, 'UNIT']).strip()
+                _u = str(spec_data.loc[spec_name, 'UNIT']).strip()
                 if _u and _u.lower() != 'nan':
                     unit = _u
             y_label = f"{item_name} [{unit}]" if unit else item_name
@@ -989,8 +1017,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
 
             # INDEX 옆에 관련 REAL ITEM 이름 파싱해서 기입
             real_items_str = ""
-            if reformatter is not None and item_name in reformatter['ALIAS'].values:
-                row = reformatter[reformatter['ALIAS'] == item_name].iloc[0]
+            if reformatter is not None and spec_name in reformatter['ALIAS'].values:
+                row = reformatter[reformatter['ALIAS'] == spec_name].iloc[0]
                 cat = row.get('CATEGORY', '')
                 if cat == 'REAL':
                     real_items_str = str(row.get('ITEMID', ''))
@@ -1030,12 +1058,12 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             add_card_title("■ Radial Distribution", RX, Y_RAD)
             add_card_title("■ Cumulative Distribution Function (CDF)", RX, Y_CUM)
 
-            # ---- 2. Statistical Table (통계 테이블: #1~25 항상 고정 컬럼) ----
-            cols = 27 # Stat + Total + #1 ~ #25 고정
+            # ---- 2. Statistical Table (통계 테이블: #1~25 고정 컬럼, Total 열 없음) ----
+            cols = 26 # Stat + #1 ~ #25 고정 (Total 열 제거)
             table_shape = slide.shapes.add_table(5, cols, Inches(LX), Inches(Y_TABLE), Inches(LW), Inches(1.2)).table
-            
+
             # 헤더
-            headers = ["Stat", "Total"] + [f"#{w}" for w in range(1, 26)]
+            headers = ["Stat"] + [f"#{w}" for w in range(1, 26)]
             for c_idx, h in enumerate(headers):
                 cell = table_shape.cell(0, c_idx)
                 cell.text = h
@@ -1057,17 +1085,11 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             row_labels = ["Mean", "Std", "Min", "Max"]
             for r_idx, label in enumerate(row_labels):
                 table_shape.cell(r_idx+1, 0).text = label
-                
-            # Total 통계
-            table_shape.cell(1, 1).text = f"{item_df[item_name].mean():.3f}"
-            table_shape.cell(2, 1).text = f"{item_df[item_name].std():.3f}" if len(item_df) > 1 else "-"
-            table_shape.cell(3, 1).text = f"{item_df[item_name].min():.3f}"
-            table_shape.cell(4, 1).text = f"{item_df[item_name].max():.3f}"
-            
-            # Wafer별 통계 (1~25 고정 루프)
+
+            # Wafer별 통계 (1~25 고정 루프, Stat 라벨이 0열이므로 wafer #w → c_idx=w)
             for w_idx in range(1, 26):
                 w_str = str(w_idx)
-                c_idx = w_idx + 1
+                c_idx = w_idx
                 if w_str in grouped.groups:
                     grp_data = grouped.get_group(w_str)
                     table_shape.cell(1, c_idx).text = f"{grp_data.mean():.3f}"
@@ -1082,8 +1104,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 if r_idx == 0: continue
                 bg_color = RGBColor(245, 247, 250) if r_idx % 2 == 1 else RGBColor(255, 255, 255)
                 for c_idx, cell in enumerate(row.cells):
-                    w_num_str = str(c_idx - 1)
-                    if c_idx > 1 and w_num_str not in grouped.groups:
+                    w_num_str = str(c_idx)  # 0열=Stat 라벨, 1~25열=wafer #1~#25
+                    if c_idx >= 1 and w_num_str not in grouped.groups:
                         # 빈 데이터 웨이퍼는 연한 그레이 채우기
                         cell.fill.solid()
                         cell.fill.fore_color.rgb = RGBColor(240, 240, 240)
@@ -1282,15 +1304,18 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                         roll = daily.rolling('3D', min_periods=1).mean()
                         ax.fill_between(roll.index, roll['q01'], roll['q99'], color=C_BAND, alpha=0.6, label='Vehicle 1~99%', zorder=1)
                         ax.plot(roll.index, roll['median'], color=C_NEUTRAL, linewidth=1.3, alpha=1.0, zorder=1.5)
-                # scatter 겹침 순서: vehicle(초록) → with_vehicle(회색) → target lot(빨강, 최상단)
+                # 색상 규칙: target lot=빨강(최상단) / 같은 vehicle 나머지=초록 / with_vehicle=회색
                 # 모든 마커는 얇은 검정 테두리(edgecolors='black', linewidths 얇게)를 적용
                 if has_lot:
+                    tgt = _select_target_lot(tdf)                 # 대상 lot (robust 매칭)
+                    tgt_idx = set(tgt.index)
                     if has_mask:
-                        veh_other = tdf[(tdf['mask'] == main_vehicle) & (tdf['fab_lot_id'] != target_lot_id)]
+                        # 같은 vehicle이면서 대상 lot이 아닌 데이터 → 초록
+                        veh_other = tdf[(tdf['mask'] == main_vehicle) & (~tdf.index.isin(tgt_idx))]
+                        # with_vehicle(다른 vehicle) 데이터 → 회색
                         wv = tdf[tdf['mask'] != main_vehicle]
                     else:
-                        veh_other = tdf[tdf['fab_lot_id'] != target_lot_id]; wv = tdf.iloc[0:0]
-                    tgt = tdf[tdf['fab_lot_id'] == target_lot_id]
+                        veh_other = tdf[~tdf.index.isin(tgt_idx)]; wv = tdf.iloc[0:0]
                     if len(veh_other) > 0:
                         ax.scatter(veh_other['tkout_time'], veh_other[item_name], s=10, alpha=0.5, color=C_VEHICLE, label='Vehicle', edgecolors='black', linewidths=0.3, zorder=2)
                     if len(wv) > 0:
