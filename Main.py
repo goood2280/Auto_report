@@ -1308,7 +1308,10 @@ if reformatter_check :
                     # ==================== 고화질 PPT(EDM) 미사용 ====================
 
                     # ==================== S3 업로드 (사내 환경 전용) ====================
-                    if S3_CONNECT and client:
+                    # My_config.use_s3_upload 로 on/off.
+                    if not getattr(GLOBAL_CONFIG, 'use_s3_upload', True):
+                        print('[INFO] use_s3_upload=False → S3 업로드 스킵')
+                    elif S3_CONNECT and client:
                         try:
                             client.upload_file(
                                 f'{low_qual_ppt_save_path}{final_ppt_file_name_DX}',
@@ -1326,7 +1329,10 @@ if reformatter_check :
                         _mail_fh = None
                         try:
                             html_code_final = html_content   # 생성된 HTML 코드 문자열
-                            email_receiver_now = email_receiver   # config의 수신 그룹(예: ['POWER_USER'])
+                            # 수신 그룹(=메일링 xlsx의 시트명). config email_receiver가 리스트면 첫 항목 사용.
+                            email_receiver_now = (email_receiver[0]
+                                                  if isinstance(email_receiver, (list, tuple)) and email_receiver
+                                                  else email_receiver)
                             title = f'[HOL] {vehicle} {target_lot_id} {target_step_merged} HOL AUTO REPORT'
 
                             email_list = get_email_list(email_list_path, email_receiver_now)

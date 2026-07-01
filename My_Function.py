@@ -56,63 +56,27 @@ def log_to_file(message, log_path):
         print(f"[WARN] log_to_file 실패: {e}")
 
 
-def get_email_list(email_list_path, receiver_groups):
-    """메일링 리스트 엑셀에서 수신 그룹에 해당하는 이메일 주소 리스트를 반환.
+def get_email_list(file_path, target_group, default_group='HOL', domain="@url"):
+    """메일링 리스트 엑셀에서 수신 그룹(시트)의 KNOX_ID를 읽어 수신자 리스트를 반환.
 
-    Parameters
-    ----------
-    email_list_path : str
-        메일링 리스트 엑셀 경로(HOL_Auto_Report_Mailing_List.xlsx 등).
-        이메일 컬럼(email/e-mail/mail/이메일 등)과 선택적 그룹 컬럼을 가진다고 가정.
-    receiver_groups : list[str] | str
-        수신 대상 그룹명(예: ['POWER_USER']). 'ALL'이면 전체.
-
-    Returns
-    -------
-    list[str] : 중복 제거된 이메일 주소 리스트. 실패 시 빈 리스트.
+    target_group에 해당하는 시트가 있으면 그 시트를, 없으면 default_group 시트를 사용한다.
+    각 KNOX_ID에 '@'가 없으면 domain을 붙여 이메일을 구성하고,
+    메일 API용 [{"email", "recipientType":"TO", "seq"}] 형태로 반환한다.
     """
-    try:
-        df = pd.read_excel(email_list_path)
-    except Exception as e:
-        print(f"[WARN] get_email_list: 메일링 리스트 로드 실패({email_list_path}): {e}")
-        return []
-    try:
-        cols = {str(c).strip().lower(): c for c in df.columns}
-        # 1) 이메일 컬럼 탐색
-        email_col = None
-        for k in ('email', 'e-mail', 'mail', 'mailaddress', 'emailaddress', '메일', '이메일', '메일주소'):
-            if k in cols:
-                email_col = cols[k]; break
-        if email_col is None:   # '@' 포함 값이 가장 많은 컬럼을 이메일 컬럼으로 추정
-            best, bestn = None, 0
-            for c in df.columns:
-                n = int(df[c].astype(str).str.contains('@').sum())
-                if n > bestn:
-                    best, bestn = c, n
-            email_col = best
-        if email_col is None:
-            return []
-
-        # 2) 그룹 필터 (그룹 컬럼이 있고 'ALL'이 아니면)
-        sub = df
-        groups = receiver_groups if isinstance(receiver_groups, (list, tuple, set)) else [receiver_groups]
-        groups = [str(g).strip().upper() for g in groups if g is not None and str(g).strip()]
-        if groups and 'ALL' not in groups:
-            group_col = None
-            for k in ('group', 'receiver', 'receiver_group', '수신그룹', '그룹', 'type', '대상', 'role'):
-                if k in cols:
-                    group_col = cols[k]; break
-            if group_col is not None:
-                mask = df[group_col].astype(str).str.upper().apply(
-                    lambda v: any(g in v for g in groups))
-                if mask.any():
-                    sub = df[mask]
-
-        emails = [str(e).strip() for e in sub[email_col].dropna().tolist() if '@' in str(e)]
-        return list(dict.fromkeys(emails))   # 순서 유지 + 중복 제거
-    except Exception as e:
-        print(f"[WARN] get_email_list 처리 실패: {e}")
-        return []
+    xls = pd.ExcelFile(file_path)
+    sheet_name = target_group if target_group in xls.sheet_names else default_group
+    df = xls.parse(sheet_name)
+    email_list = df['KNOX_ID'].dropna().drop_duplicates(keep='first').tolist()
+    domain = domain.strip()
+    final_email_list = [
+        {
+        "email": email.strip() if "@" in email else f"{email.strip()}{domain}",
+        "recipientType": "TO",
+        "seq": i
+        }
+        for i, email in enumerate(email_list, start=1)
+    ]
+    return final_email_list
 
 
 def reformatter_verify(reformatter):
