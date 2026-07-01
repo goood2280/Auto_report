@@ -263,8 +263,8 @@ def replace_negatives_with_0(x):
     return x
 
 
-def convert_target_data(x, suffixes_remove, replace_map):
-    """항목명에서 지정 접미사를 제거하고 문자열을 치환.
+def convert_target_data(x, suffixes_remove, replace_map, prefixes_remove=None):
+    """항목명에서 지정 접두사/접미사를 제거하고 문자열을 치환.
 
     reformatter의 ITEMID나 ALIAS 정리에 활용됩니다.
 
@@ -276,6 +276,8 @@ def convert_target_data(x, suffixes_remove, replace_map):
         제거할 접미사 목록. 예: ["_AVG", "_MAX"]
     replace_map : dict or None
         치환 맵. 예: {"OLD": "NEW"}
+    prefixes_remove : list[str] or None
+        제거할 접두사 목록. 예: ["ET_", "PRE_"]
 
     Returns
     -------
@@ -284,8 +286,11 @@ def convert_target_data(x, suffixes_remove, replace_map):
     """
     if not isinstance(x, str):
         return x
+    for prefix in (prefixes_remove or []):
+        if prefix and x.startswith(prefix):
+            x = x[len(prefix):]
     for suffix in (suffixes_remove or []):
-        if x.endswith(suffix):
+        if suffix and x.endswith(suffix):
             x = x[: -len(suffix)]
     for old, new in (replace_map or {}).items():
         x = x.replace(old, new)
@@ -1374,6 +1379,40 @@ def insert_plots(merged_df, prs, description_image_info_dict,
         else:
             plot_items.append((nm, nm))  # 데이터 없음 → 루프에서 skip
 
+    # ── ADDP 파생 index 제목 옆 'real 항목' 표시용 준비 ──
+    # (1) 대상 lot에서 실제로 데이터가 있는(비어있지 않은) 항목 컬럼 집합
+    try:
+        _tl_df = _select_target_lot(merged_df)
+        _lot_present_cols = {c for c in _tl_df.columns if _tl_df[c].notna().any()}
+    except Exception:
+        _lot_present_cols = set(merged_df.columns)
+    # (2) reformatter ALIAS → (CATEGORY, ADDP FORM) 맵 (ADDP 재귀 해소용)
+    _ref_cat, _ref_formula = {}, {}
+    if reformatter is not None and 'ALIAS' in getattr(reformatter, 'columns', []):
+        for _, _rr in reformatter.iterrows():
+            _a = _rr.get('ALIAS')
+            if pd.isna(_a):
+                continue
+            _ref_cat[str(_a)] = str(_rr.get('CATEGORY', '')).strip().upper()
+            _ref_formula[str(_a)] = str(_rr.get('ADDP FORM', '') or '')
+
+    def _addp_leaf_refs(alias, _seen=None):
+        """ADDP FORM의 {ALIAS} 참조만 재귀 전개해 leaf(비-ADDP) 항목 집합 반환.
+        함수명(rmax/ABS/MA_Window 등)은 {} 밖이라 제외된다."""
+        if _seen is None:
+            _seen = set()
+        out = set()
+        for ref in re.findall(r'\{([^}]+)\}', _ref_formula.get(str(alias), '')):
+            ref = ref.strip()
+            if not ref or ref in _seen:
+                continue
+            _seen.add(ref)
+            if _ref_cat.get(ref) == 'ADDP':
+                out |= _addp_leaf_refs(ref, _seen)
+            else:
+                out.add(ref)
+        return out
+
     # --- 항목별 슬라이드 생성 루프 (Per-Item Slide Generation Loop) ---
     total_items = len(plot_items)
     summary_rows = []   # 마지막 summary 페이지용 (index별 REPORT DIRECTION 기준 집계값)
@@ -1592,17 +1631,19 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 p.font.name = FONT
 
             # INDEX 옆에 관련 REAL ITEM 이름 파싱해서 기입
+            # ADDP 파생(예: WINDOW_new)은 base ALIAS(spec_name=WINDOW)의 ADDP FORM에서
+            # {ALIAS} 참조만 재귀 전개(함수명 rmax/ABS 등 제외) → 그 중 '해당 lot에 실제
+            # 데이터가 있는' real 항목만 표시한다.
             real_items_str = ""
             if reformatter is not None and spec_name in reformatter['ALIAS'].values:
                 row = reformatter[reformatter['ALIAS'] == spec_name].iloc[0]
-                cat = row.get('CATEGORY', '')
+                cat = str(row.get('CATEGORY', '')).strip().upper()
                 if cat == 'REAL':
                     real_items_str = str(row.get('ITEMID', ''))
                 elif cat == 'ADDP':
-                    formula = str(row.get('ADDP FORM', ''))
-                    items = re.findall(r'[A-Za-z0-9_]+', formula)
-                    items = [it for it in items if not it.isdigit()]
-                    real_items_str = ", ".join(sorted(list(set(items))))
+                    _leaf = _addp_leaf_refs(spec_name)
+                    _shown = sorted(r for r in _leaf if r in _lot_present_cols)
+                    real_items_str = ", ".join(_shown)
 
             # ---- 1. HEADER & INDEX NAME (Title) ----
             header_shape = slide.shapes.add_shape(1, Inches(0), Inches(0), prs.slide_width, Inches(0.58))

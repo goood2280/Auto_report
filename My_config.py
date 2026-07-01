@@ -399,8 +399,10 @@ class Config:
         # ──────────────────────────────────────────────────────
         # 데이터 전처리 설정 (Data preprocessing settings)
         # ──────────────────────────────────────────────────────
-        # suffixes_remove: step_id 끝에서 제거할 접미사 목록
+        # suffixes_remove: step_id/항목명 끝에서 제거할 접미사 목록
         self.suffixes_remove = ["ZZ", "M1X1", "_P1", "_P2", "tot"]
+        # prefixes_remove: step_id/항목명 앞에서 제거할 접두사 목록
+        self.prefixes_remove = []
 
         # replace_map: item_id 등에서 치환할 문자열 매핑
         self.replace_map = {
