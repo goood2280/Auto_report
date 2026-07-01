@@ -1125,71 +1125,92 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
 
 
 def calcaulate_description_image_info_dict(description_ppt_path, img_quality=20):
-    """설명 PPT에서 슬라이드별 좌상단 텍스트(Category)를 추출하고 슬라이드를 이미지로 저장하여 매핑 반환."""
-    import os
-    import pythoncom
-    import win32com.client
-    
+    """설명 PPT(python-pptx)를 열어 슬라이드별 좌상단 텍스트(Category)→슬라이드 매핑 반환.
+
+    PNG 변환/중간파일(win32com Export) 의존을 제거했다. HOL_Auto_Report_Description.pptx
+    파일만 있으면 되고, 이후 insert_plots가 매칭된 슬라이드를 python-pptx로 **직접 복사**해
+    삽입한다. (PowerPoint 설치·COM 불필요, RUN/TEMP/desc_slide_*.png 미생성)
+
+    반환: {category_text_lower: source_slide_object}. source_slide는 원본 Presentation을
+    참조하므로, 반환 dict가 살아있는 동안 원본 패키지도 유지된다.
+    """
+    from pptx import Presentation
+
     desc_dict = {}
-    if not os.path.exists(description_ppt_path):
+    if not description_ppt_path or not os.path.exists(description_ppt_path):
         print(f"[WARN] Description PPT를 찾을 수 없습니다: {description_ppt_path}")
         return desc_dict
 
-    ppt_app = None
-    presentation = None
     try:
-        pythoncom.CoInitialize()
-        ppt_app = win32com.client.DispatchEx("PowerPoint.Application")
-        # 백그라운드 동작을 위해 경고창 무시 및 숨김 처리 시도
-        ppt_app.DisplayAlerts = False
-
-        abs_path = os.path.abspath(description_ppt_path)
-        presentation = ppt_app.Presentations.Open(abs_path, WithWindow=False)
-        
-        # 설명 슬라이드 PNG는 별도 폴더(temp_desc_images)를 만들지 않고
-        # 런타임 임시 영역(RUN/TEMP)에 저장합니다.
-        tmp_dir = os.path.join("RUN", "TEMP")
-        os.makedirs(tmp_dir, exist_ok=True)
-        
-        for i, slide in enumerate(presentation.Slides):
-            best_text = f"Slide_{i+1}"
-            min_dist = float('inf')
-            
-            # 슬라이드 내의 모든 도형 스캔 후 (0,0) 좌상단에 가장 가까운 텍스트 탐색
-            for shape in slide.Shapes:
-                if shape.HasTextFrame and shape.TextFrame.HasText:
-                    text = shape.TextFrame.TextRange.Text.strip()
-                    if text:
-                        dist = shape.Top**2 + shape.Left**2
-                        if dist < min_dist:
-                            min_dist = dist
-                            best_text = text.split('\r')[0].split('\n')[0].strip()
-            
-            # 파워포인트 특수문자 제거
-            best_text = best_text.replace('\x0b', '').strip()
-            
-            # 슬라이드 전체를 PNG 이미지로 Export
-            img_path = os.path.join(tmp_dir, f"desc_slide_{i+1}.png")
-            slide.Export(img_path, "PNG")
-            desc_dict[best_text.lower()] = img_path
-            
+        src_prs = Presentation(description_ppt_path)
+        for slide in src_prs.slides:
+            best_text, min_dist = None, float('inf')
+            # 슬라이드 내 모든 도형 스캔 후 (0,0) 좌상단에 가장 가까운 텍스트를 Category로
+            for shape in slide.shapes:
+                if not shape.has_text_frame:
+                    continue
+                text = (shape.text_frame.text or "").strip()
+                if not text:
+                    continue
+                top = shape.top if shape.top is not None else 0
+                left = shape.left if shape.left is not None else 0
+                dist = int(top) ** 2 + int(left) ** 2
+                if dist < min_dist:
+                    min_dist = dist
+                    best_text = text.split('\r')[0].split('\n')[0].strip()
+            if best_text:
+                key = best_text.replace('\x0b', '').strip().lower()
+                if key:
+                    desc_dict[key] = slide
     except Exception as e:
         print(f"[ERROR] Description PPT 파싱 중 에러 발생: {e}")
-    finally:
-        # 에러가 나도 PowerPoint COM 인스턴스를 반드시 정리(누수 방지)
-        try:
-            if presentation is not None:
-                presentation.Close()
-        except Exception:
-            pass
-        try:
-            if ppt_app is not None:
-                ppt_app.Quit()
-        except Exception:
-            pass
-        pythoncom.CoUninitialize()
 
     return desc_dict
+
+
+def _copy_slide_into(dest_prs, src_slide):
+    """src_slide(다른 Presentation의 슬라이드)를 dest_prs에 새 슬라이드로 직접 복사.
+
+    python-pptx로 도형 XML을 복사하고, 이미지 등 관계(rel)를 dest로 옮기며 rId를
+    재매핑한다. PNG 변환 없이 원본 슬라이드 내용을 그대로 삽입한다.
+    """
+    import copy as _copy
+    _R = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
+
+    dest_slide = dest_prs.slides.add_slide(dest_prs.slide_layouts[6])
+    # 빈 레이아웃의 기본 placeholder 제거(빈 상자 방지)
+    for ph in list(dest_slide.shapes):
+        try:
+            if ph.is_placeholder:
+                ph._element.getparent().remove(ph._element)
+        except Exception:
+            pass
+
+    # 관계(이미지 등) 복사 → old rId → new rId 매핑 (레이아웃/노트 관계는 제외)
+    rid_map = {}
+    try:
+        for rId, rel in src_slide.part.rels.items():
+            if 'slideLayout' in rel.reltype or 'notesSlide' in rel.reltype:
+                continue
+            if rel.is_external:
+                new_rId = dest_slide.part.rels.get_or_add_ext_rel(rel.reltype, rel._target)
+            else:
+                new_rId = dest_slide.part.relate_to(rel.target_part, rel.reltype)
+            rid_map[rId] = new_rId
+    except Exception as _re:
+        print(f"[WARN] description 슬라이드 관계 복사 일부 실패: {_re}")
+
+    # 도형 XML 복사
+    for shape in src_slide.shapes:
+        dest_slide.shapes._spTree.append(_copy.deepcopy(shape._element))
+
+    # 복사된 XML의 old rId 참조를 new rId로 치환 (r:embed, r:link, r:id 등)
+    if rid_map:
+        for el in dest_slide.shapes._spTree.iter():
+            for attr in list(el.attrib):
+                if attr.startswith(_R) and el.attrib[attr] in rid_map:
+                    el.attrib[attr] = rid_map[el.attrib[attr]]
+    return dest_slide
 
 
 def insert_plots(merged_df, prs, description_image_info_dict,
@@ -1351,27 +1372,29 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             cat2 = str(spec_data.loc[spec_name, 'CAT2']).strip()
             if cat2 != current_cat and cat2.lower() != 'nan':
                 current_cat = cat2
-                matched_img = None
+                matched_slide = None
                 ck = cat2.lower().strip()
-                # 1) CAT2 글자와 정확히 일치하는 description 페이지 우선
-                for key, img_path in description_image_info_dict.items():
+                # 1) CAT2 글자와 정확히 일치하는 description 슬라이드 우선
+                for key, _src_slide in description_image_info_dict.items():
                     if key.lower().strip() == ck:
-                        matched_img = img_path
+                        matched_slide = _src_slide
                         break
-                # 2) 없으면 CAT2 글자가 포함(부분일치)된 description 페이지 탐색
-                if matched_img is None and ck:
-                    for key, img_path in description_image_info_dict.items():
+                # 2) 없으면 CAT2 글자가 포함(부분일치)된 description 슬라이드 탐색
+                if matched_slide is None and ck:
+                    for key, _src_slide in description_image_info_dict.items():
                         kl = key.lower().strip()
                         if ck in kl or kl in ck:
-                            matched_img = img_path
+                            matched_slide = _src_slide
                             break
 
-                # CAT2 그룹 시작 전에 description 페이지를 한 장 삽입
-                if matched_img and os.path.exists(matched_img):
-                    desc_slide = prs.slides.add_slide(prs.slide_layouts[6])
-                    desc_slide.shapes.add_picture(matched_img, Inches(0), Inches(0), prs.slide_width, prs.slide_height)
+                # CAT2 그룹 시작 전에 description 슬라이드를 python-pptx로 직접 복사해 삽입 (PNG 변환 없음)
+                if matched_slide is not None:
+                    try:
+                        _copy_slide_into(prs, matched_slide)
+                    except Exception as _de:
+                        print(f"[WARN] CAT2 '{cat2}' description 슬라이드 복사 실패: {_de}")
                 else:
-                    print(f"[WARN] CAT2 '{cat2}' description 페이지를 찾지 못해 간지 생략")
+                    print(f"[WARN] CAT2 '{cat2}' description 슬라이드를 찾지 못해 간지 생략")
 
         try:
             # ---- 데이터 준비 (Data Preparation) ----
