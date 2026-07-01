@@ -1232,6 +1232,17 @@ def _copy_slide_into(dest_prs, src_slide, src_w=None, src_h=None):
     except Exception as _re:
         print(f"[WARN] description 슬라이드 관계 복사 일부 실패: {_re}")
 
+    # 원본 도형의 '해결된' 위치/크기를 먼저 캡처한다.
+    #   placeholder 도형은 자기 XML에 위치(<a:off>/<a:ext>)가 없고 슬라이드 레이아웃에서
+    #   상속받는다. blank 레이아웃(6번)으로 복사하면 상속처가 없어 가운데로 몰리므로,
+    #   python-pptx가 상속을 해석해 돌려주는 절대 좌표를 복사본에 명시적으로 새겨 넣는다.
+    src_geoms = []
+    for shape in src_slide.shapes:
+        try:
+            src_geoms.append((shape.left, shape.top, shape.width, shape.height))
+        except Exception:
+            src_geoms.append((None, None, None, None))
+
     # 도형 XML 복사
     for shape in src_slide.shapes:
         dest_slide.shapes._spTree.append(_copy.deepcopy(shape._element))
@@ -1243,28 +1254,55 @@ def _copy_slide_into(dest_prs, src_slide, src_w=None, src_h=None):
                 if attr.startswith(_R) and el.attrib[attr] in rid_map:
                     el.attrib[attr] = rid_map[el.attrib[attr]]
 
-    # 원본↔현재 슬라이드 크기 차이만큼 각 도형의 위치/크기 스케일 (현재 PPT에 맞춤)
+    # 캡처한 절대 위치/크기를 복사본에 명시적으로 기입(placeholder 상속 → 절대좌표 고정)
+    # + 원본↔현재 슬라이드 크기 차이만큼 스케일하여 현재 PPT에 맞춘다.
     try:
         _sw = int(src_w) if src_w else int(dest_prs.slide_width)
         _sh = int(src_h) if src_h else int(dest_prs.slide_height)
         sx = dest_prs.slide_width / _sw if _sw else 1.0
         sy = dest_prs.slide_height / _sh if _sh else 1.0
-        if abs(sx - 1.0) > 1e-6 or abs(sy - 1.0) > 1e-6:
-            for sh in dest_slide.shapes:
-                try:
-                    if sh.left is not None:
-                        sh.left = int(round(sh.left * sx))
-                    if sh.top is not None:
-                        sh.top = int(round(sh.top * sy))
-                    if sh.width is not None:
-                        sh.width = int(round(sh.width * sx))
-                    if sh.height is not None:
-                        sh.height = int(round(sh.height * sy))
-                except Exception:
-                    pass
+        for (l, t, w, h), sh in zip(src_geoms, list(dest_slide.shapes)):
+            try:
+                if l is not None:
+                    sh.left = int(round(l * sx))
+                if t is not None:
+                    sh.top = int(round(t * sy))
+                if w is not None:
+                    sh.width = int(round(w * sx))
+                if h is not None:
+                    sh.height = int(round(h * sy))
+            except Exception:
+                pass
     except Exception as _se:
         print(f"[WARN] description 슬라이드 크기 스케일 실패: {_se}")
     return dest_slide
+
+
+def _fmt_stat_value(v):
+    """PPT 통계표 셀 숫자 표기 규칙.
+
+    - |v| < 1        → 소수점 셋째자리(0.123)
+    - 1 ≤ |v| < 1000 → 소수점 첫째자리(12.3)
+    - 그 외          → 유효숫자 2개 scientific(1.1e5 / -2.3e-6)
+    - NaN/None       → '-'
+    """
+    try:
+        if v is None or pd.isna(v):
+            return "-"
+    except Exception:
+        return "-"
+    v = float(v)
+    av = abs(v)
+    if av == 0:
+        return "0"
+    if av < 1:
+        return f"{v:.3f}"
+    if av < 1000:
+        return f"{v:.1f}"
+    # scientific: 유효숫자 2개(가수 소수 1자리) + 'e' 지수(1.1e5 형태, +/선행0 제거)
+    _s = f"{v:.1e}"          # 예: '1.1e+05'
+    _mant, _exp = _s.split('e')
+    return f"{_mant}e{int(_exp)}"
 
 
 def insert_plots(merged_df, prs, description_image_info_dict,
@@ -1385,8 +1423,9 @@ def insert_plots(merged_df, prs, description_image_info_dict,
     # plot_items: (데이터 컬럼명, spec 메타 출처 ALIAS)
     # REPORT ORDER 오름차순(작은 값 먼저)으로 index 정렬
     if 'REPORT ORDER' in spec_data.columns:
+        # REPORT ORDER에 '숫자'가 있는 항목만 페이지 생성(비어있거나 숫자가 아니면 제외)
         _ro = pd.to_numeric(spec_data['REPORT ORDER'], errors='coerce')
-        ordered_index = _ro.sort_values(kind='stable').index
+        ordered_index = _ro.dropna().sort_values(kind='stable').index
     else:
         ordered_index = spec_data.index
     plot_items = []
@@ -1673,7 +1712,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                     real_items_str = str(row.get('ITEMID', ''))
                 elif cat == 'ADDP':
                     _leaf = _addp_leaf_refs(spec_name)
-                    _shown = sorted(r for r in _leaf if r in _lot_present_cols)
+                    # MA_Window 파생 참조({WINDOW_new} 등)는 '_new' 접미사를 떼고 base 세부항목명으로 표시
+                    _shown = sorted({re.sub(r'_new$', '', r) for r in _leaf if r in _lot_present_cols})
                     real_items_str = ", ".join(_shown)
 
             # ---- 1. HEADER & INDEX NAME (Title) ----
@@ -1755,7 +1795,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                     for r_idx, (_lbl, _fn) in enumerate(stat_defs, start=1):
                         try:
                             _v = _fn(grp_data)
-                            table_shape.cell(r_idx, c_idx).text = "-" if pd.isna(_v) else f"{_v:.3f}"
+                            table_shape.cell(r_idx, c_idx).text = _fmt_stat_value(_v)
                         except Exception:
                             table_shape.cell(r_idx, c_idx).text = "-"
                 else:
@@ -1866,11 +1906,22 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             ax_box.set_xlim(0.5, 25.5)
             ax_box.tick_params(axis='x', rotation=45, labelsize=7)
             _label_axes(ax_box, xlabel="Wafer #", ylabel=y_label)
-            if log_scale: ax_box.set_yscale('log')
             _remove_spines(ax_box)
             ax_box.set_axisbelow(True)
-            ax_box.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
-            ax_box.grid(True, which='major', axis='both', color=C_GRID, linestyle='-', linewidth=0.5)
+            if log_scale:
+                # 로그 스케일: 데이터 범위가 한 decade 미만이어도 10의 거듭제곱마다 y축 선이 나오도록
+                # major(10^n) + minor(2~9×10^n) locator를 명시하고 둘 다 grid 표시.
+                from matplotlib.ticker import LogLocator, NullFormatter
+                ax_box.set_yscale('log')
+                ax_box.yaxis.set_major_locator(LogLocator(base=10.0, numticks=15))
+                ax_box.yaxis.set_minor_locator(
+                    LogLocator(base=10.0, subs=(2, 3, 4, 5, 6, 7, 8, 9), numticks=15))
+                ax_box.yaxis.set_minor_formatter(NullFormatter())
+                ax_box.grid(True, which='major', axis='both', color=C_GRID, linestyle='-', linewidth=0.6)
+                ax_box.grid(True, which='minor', axis='y', color=C_GRID, linestyle='-', linewidth=0.35, alpha=0.6)
+            else:
+                ax_box.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
+                ax_box.grid(True, which='major', axis='both', color=C_GRID, linestyle='-', linewidth=0.5)
             # 용량 다이어트를 위한 JPG 포맷 저장 및 quality 옵션 적용
             fig_box.savefig(tmp_box, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
             plt.close(fig_box)
@@ -1883,7 +1934,9 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             map_x = 'CHIP_X_ADJ' if 'CHIP_X_ADJ' in item_df.columns else col_x
             map_y = 'CHIP_Y_ADJ' if 'CHIP_Y_ADJ' in item_df.columns else col_y
 
-            sub_groups = list(item_df.groupby(col_sub))
+            # WF MAP 행 = PGM(pt)별 한 줄. PGM(pt) 컬럼이 있으면 그것으로 그룹핑(없으면 subitem).
+            _wfmap_grp_col = 'PGM(pt)' if 'PGM(pt)' in item_df.columns else col_sub
+            sub_groups = list(item_df.groupby(_wfmap_grp_col))
             n_pgm = len(sub_groups) if len(sub_groups) > 0 else 1
             # 측정된 wafer만 컬럼으로 표시(빈 컬럼 제거 → 각 wafer 셀을 최대한 크게)
             measured_sorted = sorted(measured_wafers, key=lambda x: int(x) if str(x).isdigit() else 0)
@@ -2002,6 +2055,9 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             #   (lot/mask/wafer + tkout_time)별로 site 값을 1점으로 집계 → 같은 측정의 site 노이즈 제거.
             _agg_map = getattr(GLOBAL_CONFIG, 'trend_tkout_agg', {}) or {}
             _agg_spec = _agg_map.get(item_name) or _agg_map.get(spec_name)
+            # 'Window'가 들어간 항목(MAWIN 파생 포함)은 명시 설정이 없어도 Trend를 P10으로 집계
+            if not _agg_spec and ('window' in str(item_name).lower() or 'window' in str(spec_name).lower()):
+                _agg_spec = 'P10'
             if _agg_spec:
                 _s = str(_agg_spec).strip().upper()
                 if _s in ('MEAN', 'AVG'):

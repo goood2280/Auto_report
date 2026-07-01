@@ -1142,8 +1142,6 @@ if reformatter_check :
                                             elif _dv == 'LOWER': _shigh = None
                                     return _slow, _shigh
 
-                                _tab = ('display:inline-block; background:#2f3a4a; color:#fff; font-size:12px; '
-                                        'font-weight:bold; padding:3px 14px; border-radius:4px 4px 0 0; margin:8px 0 4px;')
                                 _spec_rows, _warn_blocks = [], []
                                 for item in top_item_names:
                                     safe_item = re.sub(r'[\\/:*?"<>|]', '_', str(item))
@@ -1182,12 +1180,12 @@ if reformatter_check :
                                         '<div style="display:flex; align-items:flex-start; gap:12px; margin-bottom:8px;">'
                                         f'{_trend_block(item, True, img_b64)}{_wf_block}</div>')
 
+                                # '이상'/'주의' 탭 라벨은 표시하지 않는다. 각 차트 좌상단의
+                                # SPEC OUT / WARNING 스티커가 상태 식별 역할을 대신한다.
                                 _parts = []
                                 if _spec_rows:
-                                    _parts.append(f'<div style="{_tab}"><span style="color:#ff5a5a;">●</span> 이상 <span style="color:#9aa6b5;">|</span></div>')
                                     _parts.extend(_spec_rows)
                                 if _warn_blocks:
-                                    _parts.append(f'<div style="{_tab}"><span style="color:#ffc23d;">●</span> 주의 <span style="color:#9aa6b5;">|</span></div>')
                                     _parts.append(
                                         '<div style="display:flex; flex-wrap:wrap; align-items:flex-start; gap:8px;">'
                                         f'{"".join(_warn_blocks)}</div>')
