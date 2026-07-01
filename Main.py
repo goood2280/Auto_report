@@ -195,7 +195,6 @@ builtins.print = _run_log_print
 
 # =============================================== Main Loop 실행 ====================================================================
 bucket_dx = GLOBAL_CONFIG.get("bucket_dx") 
-bucket_simyung = GLOBAL_CONFIG.get("bucket_simyung") 
 
 # S3 client (사내 환경 전용 - 로컬에서는 graceful skip)
 S3_CONNECT = False
@@ -578,53 +577,6 @@ if reformatter_check :
             # Zone Radius add
             merged_df = pd.merge(merged_df,zone_define,on=['MASK','CHIP_X_POS','CHIP_Y_POS','FLAT_ZONE_POS'])
             
-            # Ref WF 정보
-            #YLD 정보 Download
-            if vehicle == 'Solomon1' or vehicle == 'Solomon2' :
-                client.download_file(bucket_simyung, '/SF3_Product/Solomon_EVT1/Result/SF3_SOL_EVT1_Result_Data.csv', 'SF3_SOL_EVT1_Result_Data.csv') 
-                reference_df = pd.read_csv('SF3_SOL_EVT1_Result_Data.csv')
-                reference_df['WAFER_ID'] = reference_df['WAFER_ID'].astype(int)
-                reference_df['END_TIME'] = pd.to_datetime(reference_df['END_TIME'])
-                reference_df = reference_df.loc[reference_df.groupby(['ROOT_LOT_ID', 'WAFER_ID'])['END_TIME'].idxmax()]
-                reference_df = reference_df[reference_df['PGM_VER']>12][['ROOT_LOT_ID','WAFER_ID','END_TIME','LOT_ID','PGM_VER','YLD','L1/L2','SCAN_LH','SRAM_LH']]
-                reference_df = reference_df.sort_values(by=['YLD'], ascending=False).reset_index()
-                reference_df = reference_df[['ROOT_LOT_ID','WAFER_ID','END_TIME','LOT_ID','PGM_VER','YLD','L1/L2','SCAN_LH','SRAM_LH']].reset_index()
-            
-                for i in range(0, 100):
-                    try :
-                        reference_lot_id = reference_df['ROOT_LOT_ID'].iloc[i]
-                        reference_wafer_id = reference_df['WAFER_ID'].iloc[i]
-                        reference_yld = reference_df['YLD'].iloc[i]
-                        if not merged_df[(merged_df['ROOT_LOT_ID'] == reference_lot_id) & (merged_df['WAFER_ID'] == reference_wafer_id) & (merged_df['DC_Split'] == "MFDC")].empty :
-                            break
-                    except : 
-                        pass
-            else :
-                try:
-                    reference_df = pd.read_csv('Thetis1_YLD.csv')
-                    reference_df['WAFER_ID'] = reference_df['WAFER_ID'].astype(int)
-                    reference_df['TKOUT_TIME'] = pd.to_datetime(reference_df['TKOUT_TIME'])
-                    reference_df = reference_df.loc[reference_df.groupby(['ROOT_LOT_ID', 'WAFER_ID'])['TKOUT_TIME'].idxmax()]
-                    reference_df = reference_df.sort_values(by=['YLD'], ascending=False).reset_index()
-
-                    for i in range(0, 2500):
-                        try :
-                            reference_lot_id = reference_df['ROOT_LOT_ID'].iloc[i]
-                            reference_wafer_id = reference_df['WAFER_ID'].iloc[i]
-                            reference_yld = reference_df['YLD'].iloc[i]
-                            if not merged_df[(merged_df['ROOT_LOT_ID'] == reference_lot_id) & (merged_df['WAFER_ID'] == reference_wafer_id) & (merged_df['DC_Split'] == "MFDC")].empty :
-                                break
-                        except : 
-                            pass
-                except FileNotFoundError:
-                    print("[WARN] Thetis1_YLD.csv 파일이 없습니다. reference 데이터를 None으로 설정합니다.")
-                    reference_lot_id = None
-                    reference_wafer_id = None
-                    reference_yld = None
-
-            if reference_yld is not None and 'reference_df' in locals():
-                reference_df = reference_df[reference_df['YLD'] == reference_yld].reset_index()
-                
             html_code = GLOBAL_CONFIG.get("html_code")
 
             for search_key in search_strings : #search key = match key, fablot_id + dc_step_id
@@ -644,7 +596,7 @@ if reformatter_check :
                     # print('***** fab_lot_id + step_id : ', search_key)
                     # print('***** root_lot_id + step_id : ', match_key)
 
-                    df = merged_df[(merged_df['match_key'] == match_key) | ((merged_df['ROOT_LOT_ID'] == reference_lot_id) & (merged_df['WAFER_ID'] == reference_wafer_id) & (merged_df['DC_Split'] == "MFDC"))].copy()
+                    df = merged_df[merged_df['match_key'] == match_key].copy()
 
                     search_key_rows = df[df['search_key'] == search_key]
                     df['WAFER_ID'] = df['WAFER_ID'].astype(int)
@@ -658,7 +610,6 @@ if reformatter_check :
                         log_to_file(f"{search_key}에서 HOL DATA가 측정되지 않아 Report 발행되지 않았습니다.", error_log)
                         continue
 
-                    df.loc[(df['ROOT_LOT_ID'] == reference_lot_id) & (df['WAFER_ID'] == reference_wafer_id) , 'WAFER_ID'] = 0
 
                     target_wafer_id_list = sorted(df['WAFER_ID'].unique().tolist())
                     print(f'[INFO] 대상 Wafer 목록: {target_wafer_id_list}')
@@ -912,17 +863,14 @@ if reformatter_check :
                     _data_lw.index = VIP_group_HTML.index
                     VIP_group_HTML = _data_lw
 
-                    # 컬럼 정렬: 1) target lot(해당 report lot_id)을 맨 왼쪽, 2) reference(wafer 0) lot, 3) 형제 lot(이름순) / lot 내 wafer 오름차순
+                    # 컬럼 정렬: target lot(해당 report lot_id)을 맨 왼쪽, 그 외 형제 lot(이름순) / lot 내 wafer 오름차순
                     _all_cols = list(VIP_group_HTML.columns)
                     _lots = list(dict.fromkeys([c[0] for c in _all_cols]))
-                    _ref_lots = [l for l in _lots if any((c[0] == l and c[1] == 0) for c in _all_cols)]
 
                     def _lot_rank(l):
                         if str(l) == str(target_lot_id):
                             return (0, str(l))
-                        if l in _ref_lots:
-                            return (1, str(l))
-                        return (2, str(l))
+                        return (1, str(l))
                     _lots_sorted = sorted(_lots, key=_lot_rank)
                     _ordered_cols = []
                     for _lot in _lots_sorted:
