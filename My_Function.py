@@ -1823,66 +1823,81 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             gdim = max(nx, ny)
             map_avail = SLIDE_BOTTOM - Y_MAP
 
-            # ---- WF MAP 배치: 같은 PGM(pt)는 반드시 한 줄에 (행=PGM/subitem, 열=wafer 전체) ----
-            #   한 줄(LW 폭)에 들어가는 범위에서 wafer 셀을 최대 크기로(아래 배치에서 폭을 꽉 채움).
-            grid_rows, grid_cols = n_pgm, n_waf
-            cell_map = {(i, j): (sub_grp, w, sub_name)
-                        for i, (sub_name, sub_grp) in enumerate(sub_groups)
-                        for j, w in enumerate(measured_sorted)}
+            # ---- WF MAP 배치: 각 wafer(및 PGM)를 '개별 격자 셀'로 그린다 ----
+            # (HTML Score Board WF MAP과 동일한 die별 색(_wfmap_norm/_wfmap_cmap) 개별 격자.)
+            # 25매를 한 줄로 늘어놓으면 얇은 띠로 뭉개지므로, 셀이 최대한 크고 정사각형에
+            # 가깝도록 여러 행으로 재배치한다(가용영역 LW x map_avail 비율 기준 열 수 산정).
+            import math as _math
+            # (PGM, wafer) 셀을 평탄화
+            flat_cells = []   # (sub_name, sub_grp, w)
+            for _sub_name, _sub_grp in sub_groups:
+                for _w in measured_sorted:
+                    flat_cells.append((_sub_name, _sub_grp, _w))
+            total_cells = max(len(flat_cells), 1)
+            _multi_pgm = n_pgm > 1
 
-            render_cell = 0.72                                # 렌더 셀 크기(인치) — 해상도 기준
-            fig_w = grid_cols * render_cell
-            fig_h = grid_rows * render_cell + 0.30
-            chip_pt = render_cell / gdim * 72.0               # 칩 1개 한 변(pt)
-            marker_s = max(1.0, (chip_pt * 0.9) ** 2)         # 격자가 커도(13x13) 겹치지 않게 자동 축소
+            _cbar_w = 0.5                                  # 우측 컬러바 폭(인치)
+            _area_aspect = (LW - _cbar_w) / max(map_avail, 0.6)   # 가용영역 가로/세로
+            grid_cols = max(1, min(total_cells, int(round(_math.sqrt(total_cells * _area_aspect)))))
+            grid_rows = _math.ceil(total_cells / grid_cols)
 
-            fig_map, axes_map = plt.subplots(grid_rows, grid_cols, figsize=(fig_w, fig_h), squeeze=False,
-                                             gridspec_kw={'wspace': 0.05, 'hspace': 0.12})
+            render_cell = 0.95                             # 렌더 셀 크기(인치) — 셀당 wafer 1장
+            chip_pt = render_cell / gdim * 72.0            # 칩 1개 한 변(pt)
+            marker_s = max(1.0, (chip_pt * 0.9) ** 2)      # 격자가 커도(13x13) 겹치지 않게 자동 축소
+            fig_disp_w = grid_cols * render_cell           # 서브플롯 영역 폭(컬러바 제외)
+            fig_h = grid_rows * render_cell
+
+            fig_map, axes_map = plt.subplots(grid_rows, grid_cols,
+                                             figsize=(fig_disp_w + _cbar_w, fig_h), squeeze=False,
+                                             gridspec_kw={'wspace': 0.12, 'hspace': 0.40})
             sc = None
-            for r in range(grid_rows):
-                for c in range(grid_cols):
-                    ax = axes_map[r, c]
-                    if (r, c) in cell_map:
-                        sub_grp, w, sub_name = cell_map[(r, c)]
-                        w_grp = sub_grp[sub_grp[w_col] == w]
-                        if not w_grp.empty:
-                            sc = ax.scatter(w_grp[map_x], w_grp[map_y], c=w_grp[item_name],
-                                            cmap=_wfmap_cmap(direction), norm=wfmap_norm,
-                                            s=marker_s, marker='s', alpha=1.0, linewidths=0)
-                        ax.set_facecolor('white')   # WF MAP 배경색 제거(회색→흰색)
-                        ax.set_xlabel(f"#{w}", fontsize=6, labelpad=1, color=C_NEUTRAL)
-                        if c == 0:
-                            # 각 WF 행 좌측에 해당 PGM(pt)를 왼쪽으로 90도 회전해 표기
-                            _pgm_lbl = str(sub_name)
-                            if 'PGM(pt)' in sub_grp.columns:
-                                _u = sub_grp['PGM(pt)'].dropna()
-                                if len(_u): _pgm_lbl = str(_u.iloc[0])
-                            ax.set_ylabel(_pgm_lbl, fontsize=6, rotation=90, labelpad=8, color=C_NEUTRAL)
-                        ax.set_xticks([]); ax.set_yticks([])
-                        ax.set_aspect('equal', adjustable='box')   # 웨이퍼 정원형 유지
-                        for spine in ax.spines.values():
-                            spine.set_visible(False)
-                        ax.set_xlim(global_x_min, global_x_max)
-                        ax.set_ylim(global_y_min, global_y_max)
-                    else:
-                        ax.axis('off')   # 남는 칸 비움
+            for _ic in range(grid_rows * grid_cols):
+                r, c = divmod(_ic, grid_cols)
+                ax = axes_map[r, c]
+                if _ic < total_cells:
+                    sub_name, sub_grp, w = flat_cells[_ic]
+                    w_grp = sub_grp[sub_grp[w_col] == w]
+                    if not w_grp.empty:
+                        sc = ax.scatter(w_grp[map_x], w_grp[map_y], c=w_grp[item_name],
+                                        cmap=_wfmap_cmap(direction), norm=wfmap_norm,
+                                        s=marker_s, marker='s', alpha=1.0, linewidths=0)
+                    # wafer 번호(+ PGM 다중이면 PGM) 라벨을 각 셀 상단에
+                    _lbl = f"#{w}"
+                    if _multi_pgm:
+                        _pl = str(sub_name)
+                        if 'PGM(pt)' in sub_grp.columns:
+                            _u = sub_grp['PGM(pt)'].dropna()
+                            if len(_u): _pl = str(_u.iloc[0])
+                        _lbl = f"#{w} · {_pl}"
+                    ax.set_title(_lbl, fontsize=6, pad=2, color=C_NEUTRAL)
+                    ax.set_facecolor('white')
+                    ax.set_xticks([]); ax.set_yticks([])
+                    ax.set_aspect('equal', adjustable='box')   # 웨이퍼 정원형 유지
+                    for spine in ax.spines.values():
+                        spine.set_visible(False)
+                    ax.set_xlim(global_x_min, global_x_max)
+                    ax.set_ylim(global_y_min, global_y_max)
+                else:
+                    ax.axis('off')   # 남는 칸 비움
 
-            if sc:
-                # 모든 wafer가 공유하는 단일 컬러바를 오른쪽에 풀높이로 배치
-                fig_map.subplots_adjust(right=0.9)
-                cbar_ax = fig_map.add_axes([0.915, 0.12, 0.015, 0.76])
+            if sc is not None:
+                # 모든 wafer가 공유하는 단일 컬러바를 오른쪽에 배치
+                _cb_frac = fig_disp_w / (fig_disp_w + _cbar_w)
+                fig_map.subplots_adjust(left=0.01, right=_cb_frac, top=0.93, bottom=0.02)
+                cbar_ax = fig_map.add_axes([_cb_frac + 0.015, 0.12, 0.012, 0.76])
                 cbar = fig_map.colorbar(sc, cax=cbar_ax)
                 cbar.ax.tick_params(labelsize=6)
             # 칩 격자가 선명하도록 해상도 상향
-            fig_map.savefig(tmp_map, format='jpg', dpi=max(int(dpi), 220), bbox_inches="tight",
+            fig_map.savefig(tmp_map, format='jpg', dpi=max(int(dpi), 200), bbox_inches="tight",
                             facecolor='white', pil_kwargs={'quality': map_q})
             plt.close(fig_map)
 
-            # 좌열 가용공간(LW x map_avail)에 '비율 유지하며 최대 크기'로 배치
-            pic_w, pic_h = LW, LW * (fig_h / fig_w)
+            # 좌열 가용공간(LW x map_avail)에 비율 유지하며 최대 크기로 배치
+            _ratio = fig_h / (fig_disp_w + _cbar_w)
+            pic_w, pic_h = LW, LW * _ratio
             if pic_h > map_avail:
                 pic_h = map_avail
-                pic_w = pic_h * (fig_w / fig_h)
+                pic_w = pic_h / _ratio
             tmp_map.seek(0)
             slide.shapes.add_picture(tmp_map, Inches(LX), Inches(Y_MAP), Inches(pic_w), Inches(pic_h))
 
