@@ -1258,7 +1258,9 @@ if reformatter_check :
                         f'<div id="target1"><div class="section-title">■ [1] Score Board</div>'
                         f'<div style="font-size:12px; color:#555; margin:2px 0 6px 2px;">'
                         f'※ {_wf_min}pt 이상 측정된 이력이 있는 아이템은 각 wafer 아래에 WF MAP이 함께 표시됩니다.</div>'
-                        f'<div class="table-container">{score_board_html}</div></div>'
+                        # Score Board는 기본 500px 대신 높이를 키워 한 화면에 약 25개 index가 보이도록 함
+                        # (index당 점수행+WF MAP행 ≈ 68px 기준 25개 → ~1750px; 초과 시에만 세로 스크롤)
+                        f'<div class="table-container" style="max-height:1750px;">{score_board_html}</div></div>'
                     )
                     html_content = html_content.replace(
                         '<div id="target2"></div>',
