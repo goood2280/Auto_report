@@ -9,6 +9,7 @@
 - [개요](#개요)
 - [저장소 구성 (setup.py 번들)](#저장소-구성-setuppy-번들)
 - [빠른 시작](#빠른-시작)
+- [전체 사용법 (설치 · 설정 · 실행 · 출력물)](#전체-사용법-설치--설정--실행--출력물)
 - [아키텍처](#아키텍처)
 - [불량 통계 자동 분석 (핵심)](#불량-통계-자동-분석-핵심)
   - [analyze_commonality — 코드 단독 동작](#analyze_commonality--코드-단독-동작)
@@ -108,6 +109,76 @@ python Main.py _TRIGGER_vehicle_A_T6677.1_test
 1. `reformatter/config.yaml`에 vehicle 블록 추가
 2. `reformatter/<vehicle>_reformatter.csv` 작성 (항목 정의: REAL / ADDP)
 3. `python Main.py <vehicle>`
+
+---
+
+## 전체 사용법 (설치 · 설정 · 실행 · 출력물)
+
+### 1) 요구사항
+
+- **Python 3.9+**
+- **패키지**: `pandas`, `numpy`, `duckdb`, `pyarrow`, `python-pptx`, `matplotlib`, `openpyxl`, `requests`, `pyyaml`, `openai`(AI 사용 시), `Pillow`
+- **사내 전용 모듈**(번들 미포함, 경로에 있어야 함): `bigdataquery`(ET/inline/WIP 쿼리). `gpt_oss_client`는 로컬 mock이며 없으면 AI만 비활성.
+- 설명 슬라이드 삽입은 이제 **python-pptx로 직접 복사** — PowerPoint(win32com) 설치 불필요.
+
+### 2) 설치 (소스 추출)
+
+```bash
+python setup.py              # 현재 폴더에 전체 소스 추출 (이미 있으면 skip)
+python setup.py --overwrite  # 덮어쓰기
+python setup.py --list       # 번들 내용만 확인
+python setup.py -o DIR       # DIR에 추출
+```
+→ `Main.py / My_Function.py / My_config.py / anomaly_engine.py / ANOMALY_KNOWLEDGE.md`가 풀립니다(SHA-256 검증).
+
+### 3) 필요 파일 (실행 전 준비)
+
+| 파일/폴더 | 필수 | 역할 |
+|---|---|---|
+| `reformatter/config.yaml` | ✅ | vehicle별 설정(쿼리 파라미터·기간·토글 등) |
+| `reformatter/<vehicle>_reformatter.csv` | ✅ | 항목 정의(REAL/ADDP), SPEC·`REPORT DIRECTION`·`SCALE FACTOR`·`CAT1/CAT2`·`PPT_ONLY` 등 |
+| `.env` | AI/메일 시 | `GPT_API_BASE_URL`, `GPT_CREDENTIAL_KEY`(AI), 메일/S3 자격 등 |
+| `HOL_Auto_Report_Description.pptx` | 선택 | CAT2별 설명 간지. 있으면 해당 슬라이드를 리포트에 직접 복사 삽입(없어도 진행) |
+| 좌표 xlsx(zone define) | 선택 | WF MAP 실좌표(flat-zone) 보정용 |
+| `ANOMALY_KNOWLEDGE.md` | 선택 | AI 페르소나·답변 스타일(AI 사용 시) |
+
+> `reformatter/`, `config.yaml`, `*.pptx/xlsx/png`, `.env`, mock 모듈은 **setup.py 번들에서 제외**됩니다(사내 별도 관리).
+
+### 4) 설정 (My_config.py)
+
+- **AI 토글**: `use_gpt_summary`(마스터), `use_gpt_multistep`(3단계).
+- **분석 임계값**: `anomaly_lot_median_sigma`, `anomaly_lot_dispersion_ratio` 등.
+- **WF MAP**: `scoreboard_wfmap_min_pts`(=50), `wfmap_exclude_keywords`(예: `['PCHK']`).
+- **이미지 해상도**: PPT `ppt_chart_dpi`/`ppt_map_jpg_quality`, HTML `html_chart_dpi`/`html_wfmap_dpi`(독립 조정).
+- **색상**: `score_color_scale`(Score Board 연속 색), `score_color_scale_by_item`(ITEM별 override).
+- 자세한 표는 [설정 가이드](#설정-가이드-my_configpy) 참조.
+
+### 5) 실행
+
+```bash
+python Main.py <vehicle>                       # 예약/조건에 따라 대상 lot 자동 리포트
+python Main.py _TRIGGER_<vehicle>_<lot>_<step> # 특정 LOT 즉시 강제 발행
+#              예) _TRIGGER_vehicle_A_T6677.1_test
+```
+
+### 6) AI 사용 설정 (선택)
+
+1. `.env`에 `GPT_API_BASE_URL`, `GPT_CREDENTIAL_KEY` 설정.
+2. `My_config.use_gpt_summary=True`, `use_gpt_multistep=True`.
+3. 사내 환경은 `Main._build_llm_fn`이 자동으로 `gpt_client`(gpt-oss-120b) 사용. 로컬은 `gpt_oss_client.mock_llm`.
+4. `.env`나 연결이 없으면 **AI만 비활성**되고 코드 통계 분석으로 정상 리포트 생성.
+   (자세한 호출 흐름은 [AI 다단계 해석](#ai-다단계-해석-선택) 참조.)
+
+### 7) 출력물
+
+| 경로 | 내용 |
+|---|---|
+| `RUN/Report/<vehicle>/HTML/<날짜>-<prod>-<lot>-HOL_<step>_Report_v13.html` | HTML 리포트([0] 요약·Score Board·Inline·상세) |
+| `RUN/Report/<vehicle>/Mail/<...>.pptx` | 메일용 PPT (표지·Score Board·항목별 차트·Index Aggregation·Anomaly 상세) |
+| `RUN/TEMP/<alias>.png` | HTML이 재참조하는 Trend PNG(해상도 `html_chart_dpi`) |
+| `RUN/TEMP/anomaly_basis_<lot>.json/.csv` | Anomaly 판단 근거(spec-out wafer·robust 산포·이탈도) |
+| `RUN/DB/<vehicle>_daily/date=YYYY-MM-DD/data.parquet` | Hive 파티션 ET 데이터 |
+| `RUN/log/` | 실행 로그 |
 
 ---
 
@@ -221,33 +292,101 @@ auto report/
 
 ## AI 다단계 해석 (선택)
 
-`anomaly_engine.interpret_with_ai()`는 코드 Finding을 입력으로 받아 **단계별 판단을 이어가며** 최종 해석을 만듭니다.
-AI가 없거나 어느 단계든 실패하면 **None을 반환하고 [0] 섹션엔 코드 통계 분석만** 표시됩니다(견고성).
+> **한 줄 요약**: AI는 **1회 호출이 아니라 3단계(triage→root-cause→final) 순차 호출**로 사용됩니다.
+> 입력은 **코드가 계산한 통계 Finding + `ANOMALY_KNOWLEDGE.md`(페르소나/스타일) 텍스트**뿐이며,
+> **원측정 raw 데이터/reformatter는 AI에 넘기지 않습니다.** 출력은 [0] 섹션 상단에 붙는 HTML `<ul>` 참고 요약입니다.
+> AI가 없거나 어느 단계든 실패하면 **None → [0] 섹션엔 코드 통계 분석만** 표시됩니다(AI-optional).
 
-1. **Triage** — Finding을 현상(phenomenon) 단위로 묶고 3~6개로 정리(파생항목 통합, 측정 의심은 최상단).
-2. **Root-cause** — `ANOMALY_KNOWLEDGE.md`를 근거로 "이런 통계 차이가 무엇 때문인지" 추정 + 확인 포인트.
-3. **Final** — 1·2 종합 + **불량 모드 판정**(아래) → HTML `<ul>`로 산출.
+### 1) AI 연결 셋업 (프로그램 시작 시 1회 — `Main.py`)
 
-**불량 모드 판정(AI 전용)**: `SPEC_OUT`으로 분류된 Index 조합을 **불량 모드 판정표**와 대조합니다. 표는 **위에서부터 우선순위가 높고**, 여러 모드가 동시 매칭되면 **번호가 가장 작은(가장 위)** 모드로 판정합니다(세부 1-1, 1-2도 위가 우선). 매칭이 없으면 "특정 불량 모드 미매칭(수동 검토)". 판정표 예시는 본 README [불량 모드 판정표](#불량-모드-판정표-참고-지식)에 정리되어 있습니다.
+`Main.py` 상단에서 **import 시점에 딱 한 번** LLM transport를 구성합니다.
+
+- `.env`에서 `GPT_API_BASE_URL`, `GPT_CREDENTIAL_KEY`를 읽습니다.
+- 둘 다 있으면 OpenAI 호환 클라이언트 생성 후 **연결 테스트("Hi" 전송)** → 성공 시 `GPT_CONNECT=True`.
+  ```python
+  gpt_client = OpenAI(api_key="dummy", base_url=GPT_API_BASE_URL,
+                      default_headers={"x-dep-ticket": GPT_CREDENTIAL_KEY, ...})  # model: gpt-oss-120b
+  ```
+- `_build_llm_fn()`이 **transport 함수**를 반환합니다 — 이 함수가 실제 LLM 호출의 유일한 창구:
+  - 연결됨 → `gpt_client.chat.completions.create(model="gpt-oss-120b", messages=[{system},{user}], temperature=0.3)`의 응답 텍스트 반환.
+  - 미연결 → `gpt_oss_client.mock_llm`(로컬 mock)이 있으면 사용, 없으면 `None`.
+- `_ANOMALY_KNOWLEDGE_TEXT` = `ANOMALY_KNOWLEDGE.md` 전체 텍스트(`My_config.anomaly_knowledge_path`)를 미리 읽어 둡니다.
+
+즉 실제 LLM API는 `_LLM_FN(system, user) -> str` **한 개 시그니처**로 추상화되어, 사내 gpt_client든 로컬 mock이든 동일 코드로 동작합니다.
+
+### 2) AI 호출 조건 (리포트마다 — `Main.py` [0] 섹션)
+
+lot 리포트 생성 루프에서 아래를 **모두** 만족할 때만 AI를 호출합니다.
+
+```python
+if GLOBAL_CONFIG.use_gpt_summary and GLOBAL_CONFIG.use_gpt_multistep \
+   and code_findings and _LLM_FN is not None:
+    ai_html = interpret_with_ai(code_findings, metrics_dict,
+                                _ANOMALY_KNOWLEDGE_TEXT, _LLM_FN,
+                                config=GLOBAL_CONFIG, target_lot_id=target_lot_id)
+```
+
+- `code_findings` = `analyze_commonality()`가 **AI와 무관하게 이미 산출**한 통계 Finding 리스트.
+- 하나라도 조건 불충족(토글 off / Finding 없음 / LLM 없음)이면 AI 호출 자체를 건너뜁니다.
+
+### 3) `interpret_with_ai` — 3단계 순차 호출 (`anomaly_engine.py`)
+
+각 단계가 `_LLM_FN(system, user)`를 **한 번씩 호출**하고, 앞 단계 출력이 다음 단계 입력이 됩니다(총 **LLM 3회 호출**).
+
+| 단계 | system 프롬프트 | user 입력 | 출력 | 비고 |
+|---|---|---|---|---|
+| ① **Triage** | "현상(phenomenon) 단위로 3~6개로 묶어라" | `target_lot` + **findings JSON**(severity/type/item/title/detail) | 현상 정리 텍스트 | 파생항목 통합, 측정 의심 최상단 |
+| ② **Root-cause** | "**[지식베이스]** 근거로 추정 원인·확인 포인트" + `ANOMALY_KNOWLEDGE.md` 텍스트 | ① 결과 | 추정 원인 텍스트 | 지식 텍스트가 여기서 주입됨 |
+| ③ **Final** | "종합 판단 + 불량 모드 판정, HTML `<ul>`로만 출력" + 지식 텍스트 | spec-out Index 조합 + ① + ② | **HTML `<ul>`** | 최종 [0] 블록 |
+
+- **AI에 전달되는 것**: (a) findings JSON(코드 산출), (b) `ANOMALY_KNOWLEDGE.md` 텍스트(②③ system), (c) target_lot_id.
+  → **측정 raw/피벗 데이터, reformatter, 이미지는 전달하지 않습니다.** 토큰·보안 관점에서 "코드가 요약한 Finding"만 넘깁니다.
+- `metrics_dict`는 인자로 받지만 현재 프롬프트 구성에는 직접 넣지 않습니다(향후 확장 여지).
+- **어느 단계든 예외/`llm_fn is None`이면 즉시 `None` 반환** → [0]엔 코드 분석만.
+
+### 4) 결과 반영
+
+`interpret_with_ai`의 HTML은 상단에 *"※ AI가 자동 생성한 참고용 요약"* 안내와 함께 감싸져,
+[0] Anomaly Summary 섹션 **맨 위**에 코드 통계 요약보다 앞서 배치됩니다.
+
+```
+[0] Anomaly Summary
+├─ (AI 있으면) AI 다단계 해석 결과      ← interpret_with_ai (HTML <ul>)
+├─ 통계 기반 자동 분석 (상위 5건)        ← render_findings_html (코드, AI 무관 항상)
+└─ Anomaly Trend Chart + spec-out WF MAP
+```
+
+### 호출 흐름 요약
+
+```
+[프로그램 시작] .env → gpt_client 연결테스트 → _build_llm_fn() → _LLM_FN
+                ANOMALY_KNOWLEDGE.md 읽기 → _ANOMALY_KNOWLEDGE_TEXT
+        │
+[리포트마다] analyze_commonality() → code_findings (AI 없이 항상)
+        │   토글/조건 만족?
+        ▼ (yes)
+interpret_with_ai(findings, metrics, knowledge_text, _LLM_FN, ...)
+   ①LLM(triage) → ②LLM(root-cause, +지식) → ③LLM(final, +지식) → HTML <ul>
+        │ (실패/None)                              │
+        ▼                                          ▼
+   [0]엔 코드 분석만                       [0] 최상단에 AI 요약 삽입
+```
 
 ### ANOMALY_KNOWLEDGE.md — 페르소나·답변 스타일
 
-`interpret_with_ai`가 AI(LLM)에 주입하는 **페르소나·응답 스타일** 가이드입니다. `My_config.anomaly_knowledge_path`.
+②③ 단계 system 프롬프트에 주입되는 **페르소나·응답 스타일** 가이드입니다(`My_config.anomaly_knowledge_path`).
 
 - AI의 **말투/형식/태도**(간결·객관·근거 기반, HTML `<ul>` 형식, 재측정 우선 등)만 정의합니다.
-- **분석 로직·불량 모드 규칙은 여기에 두지 않습니다.** 그런 지식/확장 아이디어는 본 README의 [로직 확장 가능성](#로직-확장-가능성--분석-로직-카탈로그) 절에 정리합니다.
+- **분석 로직·불량 모드 규칙은 여기에 두지 않습니다** → [로직 확장 가능성](#로직-확장-가능성--분석-로직-카탈로그) 참조.
 - **엔지니어가 이 MD만 편집하면** 코드 수정 없이 AI 해석의 톤/형식이 바뀝니다.
 
 ### LLM 연결 / 토글
 
-- **transport 교체 가능** (`Main._build_llm_fn`):
-  - 실 환경 → `gpt_client`(OpenAI 호환, model `gpt-oss-120b`)
-  - 로컬 → `gpt_oss_client.mock_llm` (있으면 자동 사용)
-  - 둘 다 없으면 `None` → AI 해석 비활성(코드 분석만)
-- 오케스트레이션(3단계) 로직은 **코어(`anomaly_engine`)에 있어 그대로 이식**됩니다.
+- **transport 교체 가능** (`Main._build_llm_fn`): 실 환경 `gpt_client`(OpenAI 호환, `gpt-oss-120b`) / 로컬 `gpt_oss_client.mock_llm` / 둘 다 없으면 `None`.
+- 3단계 오케스트레이션은 **코어(`anomaly_engine`)에 있어 그대로 이식**됩니다(사내는 `_build_llm_fn`만 실 클라이언트로 교체).
 - 토글(`My_config.py`):
   - `use_gpt_summary` — AI 사용 마스터 스위치 (False면 AI 호출 자체 안 함)
-  - `use_gpt_multistep` — 다단계 해석 사용 (`use_gpt_summary=True`일 때)
+  - `use_gpt_multistep` — 3단계 해석 사용 (`use_gpt_summary=True`일 때)
 
 ---
 
