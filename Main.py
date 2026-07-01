@@ -1312,13 +1312,18 @@ if reformatter_check :
                     if not getattr(GLOBAL_CONFIG, 'use_s3_upload', True):
                         print('[INFO] use_s3_upload=False → S3 업로드 스킵')
                     elif S3_CONNECT and client:
+                        # 개인 이름 경로 없이 bucket_dx 기준 clean key(vehicle/파일명) 사용
+                        s3_key = f'{vehicle}/{final_ppt_file_name_DX}'
+                        _s3_local = f'{low_qual_ppt_save_path}{final_ppt_file_name_DX}'
                         try:
-                            client.upload_file(
-                                f'{low_qual_ppt_save_path}{final_ppt_file_name_DX}',
-                                bucket_dx,
-                                f'{vehicle}/{final_ppt_file_name_DX}'
-                            )
-                            print(f'[INFO] S3 업로드 완료: {final_ppt_file_name_DX}')
+                            # 동일 key가 이미 있으면 먼저 delete 후 업로드(put)
+                            try:
+                                client.delete_object(Bucket=bucket_dx, Key=s3_key)
+                                print(f'[INFO] S3 기존 객체 삭제: {bucket_dx}/{s3_key}')
+                            except Exception as _de:
+                                print(f'[INFO] S3 기존 객체 없음/삭제 스킵: {_de}')
+                            client.upload_file(_s3_local, bucket_dx, s3_key)
+                            print(f'[INFO] S3 업로드 완료: {bucket_dx}/{s3_key}')
                         except Exception as s3e:
                             print(f'[WARN] S3 업로드 스킵: {s3e}')
 
