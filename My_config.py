@@ -574,6 +574,12 @@ class Config:
         self.ppt_chart_jpg_quality = 70    # 라인/박스/트렌드/CDF/레전드 JPEG 품질 (1~95, 용량의 주 레버)
         self.ppt_map_jpg_quality = 60      # WF MAP(연속색 산점) JPEG 품질
 
+        # ── HTML 리포트용 이미지 해상도(DPI) — PPT와 독립적으로 조정 ──
+        # HTML [0] Anomaly Trend chart(RUN/TEMP png)와 Score Board/anomaly WF MAP의 DPI.
+        # 높이면 HTML 이미지가 선명해지지만 HTML 용량이 커진다.
+        self.html_chart_dpi = 100          # HTML에 들어가는 Trend chart PNG 해상도
+        self.html_wfmap_dpi = 100          # HTML에 들어가는 WF MAP PNG 해상도(Score Board/anomaly)
+
         # ──────────────────────────────────────────────────────
         # 차트 공통 색 팔레트 (Chart color palette, matplotlib hex)
         # 차트 내부 요소(제목/축/보조선/그리드)의 색을 한 곳에서 통일합니다.

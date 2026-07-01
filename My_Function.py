@@ -772,7 +772,7 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
 
 
 def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
-                            direction='BOTH', size_in=0.85, dpi=110,
+                            direction='BOTH', size_in=0.85, dpi=None,
                             spec_low=None, spec_high=None, by_lot=False):
     """index의 'wafer별 첫 측정(가장 이른 tkout) WF MAP'을 {wafer_id_str: base64}로 반환.
 
@@ -786,6 +786,9 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     import base64, io
+
+    if dpi is None:   # HTML용 WF MAP 해상도는 My_config.html_wfmap_dpi로 관리
+        dpi = getattr(GLOBAL_CONFIG, 'html_wfmap_dpi', 110)
 
     if item not in df.columns:
         return {}
@@ -874,7 +877,7 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
 
 def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
                               target_lot=None, max_maps=25,
-                              size_in=0.62, dpi=110):
+                              size_in=0.62, dpi=None):
     """spec-out(=flier) 칩맵을 측정(lot, wafer, tkout) 단위로 그려 [(label, b64), ...]로 반환.
 
     [0] Anomaly Trend Chart 의 SPEC OUT 항목 우측에 붙이는 용도.
@@ -892,6 +895,9 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
     import matplotlib.pyplot as plt
     import numpy as np
     import base64, io
+
+    if dpi is None:   # HTML용 WF MAP 해상도는 My_config.html_wfmap_dpi로 관리
+        dpi = getattr(GLOBAL_CONFIG, 'html_wfmap_dpi', 110)
 
     if item not in merged_df.columns:
         return []
@@ -1044,7 +1050,7 @@ def _wfmap_norm(direction, spec_low, spec_high, values):
 
 
 def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
-                           cmap=None, size_in=1.15, dpi=120, direction='BOTH'):
+                           cmap=None, size_in=1.15, dpi=None, direction='BOTH'):
     """특정 index의 '첫 측정(가장 이른 tkout_time) WF MAP'을 base64 PNG로 반환.
 
     - min_pts 이상 측정된 (lot, wafer, tkout) 그룹만 대상으로 하고, 그 중 tkout_time이
@@ -1055,6 +1061,9 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     import base64, io
+
+    if dpi is None:   # HTML용 WF MAP 해상도는 My_config.html_wfmap_dpi로 관리
+        dpi = getattr(GLOBAL_CONFIG, 'html_wfmap_dpi', 120)
 
     if item not in df.columns:
         return None
@@ -1967,7 +1976,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             try:
                 fig_trend_png, ax_trend_png = plt.subplots(figsize=(4.55, 2.0))
                 _draw_trend(ax_trend_png)
-                fig_trend_png.savefig(f"RUN/TEMP/{safe_name}.png", dpi=100, bbox_inches="tight")
+                _html_dpi = getattr(GLOBAL_CONFIG, 'html_chart_dpi', 100)
+                fig_trend_png.savefig(f"RUN/TEMP/{safe_name}.png", dpi=_html_dpi, bbox_inches="tight")
                 plt.close(fig_trend_png)
             except Exception as e:
                 print(f"[WARN] Failed to save RUN/TEMP/{safe_name}.png: {e}")
