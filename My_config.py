@@ -203,19 +203,24 @@ _REPORT_HTML_TEMPLATE = r"""<!DOCTYPE html>
             background-color: #ebf4ff;
         }
         /* Item (두번째 고정열, category 폭 64px 만큼 오프셋) */
+        /* Item명이 길어도 잘리지 않도록 폭을 넉넉히 + 셀 안에서 줄바꿈 허용 */
         .score-board th.sb-item, .score-board td.sb-item {
             position: sticky;
             left: 64px;
             z-index: 6;
-            width: 86px; min-width: 86px; max-width: 86px;
+            width: 150px; min-width: 150px; max-width: 150px;
             background-color: #ebf4ff;
+            white-space: normal;       /* 길면 줄바꿈(잘림 방지) */
+            word-break: break-word;
+            overflow: visible;
+            text-overflow: clip;
         }
         /* LOT_ID 헤더 (category+Item 위 colspan=2, 좌측 상단 코너 고정) */
         .score-board th.sb-frozen-lot {
             position: sticky;
             left: 0;
             z-index: 12;
-            width: 150px; min-width: 150px; max-width: 150px;
+            width: 214px; min-width: 214px; max-width: 214px;  /* 64(cat)+150(item) */
             text-align: center;
         }
         /* 헤더의 고정열 셀은 top(thead) + left 동시 고정(코너) → z-index 상향 */

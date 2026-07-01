@@ -372,7 +372,13 @@ if reformatter_check :
             is_addp = item_et['CATEGORY'] == 'ADDP'
             real = item_et[is_real][['ITEMID', 'ALIAS', 'SCALE FACTOR', 'ABSOLUTE']].copy()
             addp = item_et[is_addp][['ALIAS', 'ADDP FORM', 'SCALE FACTOR']].copy()
-            addp['addpscale'] = addp['SCALE FACTOR'].astype(str) + '*(' + addp['ADDP FORM'] + ')'
+            # SCALE FACTOR 결측/비수치는 1.0으로 (blank이면 'nan*(...)'가 되어 값이 전부 NaN 되는 문제 방지)
+            real['SCALE FACTOR'] = pd.to_numeric(real['SCALE FACTOR'], errors='coerce').fillna(1.0)
+            addp['SCALE FACTOR'] = pd.to_numeric(addp['SCALE FACTOR'], errors='coerce').fillna(1.0)
+            # ADDP FORMULA = (ADDP 자신의 SCALE FACTOR) * (ADDP FORM).
+            # ADDP FORM의 {ALIAS}는 이미 SCALE FACTOR가 적용된 REAL/ADDP 컬럼을 참조하므로,
+            # '먼저 계산에 들어가는 Alias들이 scale factor 적용된 값'으로 계산된다.
+            addp['addpscale'] = addp['SCALE FACTOR'].astype(str) + '*(' + addp['ADDP FORM'].astype(str) + ')'
             ALIAS = list(map(str, addp.ALIAS))
             FORMULA = list(map(str, addp.addpscale))
             
@@ -391,10 +397,13 @@ if reformatter_check :
                 print(f'[WARN] daily DB에 {viewing_period}일 이내 데이터 없음')
                 sys.exit(0)
             
-            # ── Scale Factor 적용 ──
+            # ── Scale Factor 적용 (REAL item 값 × SCALE FACTOR) ──
+            # 매칭 안된 raw item은 SCALE FACTOR=1.0 (원값 유지). REAL 값이 여기서 스케일되므로
+            # 이후 ADDP(Reformatize) 계산에 들어가는 ALIAS들은 이미 scale factor가 적용된 상태.
             raw_df = pd.merge(raw_df, real, left_on='item_id', right_on='ITEMID', how='left')
-            raw_df['et_value'] = raw_df['et_value'].astype(float)
-            raw_df.loc[raw_df['SCALE FACTOR'].notna(), 'et_value'] *= raw_df.loc[raw_df['SCALE FACTOR'].notna(), 'SCALE FACTOR'].astype(float)
+            raw_df['et_value'] = pd.to_numeric(raw_df['et_value'], errors='coerce')
+            _sf = pd.to_numeric(raw_df['SCALE FACTOR'], errors='coerce').fillna(1.0)
+            raw_df['et_value'] = raw_df['et_value'] * _sf
             raw_df['item_id'] = raw_df['ALIAS'].fillna(raw_df['item_id'])
             raw_df['match_key'] = raw_df['root_lot_id'].astype(str) + '_' + raw_df['step_id'].astype(str)
             raw_df['lot_wf'] = raw_df['root_lot_id'].astype(str) + '_' + raw_df['wafer_id'].astype(str)
@@ -443,13 +452,15 @@ if reformatter_check :
                         wv_item = wv_reformatter.copy()
                         wv_real = wv_item[wv_item['CATEGORY'] == 'REAL'][['ITEMID', 'ALIAS', 'SCALE FACTOR', 'ABSOLUTE']].copy()
                         wv_addp = wv_item[wv_item['CATEGORY'] == 'ADDP'][['ALIAS', 'ADDP FORM', 'SCALE FACTOR']].copy()
-                        wv_addp['addpscale'] = wv_addp['SCALE FACTOR'].astype(str) + '*(' + wv_addp['ADDP FORM'] + ')'
+                        wv_real['SCALE FACTOR'] = pd.to_numeric(wv_real['SCALE FACTOR'], errors='coerce').fillna(1.0)
+                        wv_addp['SCALE FACTOR'] = pd.to_numeric(wv_addp['SCALE FACTOR'], errors='coerce').fillna(1.0)
+                        wv_addp['addpscale'] = wv_addp['SCALE FACTOR'].astype(str) + '*(' + wv_addp['ADDP FORM'].astype(str) + ')'
                         wv_ALIAS = list(map(str, wv_addp.ALIAS))
                         wv_FORMULA = list(map(str, wv_addp.addpscale))
-                        
+
                         wv_raw_df = pd.merge(wv_raw_df, wv_real, left_on='item_id', right_on='ITEMID', how='left')
-                        wv_raw_df['et_value'] = wv_raw_df['et_value'].astype(float)
-                        wv_raw_df.loc[wv_raw_df['SCALE FACTOR'].notna(), 'et_value'] *= wv_raw_df.loc[wv_raw_df['SCALE FACTOR'].notna(), 'SCALE FACTOR'].astype(float)
+                        wv_raw_df['et_value'] = pd.to_numeric(wv_raw_df['et_value'], errors='coerce')
+                        wv_raw_df['et_value'] = wv_raw_df['et_value'] * pd.to_numeric(wv_raw_df['SCALE FACTOR'], errors='coerce').fillna(1.0)
                         wv_raw_df['item_id'] = wv_raw_df['ALIAS'].fillna(wv_raw_df['item_id'])
                         wv_raw_df['match_key'] = wv_raw_df['root_lot_id'].astype(str) + '_' + wv_raw_df['step_id'].astype(str)
                         wv_raw_df['lot_wf'] = wv_raw_df['root_lot_id'].astype(str) + '_' + wv_raw_df['wafer_id'].astype(str)
@@ -1254,6 +1265,8 @@ if reformatter_check :
                     html_content = html_content.replace(
                         '<div id="target1"></div>',
                         f'<div id="target1"><div class="section-title">■ [1] Score Board</div>'
+                        f'<div style="font-size:12px; color:#555; margin:2px 0 6px 2px;">'
+                        f'※ {_wf_min}pt 이상 측정된 이력이 있는 아이템은 각 wafer 아래에 WF MAP이 함께 표시됩니다.</div>'
                         f'<div class="table-container">{score_board_html}</div></div>'
                     )
                     html_content = html_content.replace(

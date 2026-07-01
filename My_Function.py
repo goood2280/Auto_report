@@ -601,12 +601,16 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
     _cols = list(VIP_group.columns)
     _lw = [_as_lw(c) for c in _cols]
     _lots = sorted({x[0] for x in _lw}, key=lambda l: (0 if str(l) == str(lot_id) else 1, str(l)))
-    def _wk(w):
-        return w if isinstance(w, int) else 10 ** 9
-    order = []   # (orig_col, lot, wafer)
+    # 측정된 (lot, wafer) → 원본 컬럼 매핑
+    _present = {}
+    for c, lw in zip(_cols, _lw):
+        _present[(lw[0], lw[1])] = c
+    # 각 lot마다 wafer #1~25를 항상 표시 (미측정 wafer는 빈 칸) → 측정 wafer 수와
+    # 무관하게 테이블 열 구성/크기 고정, 모든 wafer 열 너비 동일.
+    order = []   # (orig_col_or_None, lot, wafer)
     for _lot in _lots:
-        _wc = sorted([(c, lw) for c, lw in zip(_cols, _lw) if lw[0] == _lot], key=lambda x: _wk(x[1][1]))
-        order.extend([(c, lw[0], lw[1]) for c, lw in _wc])
+        for w in range(1, 26):
+            order.append((_present.get((_lot, w)), _lot, w))
 
     chunk_size = 30
     total_pages = (len(VIP_group) - 1) // chunk_size + 1
@@ -633,14 +637,15 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
         tbl = slide.shapes.add_table(nrows, ncols, Inches(0.22), Inches(0.72),
                                      Inches(12.89), table_height).table
 
-        item_w = 1.6
+        item_w = 1.95   # ITEM명이 잘리지 않도록 넉넉히
         ww = max(0.14, (12.89 - item_w) / max(len(order), 1))
         tbl.columns[0].width = Inches(item_w)
         for j in range(1, ncols):
-            tbl.columns[j].width = Inches(ww)
+            tbl.columns[j].width = Inches(ww)   # 모든 wafer 열 동일 너비
 
         # 헤더: ITEM 세로 병합 + lot 가로 병합 + #wafer
         tbl.cell(0, 0).merge(tbl.cell(1, 0)); _style(tbl.cell(0, 0), "ITEM", NAVY, WHITE, True, 9)
+        tbl.cell(0, 0).text_frame.word_wrap = True   # ITEM 헤더 잘림 방지
         k = 0
         while k < len(order):
             _lot = order[k][1]; k2 = k
@@ -660,9 +665,10 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
             base = RGBColor(245, 247, 250) if i % 2 == 1 else WHITE
             _style(tbl.cell(r, 0), str(idx), base, BLACK, False, 8)
             tbl.cell(r, 0).text_frame.paragraphs[0].alignment = PP_ALIGN.LEFT
+            tbl.cell(r, 0).text_frame.word_wrap = True   # ITEM명 잘림 방지(길면 줄바꿈)
             for jj, (_oc, _lot, _waf) in enumerate(order):
                 cell = tbl.cell(r, 1 + jj)
-                val = row[_oc]
+                val = row[_oc] if (_oc is not None and _oc in row.index) else None
                 # 연속 색상(HTML과 동일), ITEM별 스케일 override 지원
                 if pd.notna(val) and str(val).strip() != "":
                     try:
@@ -809,6 +815,12 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
     chip_pt = size_in / gdim * 72.0
     s = max(1.0, (chip_pt * 0.9) ** 2)
     cmap = _wfmap_cmap(direction)
+    # 전체 wafer 격자가 잘리지 않도록 공통 축범위 + 반칩 여백 (가장자리 칩 보존)
+    _gx0, _gx1 = float(d[cx].min()), float(d[cx].max())
+    _gy0, _gy1 = float(d[cy].min()), float(d[cy].max())
+    _xr = (_gx1 - _gx0) or 1.0; _yr = (_gy1 - _gy0) or 1.0
+    _xpad = _xr / max(int(d[cx].nunique()) - 1, 1) * 0.7 if d[cx].nunique() > 1 else _xr * 0.1
+    _ypad = _yr / max(int(d[cy].nunique()) - 1, 1) * 0.7 if d[cy].nunique() > 1 else _yr * 0.1
 
     out = {}
     # by_lot: (lot, wafer)별로 그려 형제 lot을 분리. 아니면 wafer별(lot은 첫 측정 선택).
@@ -840,13 +852,14 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
         fig, ax = plt.subplots(figsize=(size_in, size_in))
         ax.scatter(g[cx].astype(float), g[cy].astype(float), c=g[item].astype(float),
                    cmap=cmap, norm=norm, s=s, marker='s', linewidths=0)
-        ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal'); ax.set_facecolor('#f8f9fa')
-        ax.margins(0)
+        ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal', adjustable='box'); ax.set_facecolor('#f8f9fa')
+        ax.set_xlim(_gx0 - _xpad, _gx1 + _xpad)
+        ax.set_ylim(_gy0 - _ypad, _gy1 + _ypad)
         for sp in ax.spines.values():
             sp.set_visible(False)
-        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
         buf = io.BytesIO()
-        fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight', pad_inches=0, facecolor='white')
+        fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight', pad_inches=0.02, facecolor='white')
         plt.close(fig)
         try:
             _wkey = str(int(wid))
@@ -948,6 +961,12 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
     gdim = max(int(d[cx].nunique()), int(d[cy].nunique()), 1)
     chip_pt = size_in / gdim * 72.0
     s = max(1.0, (chip_pt * 0.9) ** 2)
+    # 전체 wafer 격자가 잘리지 않도록 공통 축범위 + 반칩 여백 (모든 소형맵 동일 범위)
+    gx0, gx1 = float(d[cx].min()), float(d[cx].max())
+    gy0, gy1 = float(d[cy].min()), float(d[cy].max())
+    xr = (gx1 - gx0) or 1.0; yr = (gy1 - gy0) or 1.0
+    xpad = xr / max(int(d[cx].nunique()) - 1, 1) * 0.7 if d[cx].nunique() > 1 else xr * 0.1
+    ypad = yr / max(int(d[cy].nunique()) - 1, 1) * 0.7 if d[cy].nunique() > 1 else yr * 0.1
 
     res = []
     for gd, g in ordered:
@@ -955,13 +974,14 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
         colors = np.where(g['_specout'].values, '#d32f2f', '#bdbdbd')
         ax.scatter(g[cx].astype(float), g[cy].astype(float), c=colors,
                    s=s, marker='s', linewidths=0)
-        ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal'); ax.set_facecolor('#f8f9fa')
-        ax.margins(0)
+        ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal', adjustable='box'); ax.set_facecolor('#f8f9fa')
+        ax.set_xlim(gx0 - xpad, gx1 + xpad)
+        ax.set_ylim(gy0 - ypad, gy1 + ypad)
         for sp in ax.spines.values():
             sp.set_visible(False)
-        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
         buf = io.BytesIO()
-        fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight', pad_inches=0, facecolor='white')
+        fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight', pad_inches=0.02, facecolor='white')
         plt.close(fig)
         _root = gd.get(croot, '') if croot else ''
         _wv = gd.get(cw, '')
@@ -1749,10 +1769,15 @@ def insert_plots(merged_df, prs, description_image_info_dict,
 
             x_range = global_x_max - global_x_min if global_x_max > global_x_min else 1
             y_range = global_y_max - global_y_min if global_y_max > global_y_min else 1
-            global_x_min -= x_range * 0.05
-            global_x_max += x_range * 0.05
-            global_y_min -= y_range * 0.05
-            global_y_max += y_range * 0.05
+            # 가장자리 칩(사각 마커)이 잘리지 않도록 반칩 이상 여백 확보 (칩 간격 기준)
+            _nxu = max(int(item_df[map_x].nunique()), 1)
+            _nyu = max(int(item_df[map_y].nunique()), 1)
+            x_pad = (x_range / max(_nxu - 1, 1)) * 0.7 if _nxu > 1 else x_range * 0.1
+            y_pad = (y_range / max(_nyu - 1, 1)) * 0.7 if _nyu > 1 else y_range * 0.1
+            global_x_min -= x_pad
+            global_x_max += x_pad
+            global_y_min -= y_pad
+            global_y_max += y_pad
 
             # ---- WF MAP 공유 컬러 스케일 (spec line 기준 diverging) ----
             # 모든 PGM(pt) 행이 '같은' 스케일/컬러바 1개를 공유한다.
@@ -1873,7 +1898,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                         daily = daily.set_index('date').sort_index()
                         roll = daily.rolling('3D', min_periods=1).mean()
                         ax.fill_between(roll.index, roll['q01'], roll['q99'], color=C_BAND, alpha=0.6, label=f'{main_vehicle} 1~99%', zorder=1)
-                        ax.plot(roll.index, roll['median'], color='#cccccc', linewidth=1.3, alpha=1.0, zorder=1.5)
+                        # 3일 기준 rolling median 라인 (검정색)
+                        ax.plot(roll.index, roll['median'], color='black', linewidth=1.5, alpha=1.0, zorder=6, label='3-day median')
                 # 색상 규칙: target lot=빨강(최상단) / 같은 vehicle 나머지=초록 / with_vehicle=회색
                 # 모든 마커는 얇은 검정 테두리(edgecolors='black', linewidths 얇게)를 적용
                 if has_lot:
