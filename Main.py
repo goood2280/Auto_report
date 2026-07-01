@@ -761,7 +761,7 @@ if reformatter_check :
 
                     # ========================================= PPT file name 생성 ==========================================
 
-                    rname = f'HOL_{target_DC_step}_Report_v13'
+                    rname = f'HOL_{target_DC_step}_Report'
                     fname = f'{upload_date}-{prod}-{target_root_lot_id}-{rname}.html' #html 저장이름
                     final_ppt_file_name_DX = f'{upload_date}-{prod}-{target_root_lot_id}-{rname}.pptx' #pptx 저장이름, DX System 및 S3 DB 저장
 
@@ -1318,6 +1318,50 @@ if reformatter_check :
                             print(f'[INFO] S3 업로드 완료: {final_ppt_file_name_DX}')
                         except Exception as s3e:
                             print(f'[WARN] S3 업로드 스킵: {s3e}')
+
+                    # ==================== 사내 메일 API 발송 (PPT + HTML) ====================
+                    # My_config.use_email_send 로 on/off. 생성된 HTML(html_content)은 본문으로,
+                    # 저화질 PPT는 첨부로 전송한다.
+                    if getattr(GLOBAL_CONFIG, 'use_email_send', False):
+                        _mail_fh = None
+                        try:
+                            html_code_final = html_content   # 생성된 HTML 코드 문자열
+                            email_receiver_now = email_receiver   # config의 수신 그룹(예: ['POWER_USER'])
+                            title = f'[HOL] {vehicle} {target_lot_id} {target_step_merged} HOL AUTO REPORT'
+
+                            email_list = get_email_list(email_list_path, email_receiver_now)
+
+                            payload_content = {
+                                "content": f'{html_code_final}',
+                                "receiverList": email_list,
+                                "senderMailAddress": f"{KNOXID}@samsung.com",
+                                "statusCode": "SENT",
+                                "title": f'{title}',
+                            }
+                            payload = {'mailSendString': f'{payload_content}'}
+
+                            _ppt_full = os.path.join(low_qual_ppt_save_path, final_ppt_file_name_DX)
+                            _mail_fh = open(_ppt_full, 'rb')
+                            files = [
+                                ('file', (final_ppt_file_name_DX, _mail_fh, 'application/vnd.ms-powerpoint'))
+                            ]
+                            headers = {'x-dep-ticket': GLOBAL_CONFIG.get("TICKET")}
+
+                            response = requests.request(
+                                "POST", GLOBAL_CONFIG.get("url"),
+                                headers=headers, data=payload, files=files)
+                            print(response)
+                            print(f'{target_lot_id}_{target_DC_step} LOT Report Mailing 완료')
+                        except Exception as _me:
+                            print(f'[WARN] 메일 발송 실패: {_me}')
+                        finally:
+                            try:
+                                if _mail_fh is not None:
+                                    _mail_fh.close()
+                            except Exception:
+                                pass
+                    else:
+                        print('[INFO] use_email_send=False → 메일 발송 스킵')
 
                     log_to_file(f"{search_key} Report 발행 완료", query_log)
                     print(f'[INFO] *****{search_key} AUTO LOT Report 발행 완료*****')
