@@ -713,11 +713,13 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
     return prs
 
 
-def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세 (통계 자동 분석)"):
+def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세 (통계 자동 분석)",
+                         main_vehicle=None, radius_zones=(60, 100)):
     """코드 통계 분석 Finding 전체를 1개 슬라이드로 만들어 Score Board 뒤에 삽입.
 
     HTML [0]에는 우선순위 상위 N건만 보이고, 전체 상세는 이 PPT 페이지를 참조.
     after_index 위치(보통 1=title + Score Board 페이지수)로 슬라이드를 이동시킨다.
+    상단에는 비교 기준·robust 산포 계산법·radius zone 정의를 '참고사항'으로 1회만 안내한다.
     """
     from pptx.util import Inches, Pt
     from pptx.dml.color import RGBColor
@@ -763,15 +765,36 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
     hp.font.size = Pt(18); hp.font.bold = True
     hp.font.color.rgb = RGBColor(255, 255, 255); hp.font.name = FONT
 
-    box = slide.shapes.add_textbox(Inches(0.3), Inches(0.78),
-                                   prs.slide_width - Inches(0.6), prs.slide_height - Inches(1.0))
+    box = slide.shapes.add_textbox(Inches(0.3), Inches(0.72),
+                                   prs.slide_width - Inches(0.6), prs.slide_height - Inches(0.95))
     tf = box.text_frame; tf.word_wrap = True
+
+    # ── 참고사항: 비교 기준·robust 산포 계산법·radius zone 정의 (반복 표현은 여기 1회만) ──
+    _veh = main_vehicle or '제품'
+    try:
+        _rc, _rm = float(radius_zones[0]), float(radius_zones[1])
+    except Exception:
+        _rc, _rm = 60.0, 100.0
+    _note_lines = [
+        f"※ 참고: 모든 비교 기준은 제품({_veh}) 내입니다.",
+        "· 제품 전체 산포 = 제품 전체 chip 값의 robust 산포(1.4826×MAD, 0이면 IQR/1.349, 그래도 0이면 std).",
+        "· 랏내 산포 = 랏 내부 chip 값의 robust 산포이며, '보통의 랏 산포'는 제품 내 각 랏 산포의 중앙값입니다.",
+        "· 'Nσ' = (lot median − 제품 median) / 제품 전체 산포,   'N배' = 랏내 산포 / 보통의 랏 산포.",
+        f"· 위치(radius zone): Center ≤ {_rc:g}, Middle {_rc:g}~{_rm:g}, Edge > {_rm:g}.",
+    ]
+    for _k, _ln in enumerate(_note_lines):
+        _np = tf.paragraphs[0] if _k == 0 else tf.add_paragraph()
+        _nr = _np.add_run(); _nr.text = _ln
+        _nr.font.size = Pt(8); _nr.font.italic = True
+        _nr.font.color.rgb = RGBColor(0x6B, 0x72, 0x80); _nr.font.name = FONT
+    _sp = tf.add_paragraph(); _sp.text = ""   # 참고사항과 finding 사이 간격
+
     if not findings:
-        p = tf.paragraphs[0]; p.text = "유의미한 통계 이상 없음"
+        p = tf.add_paragraph(); p.text = "유의미한 통계 이상 없음"
         p.font.size = Pt(12); p.font.name = FONT
     else:
         for i, f in enumerate(findings):
-            p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+            p = tf.add_paragraph()
             sev = f.get("severity", "INFO")
             r0 = p.add_run()                      # 신호등 원(●) — severity 색
             r0.text = "● "
@@ -1461,9 +1484,20 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             _ref_cat[str(_a)] = str(_rr.get('CATEGORY', '')).strip().upper()
             _ref_formula[str(_a)] = str(_rr.get('ADDP FORM', '') or '')
 
+    # 다중출력 ADDP(예: MA_Window)는 {alias}_new / {alias}_ovl_index 등 파생 컬럼을 만든다.
+    # 다른 ADDP(rmax 등)가 이 파생 컬럼을 {MAWIN_new} 처럼 참조하면 그 자체는 ALIAS가
+    # 아니라서 leaf로 잡히므로, 이름 접두가 일치하는 base ADDP ALIAS를 찾아 재귀 해소한다.
+    _addp_alias_list = [a for a, c in _ref_cat.items() if c == 'ADDP']
+
+    def _base_addp_of(ref):
+        """ref가 어떤 ADDP의 파생 컬럼({base}_{subcol})이면 그 base ADDP ALIAS를 반환(가장 긴 접두 우선)."""
+        _cands = [a for a in _addp_alias_list if ref == a or ref.startswith(str(a) + '_')]
+        return max(_cands, key=lambda a: len(str(a))) if _cands else None
+
     def _addp_leaf_refs(alias, _seen=None):
-        """ADDP FORM의 {ALIAS} 참조만 재귀 전개해 leaf(비-ADDP) 항목 집합 반환.
-        함수명(rmax/ABS/MA_Window 등)은 {} 밖이라 제외된다."""
+        """ADDP FORM의 {ALIAS} 참조를 재귀 전개해 leaf(비-ADDP) real item 집합 반환.
+        함수명(rmax/ABS/MA_Window 등)은 {} 밖이라 제외된다. 다중출력 ADDP의 파생
+        컬럼 참조({MAWIN_new} 등)도 base ADDP를 찾아 최종 real item까지 재귀 해소한다."""
         if _seen is None:
             _seen = set()
         out = set()
@@ -1474,6 +1508,11 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             _seen.add(ref)
             if _ref_cat.get(ref) == 'ADDP':
                 out |= _addp_leaf_refs(ref, _seen)
+                continue
+            # ALIAS가 아니면(파생 컬럼일 수 있음) base ADDP를 찾아 재귀
+            _base = _base_addp_of(ref) if ref not in _ref_cat else None
+            if _base is not None:
+                out |= _addp_leaf_refs(_base, _seen)
             else:
                 out.add(ref)
         return out

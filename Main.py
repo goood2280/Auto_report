@@ -744,7 +744,10 @@ if reformatter_check :
                     # Score Board 바로 뒤에 'Anomaly 상세(통계)' 페이지 삽입
                     try:
                         _sb_pages = (len(VIP_group) - 1) // 30 + 1
-                        prs_low_qual = insert_findings_page(prs_low_qual, code_findings, after_index=1 + _sb_pages)
+                        prs_low_qual = insert_findings_page(
+                            prs_low_qual, code_findings, after_index=1 + _sb_pages,
+                            main_vehicle=vehicle,
+                            radius_zones=GLOBAL_CONFIG.get('radius_zones', [60, 100]))
                     except Exception as fe:
                         print(f"[WARN] Anomaly 상세 페이지 삽입 스킵: {fe}")
 
@@ -833,11 +836,15 @@ if reformatter_check :
 
                     inlinedata_filtered_pivot = pd.merge(inlinedata_spec, inlinedata_filtered_pivot,how='right', on='STEP_DESC_ITEM_ID')
                     
-                    # [PATCH] Inline Table 멀티 인덱스 복구
-                    inlinedata_filtered_pivot['ITEMNAME'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_ITEMNAME)
+                    # [PATCH] Inline Table 멀티 인덱스 복구 (UCL 앞 3열: Module / Step desc / Item)
+                    #  - Module    : inline setting의 실제 Module (inline_grouped_dict)
+                    #  - Step desc : ITEMNAME (스텝 설명)
+                    #  - Item      : ITEM_ID
+                    inlinedata_filtered_pivot['Module'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict)
+                    inlinedata_filtered_pivot['Step_desc'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_ITEMNAME)
                     inlinedata_filtered_pivot['ITEM_ID'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_ITEM_ID)
-                    inlinedata_filtered_pivot = inlinedata_filtered_pivot.set_index(['ITEMNAME', 'ITEM_ID'])
-                    inlinedata_filtered_pivot.index.names = ['Module', 'Item']
+                    inlinedata_filtered_pivot = inlinedata_filtered_pivot.set_index(['Module', 'Step_desc', 'ITEM_ID'])
+                    inlinedata_filtered_pivot.index.names = ['Module', 'Step desc', 'Item']
                     
                     
                     # HTML 생성부분 - Mail body
@@ -1011,14 +1018,15 @@ if reformatter_check :
                     # ==================== Inline Table HTML 렌더링 (Manual) ====================
                     inlinedata_filtered_pivot = inlinedata_filtered_pivot.reset_index()
                     
-                    cols = ['Module', 'Item'] + [c for c in inlinedata_filtered_pivot.columns if c not in ['Module', 'Item', 'STEP_DESC_ITEM_ID']]
+                    _head_cols = ['Module', 'Step desc', 'Item']
+                    cols = _head_cols + [c for c in inlinedata_filtered_pivot.columns if c not in _head_cols + ['STEP_DESC_ITEM_ID']]
                     inlinedata_filtered_pivot = inlinedata_filtered_pivot[cols]
                     
                     it_html = '<table class="inline-table">\n'
                     it_html += '  <thead>\n'
                     it_html += '    <tr>\n'
                     for col in inlinedata_filtered_pivot.columns:
-                        if col in ['Module', 'Item']:
+                        if col in _head_cols:
                             it_html += f'      <th class="row_heading" style="background-color:#e2efda !important;">{col}</th>\n'
                         elif col in ['UCL', 'CL', 'LCL']:
                             it_html += f'      <th style="background-color:#f0f0f0 !important;">{col}</th>\n'
@@ -1047,7 +1055,7 @@ if reformatter_check :
                             style = ""
                             if col in ['UCL', 'CL', 'LCL']:
                                 style = 'background-color:#e0f7fa;'
-                            elif col in ['Module', 'Item']:
+                            elif col in _head_cols:
                                 style = 'background-color:#f0fff4;'
                             else:
                                 style = 'width:70px; min-width:70px; max-width:70px;'
