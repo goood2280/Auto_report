@@ -665,7 +665,7 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
         tbl = slide.shapes.add_table(nrows, ncols, Inches(0.22), Inches(0.72),
                                      Inches(12.89), table_height).table
 
-        item_w = 1.95   # ITEM명이 잘리지 않도록 넉넉히
+        item_w = 3.4    # ITEM명 최대 45자를 한 줄에 담을 폭 확보
         ww = max(0.14, (12.89 - item_w) / max(len(order), 1))
         tbl.columns[0].width = Inches(item_w)
         for j in range(1, ncols):
@@ -673,7 +673,7 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
 
         # 헤더: ITEM 세로 병합 + lot 가로 병합 + #wafer
         tbl.cell(0, 0).merge(tbl.cell(1, 0)); _style(tbl.cell(0, 0), "ITEM", NAVY, WHITE, True, 9)
-        tbl.cell(0, 0).text_frame.word_wrap = True   # ITEM 헤더 잘림 방지
+        tbl.cell(0, 0).text_frame.word_wrap = False   # ITEM 헤더 한 줄
         k = 0
         while k < len(order):
             _lot = order[k][1]; k2 = k
@@ -691,9 +691,9 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
         for i, (idx, row) in enumerate(chunk_df.iterrows()):
             r = i + 2
             base = RGBColor(245, 247, 250) if i % 2 == 1 else WHITE
-            _style(tbl.cell(r, 0), str(idx), base, BLACK, False, 8)
+            _style(tbl.cell(r, 0), str(idx), base, BLACK, False, 7)   # 45자 한 줄 수용 위해 폰트 7pt
             tbl.cell(r, 0).text_frame.paragraphs[0].alignment = PP_ALIGN.LEFT
-            tbl.cell(r, 0).text_frame.word_wrap = True   # ITEM명 잘림 방지(길면 줄바꿈)
+            tbl.cell(r, 0).text_frame.word_wrap = False   # ITEM명 한 줄(줄바꿈 방지)
             for jj, (_oc, _lot, _waf) in enumerate(order):
                 cell = tbl.cell(r, 1 + jj)
                 val = row[_oc] if (_oc is not None and _oc in row.index) else None
@@ -2337,7 +2337,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             white = RGBColor(255, 255, 255); black = RGBColor(0, 0, 0)
 
             # 고정 열 너비: Index 넓게(잘림 방지) + wafer 좁게(상한 캡으로 일정 유지)
-            _idx_w, _stat_w = 2.05, 0.55
+            _idx_w, _stat_w = 3.4, 0.55   # Index명 최대 45자를 한 줄에 담을 폭 확보
             _ww = min(0.40, max(0.14, (13.333 - 0.24 - _idx_w - _stat_w) / max(len(_ordered), 1)))
             _tbl_w = min(13.10, _idx_w + _stat_w + _ww * len(_ordered))
 
@@ -2371,7 +2371,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                     table.columns[_ci].width = Inches(_ww)
 
                 # 헤더: Index/Stat 세로 병합, lot 가로 병합 + 그 아래 #wafer
-                table.cell(0, 0).merge(table.cell(1, 0)); _style(table.cell(0, 0), "Index", NAVY, white, True, 9, wrap=True)
+                table.cell(0, 0).merge(table.cell(1, 0)); _style(table.cell(0, 0), "Index", NAVY, white, True, 9, wrap=False)
                 table.cell(0, 1).merge(table.cell(1, 1)); _style(table.cell(0, 1), "Stat", NAVY, white, True, 8)
                 _ci = 2
                 for _lot, _wc in _lot_groups:
@@ -2385,7 +2385,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
 
                 # 본문: Index | Stat | (lot,wafer)별 값
                 for _ri, _r in enumerate(_chunk, start=2):
-                    _style(table.cell(_ri, 0), str(_r['index']), white, black, True, 8, wrap=True)  # Index명 잘림 방지
+                    _style(table.cell(_ri, 0), str(_r['index']), white, black, True, 7, wrap=False)  # Index명 45자 한 줄(줄바꿈 방지)
                     _style(table.cell(_ri, 1), str(_r.get('stat', '')), white, black, False, 8)
                     _wv = _r.get('wafer_vals', {})
                     for _cj, _key in enumerate(_ordered, start=2):

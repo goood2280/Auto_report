@@ -202,16 +202,16 @@ _REPORT_HTML_TEMPLATE = r"""<!DOCTYPE html>
             width: 77px; min-width: 77px; max-width: 77px;
             background-color: #ebf4ff;
         }
-        /* Item (두번째 고정열, category 폭 77px 만큼 오프셋) — 기존 150px의 2배 = 300px */
-        /* Item명이 길어도 잘리지 않도록 폭을 넉넉히 + 셀 안에서 줄바꿈 허용 */
+        /* Item (두번째 고정열, category 폭 77px 만큼 오프셋) */
+        /* Item명이 최대 45자까지 '한 줄'에 들어가도록 nowrap + 넉넉한 폭(420px) */
         .score-board th.sb-item, .score-board td.sb-item {
             position: sticky;
             left: 77px;
             z-index: 6;
-            width: 300px; min-width: 300px; max-width: 300px;
+            width: 420px; min-width: 420px; max-width: 420px;
             background-color: #ebf4ff;
-            white-space: normal;       /* 길면 줄바꿈(잘림 방지) */
-            word-break: break-word;
+            white-space: nowrap;       /* 줄바꿈 방지(한 줄 표시) */
+            word-break: normal;
             overflow: visible;
             text-overflow: clip;
         }
@@ -220,7 +220,7 @@ _REPORT_HTML_TEMPLATE = r"""<!DOCTYPE html>
             position: sticky;
             left: 0;
             z-index: 12;
-            width: 377px; min-width: 377px; max-width: 377px;  /* 77(cat)+300(item) */
+            width: 497px; min-width: 497px; max-width: 497px;  /* 77(cat)+420(item) */
             text-align: center;
         }
         /* 헤더의 고정열 셀은 top(thead) + left 동시 고정(코너) → z-index 상향 */
