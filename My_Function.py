@@ -1351,6 +1351,914 @@ def _fmt_stat_value(v):
     return f"{_mant}e{int(_exp)}"
 
 
+# ===================================================================
+#  병렬 렌더링 인프라 (Parallel chart rendering infrastructure)
+# ===================================================================
+# 발행 속도 최대화를 위해 matplotlib 차트 렌더링(CPU 바운드)을 워커 프로세스로
+# 분리한다. 워커 수는 실행 환경의 CPU 코어 수와 '가용' 메모리를 보고 자동 결정:
+#   workers = min(코어수, parallel_max_workers, (가용GB - reserve) / per_worker)
+#   예) 4코어/50GB → 4워커, 2코어/10GB → 2워커, 가용 메모리 부족 → 1(직렬 폴백)
+# 관련 설정: My_config.parallel_workers(0=자동)/parallel_max_workers/
+#            parallel_mem_per_worker_gb/parallel_reserve_gb
+#
+# ⚠️ Windows의 프로세스 spawn은 워커가 __main__(Main.py)을 다시 import 하므로
+#    Main.py 실행 본문은 반드시 `if __name__ == "__main__":` 가드 안에 있어야 한다.
+
+# Wafer ID별 고정 컬러 팔레트 (25색) — 모든 차트/워커가 공통 사용.
+# wafer #1 → [0], #2 → [1] ... 동일 wafer 번호는 항상 같은 색.
+_WAFER_PALETTE = [
+    '#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
+    '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990',
+    '#dcbeff', '#9a6324', '#bcbd22', '#800000', '#aaffc3',
+    '#808000', '#ffd8b1', '#000075', '#a9a9a9', '#ffe119',
+    '#1a1aff', '#ff4dd2', '#00cca3', '#b35900', '#5c5c8a',
+]
+
+
+def _get_available_mem_gb():
+    """현재 '가용' 물리 메모리(GB)를 반환. 측정 불가 시 None.
+
+    psutil → (Windows) GlobalMemoryStatusEx → (Linux) /proc/meminfo 순으로 시도.
+    """
+    try:
+        import psutil
+        return psutil.virtual_memory().available / (1024 ** 3)
+    except Exception:
+        pass
+    if os.name == 'nt':
+        try:
+            import ctypes
+
+            class _MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            st = _MEMORYSTATUSEX()
+            st.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                return st.ullAvailPhys / (1024 ** 3)
+        except Exception:
+            pass
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    return int(line.split()[1]) / (1024 ** 2)
+    except Exception:
+        pass
+    return None
+
+
+def get_parallel_workers(config=None):
+    """실행 환경(CPU 코어/가용 메모리)을 보고 렌더링 워커 프로세스 수를 결정.
+
+    - My_config.parallel_workers > 0 이면 그 값을 그대로 사용(강제 지정).
+    - 자동: min(코어수, parallel_max_workers,
+              (가용GB - parallel_reserve_gb) // parallel_mem_per_worker_gb)
+    - 가용 메모리 측정 불가 시 보수적으로 min(코어수, 2).
+    - 결과 1이면 프로세스 풀 없이 직렬 렌더링(저사양 환경 안전 동작).
+    """
+    cfg = config if config is not None else GLOBAL_CONFIG
+    try:
+        forced = int(getattr(cfg, 'parallel_workers', 0) or 0)
+    except (TypeError, ValueError):
+        forced = 0
+    if forced > 0:
+        return forced
+    cores = os.cpu_count() or 2
+    cap = int(getattr(cfg, 'parallel_max_workers', 8) or 8)
+    per_gb = float(getattr(cfg, 'parallel_mem_per_worker_gb', 1.2) or 1.2)
+    reserve = float(getattr(cfg, 'parallel_reserve_gb', 3.0) or 3.0)
+    avail = _get_available_mem_gb()
+    if avail is None:
+        mem_cap = min(cores, 2)
+    else:
+        mem_cap = int(max(0.0, avail - reserve) // per_gb)
+    return max(1, min(cores, cap, mem_cap))
+
+
+_CHART_POOL = None
+_CHART_POOL_N = 0
+
+
+def _get_chart_pool(n):
+    """렌더링용 프로세스 풀(모듈 전역 1개)을 생성/재사용. n<=1이면 None(직렬).
+
+    풀은 한 번 만들면 리포트/랏이 바뀌어도 재사용한다(워커 spawn 비용 1회만).
+    """
+    global _CHART_POOL, _CHART_POOL_N
+    if n is None or n <= 1:
+        return None
+    if _CHART_POOL is not None and _CHART_POOL_N >= n:
+        return _CHART_POOL
+    shutdown_chart_pool()
+    try:
+        from concurrent.futures import ProcessPoolExecutor
+        _CHART_POOL = ProcessPoolExecutor(max_workers=n)
+        _CHART_POOL_N = n
+    except Exception as e:
+        print(f"[WARN] 렌더링 워커 풀 생성 실패(직렬로 진행): {e}")
+        _CHART_POOL = None
+        _CHART_POOL_N = 0
+    return _CHART_POOL
+
+
+def shutdown_chart_pool():
+    """렌더링 워커 풀 종료(atexit에도 등록됨 — Main 종료 시 명시 호출 권장)."""
+    global _CHART_POOL, _CHART_POOL_N
+    if _CHART_POOL is not None:
+        try:
+            _CHART_POOL.shutdown(wait=False, cancel_futures=True)
+        except TypeError:      # Python<3.9: cancel_futures 미지원
+            _CHART_POOL.shutdown(wait=False)
+        except Exception:
+            pass
+        _CHART_POOL = None
+        _CHART_POOL_N = 0
+
+
+import atexit as _atexit
+_atexit.register(shutdown_chart_pool)
+
+
+def _select_target_lot_frame(frame, target_lot_id, target_root_lot_id, target_DC_step_id):
+    """대상 lot 선택: match_key(root+step) → fab_lot_id 정확일치 → root prefix 순.
+
+    (insert_plots 내부 closure였던 _select_target_lot을 워커에서도 쓰도록 모듈화.
+     리포트 단위 = root_lot_id + step. 같은 root의 형제 lot_id를 모두 포함한다.)
+    """
+    if 'match_key' in frame.columns and target_root_lot_id and target_DC_step_id:
+        mk = f"{target_root_lot_id}_{target_DC_step_id}"
+        sel = frame[frame['match_key'].astype(str) == mk]
+        if len(sel) > 0:
+            return sel
+    if 'fab_lot_id' not in frame.columns:
+        return frame
+    flid = frame['fab_lot_id'].astype(str)
+    sel = frame[flid == str(target_lot_id)]
+    if len(sel) == 0 and target_root_lot_id:
+        sel = frame[flid.str.startswith(str(target_root_lot_id))]
+    return sel
+
+
+def _render_wafer_legend_bytes(cfg):
+    """Wafer 색 범례(모든 슬라이드 공통·정적)를 1회 렌더링해 jpg bytes로 반환."""
+    import io as _io
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plt.rcParams['font.family'] = cfg['FONT']
+    w_colors = {str(i): _WAFER_PALETTE[(i - 1) % len(_WAFER_PALETTE)] for i in range(1, 26)}
+    fig_leg, ax_leg = plt.subplots(figsize=(8.0, 0.2))
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    ax_leg.axis('off')
+    ax_leg.text(0, 0, "Wafer Color:", va='center', ha='left', fontsize=8, fontweight='bold', color=cfg['C_NAVY'])
+    for i in range(1, 26):
+        ax_leg.scatter([i * 0.85 + 2.5], [0], color=w_colors.get(str(i)), s=25)
+        ax_leg.text(i * 0.85 + 2.5 + 0.15, 0, f"#{i}", va='center', ha='left', fontsize=6, color=cfg['C_NEUTRAL'])
+    ax_leg.set_xlim(0, 25)
+    ax_leg.set_ylim(-1, 1)
+    buf = _io.BytesIO()
+    fig_leg.savefig(buf, format='jpg', dpi=cfg['dpi'], facecolor='#f8fafc', pil_kwargs={'quality': cfg['jpg_q']})
+    plt.close(fig_leg)
+    return buf.getvalue()
+
+
+def _render_item_charts(task):
+    """[워커/직렬 공용] 한 index의 차트 5종(Box/WF MAP/Trend/Radius/CDF)을 렌더링.
+
+    insert_plots의 per-item 렌더링을 프로세스 워커로 분리한 것. 차트 모양/색/
+    판정 로직은 종전과 동일하며, PPT 조립(슬라이드/표)은 메인 프로세스가 한다.
+    GLOBAL_CONFIG를 참조하지 않고 task['cfg']만 사용한다(스폰된 워커에는
+    vehicle yaml 설정이 로드되어 있지 않기 때문).
+
+    반환 dict:
+      status('ok'|'skip'|'error'), reason, warnings[],
+      imgs{box,map,trend,rad,cum: jpg bytes}, map_ratio(WF MAP h/w 비율),
+      stat_rows(통계 행 라벨 4개), stat_cells{1..25: [셀 문자열 4개] | None},
+      metrics(항목 지표 dict), summary_row(Index Aggregation Table 행)
+    """
+    import io as _io
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+
+    cfg = task['cfg']
+    item_name = task['item_name']
+    spec_name = task['spec_name']
+    target_lot_id = task['target_lot_id']
+    target_root_lot_id = task['target_root_lot_id']
+    target_DC_step_id = task['target_DC_step_id']
+
+    sp = task['spec']
+    spec_low = sp['spec_low']
+    spec_high = sp['spec_high']
+    wfmap_spec_low = sp['wfmap_spec_low']
+    wfmap_spec_high = sp['wfmap_spec_high']
+    direction = sp['direction']
+    log_scale = sp['log_scale']
+    y_label = sp['y_label']
+
+    dpi = cfg['dpi']; jpg_q = cfg['jpg_q']; map_q = cfg['map_q']
+    C_NAVY = cfg['C_NAVY']; C_ACCENT = cfg['C_ACCENT']; C_NEUTRAL = cfg['C_NEUTRAL']
+    C_GRID = cfg['C_GRID']; C_SPINE = cfg['C_SPINE']; C_VEHICLE = cfg['C_VEHICLE']
+    C_BAND = cfg['C_BAND']; WV_PALETTE = cfg['WV_PALETTE']; FONT = cfg['FONT']
+    main_vehicle = cfg['main_vehicle']
+
+    w_colors = {str(i): _WAFER_PALETTE[(i - 1) % len(_WAFER_PALETTE)] for i in range(1, 26)}
+    fixed_wafers = [str(i) for i in range(1, 26)]
+
+    out = {'item_name': item_name, 'status': 'ok', 'reason': '', 'warnings': [],
+           'imgs': {}, 'map_ratio': None, 'stat_rows': [], 'stat_cells': {},
+           'metrics': None, 'summary_row': None}
+
+    def _remove_spines(ax):
+        for spine in ['top', 'right']:
+            ax.spines[spine].set_visible(False)
+        ax.spines['left'].set_color(C_SPINE)
+        ax.spines['bottom'].set_color(C_SPINE)
+        ax.spines['left'].set_linewidth(0.6)
+        ax.spines['bottom'].set_linewidth(0.6)
+
+    def _label_axes(ax, xlabel=None, ylabel=None):
+        if xlabel is not None:
+            ax.set_xlabel(xlabel, fontsize=7, color=C_NAVY, fontname=FONT)
+        if ylabel is not None:
+            ax.set_ylabel(ylabel, fontsize=7, color=C_NAVY, fontname=FONT)
+
+    try:
+        cols = task['cols']
+        col_x = cols['col_x']; col_y = cols['col_y']; col_rad = cols['col_rad']
+        col_sub = cols['col_sub']; col_time = cols['col_time']
+        col_lot = cols['col_lot']; col_mask = cols['col_mask']
+        w_col_src = cols['w_col_src']
+
+        item_df = task['df']
+
+        # 메타 컬럼명을 canonical 소문자로 통일 (merged_df가 대문자여도 안전)
+        rename_map = {}
+        if col_time and col_time != 'tkout_time': rename_map[col_time] = 'tkout_time'
+        if col_lot and col_lot != 'fab_lot_id': rename_map[col_lot] = 'fab_lot_id'
+        if col_mask and col_mask != 'mask': rename_map[col_mask] = 'mask'
+        if w_col_src != 'wafer_id': rename_map[w_col_src] = 'wafer_id'
+        if rename_map:
+            item_df = item_df.rename(columns=rename_map)
+        w_col = 'wafer_id'
+
+        # 누락 컬럼 대체 (Fallback for missing columns)
+        if not col_x:
+            item_df['chip_x_pos'] = np.random.rand(len(item_df))
+            item_df['chip_y_pos'] = np.random.rand(len(item_df))
+            col_x, col_y = 'chip_x_pos', 'chip_y_pos'
+        if not col_rad:
+            item_df['chip_radius'] = np.sqrt(item_df[col_x]**2 + item_df[col_y]**2)
+            col_rad = 'chip_radius'
+        if not col_sub:
+            item_df['subitem_id'] = 'ALL'
+            col_sub = 'subitem_id'
+        if 'tkout_time' not in item_df.columns:
+            item_df['tkout_time'] = pd.to_datetime('today')
+
+        item_df[w_col] = item_df[w_col].astype(str).str.replace('#', '')
+        item_df['tkout_time'] = pd.to_datetime(item_df['tkout_time'])
+        item_df = item_df.sort_values(by='tkout_time')
+
+        # ---- 데이터 스코프 분리 ----
+        # item_df_full: 전 vehicle·전 lot (Trend 비교 전용)
+        # item_df(=target_df): 리포팅 대상 lot만 (Box/WF MAP/통계표/Radius/CDF/통계)
+        item_df_full = item_df
+        target_df = _select_target_lot_frame(item_df, target_lot_id, target_root_lot_id, target_DC_step_id)
+        item_df = target_df
+        if len(item_df) == 0:
+            out['status'] = 'skip'
+            out['reason'] = f"대상 lot '{target_lot_id}' 데이터 없음"
+            return out
+
+        measured_wafers = sorted(item_df[w_col].unique(), key=lambda x: int(x) if str(x).isdigit() else x)
+        grouped = item_df.groupby(w_col)[item_name]
+
+        # ---- 다중 lot_id 구분 (같은 root_lot_id에 여러 lot_id가 묶일 때) ----
+        lot_col = 'fab_lot_id' if 'fab_lot_id' in item_df.columns else None
+        target_lots = (sorted(item_df[lot_col].astype(str).unique()) if lot_col else [])
+        multi_lot = len(target_lots) > 1
+        LOT_MARKERS = ['o', '^', 's', 'D', 'v', 'P', 'X', '*']
+        LOT_LINE_COLORS = ['#d62728', '#1f77b4', '#2ca02c', '#9467bd', '#ff7f0e', '#8c564b', '#e377c2', '#17becf']
+        lot_marker = {lot: LOT_MARKERS[i % len(LOT_MARKERS)] for i, lot in enumerate(target_lots)}
+        lot_color = {lot: LOT_LINE_COLORS[i % len(LOT_LINE_COLORS)] for i, lot in enumerate(target_lots)}
+
+        # ---- Index Aggregation Table용 (lot, wafer)별 집계값 ----
+        # REPORT DIRECTION → BOTH=Median / UPPER=P90 / LOWER=P10. lot_id별 분리해 wafer별 1값.
+        try:
+            if direction == 'UPPER':
+                _q, _sstat = 0.90, 'P90'
+            elif direction == 'LOWER':
+                _q, _sstat = 0.10, 'P10'
+            else:
+                _q, _sstat = None, 'Median'
+
+            def _aggv(s):
+                s = pd.to_numeric(s, errors='coerce').dropna()
+                if len(s) == 0:
+                    return None
+                return float(s.median()) if _q is None else float(s.quantile(_q))
+
+            _lc = 'fab_lot_id' if 'fab_lot_id' in item_df.columns else None
+            _wv = {}   # {(lot, wafer_int): value}
+            if _lc:
+                for (_lot, _waf), _g in item_df.groupby([_lc, w_col]):
+                    _v = _aggv(_g[item_name])
+                    if _v is None:
+                        continue
+                    try:
+                        _waf = int(float(_waf))
+                    except (ValueError, TypeError):
+                        pass
+                    _wv[(str(_lot), _waf)] = _v
+            else:
+                _v = _aggv(item_df[item_name])
+                if _v is not None:
+                    _wv[(str(target_lot_id), 0)] = _v
+            if _wv:
+                out['summary_row'] = {'index': item_name, 'stat': _sstat, 'wafer_vals': _wv}
+        except Exception as _se:
+            out['warnings'].append(f"summary 집계 실패: {_se}")
+
+        # ---- 통계 테이블 값 (REPORT DIRECTION별 4행 × wafer #1~25) ----
+        #   UPPER: Max P90 Med P10 / LOWER: P90 Med P10 Min / BOTH: P90 Med P10 Std
+        if direction == 'UPPER':
+            stat_defs = [("Max", lambda s: s.max()), ("P90", lambda s: s.quantile(0.90)),
+                         ("Med", lambda s: s.median()), ("P10", lambda s: s.quantile(0.10))]
+        elif direction == 'LOWER':
+            stat_defs = [("P90", lambda s: s.quantile(0.90)), ("Med", lambda s: s.median()),
+                         ("P10", lambda s: s.quantile(0.10)), ("Min", lambda s: s.min())]
+        else:
+            stat_defs = [("P90", lambda s: s.quantile(0.90)), ("Med", lambda s: s.median()),
+                         ("P10", lambda s: s.quantile(0.10)),
+                         ("Std", lambda s: s.std() if len(s) > 1 else float('nan'))]
+        out['stat_rows'] = [lbl for lbl, _ in stat_defs]
+        for w_idx in range(1, 26):
+            w_str = str(w_idx)
+            if w_str in grouped.groups:
+                grp_data = pd.to_numeric(grouped.get_group(w_str), errors='coerce').dropna()
+                vals = []
+                for _lbl, _fn in stat_defs:
+                    try:
+                        vals.append(_fmt_stat_value(_fn(grp_data)))
+                    except Exception:
+                        vals.append("-")
+                out['stat_cells'][w_idx] = vals
+            else:
+                out['stat_cells'][w_idx] = None
+
+        # ---- 차트 임시 버퍼 (디스크 파일 없이 메모리에서 처리) ----
+        tmp_box = _io.BytesIO()
+        tmp_map = _io.BytesIO()
+        tmp_trend = _io.BytesIO()
+        tmp_rad = _io.BytesIO()
+        tmp_cum = _io.BytesIO()
+
+        plt.rcParams['axes.linewidth'] = 0.6
+        plt.rcParams['font.size'] = 7.5
+        plt.rcParams['font.family'] = FONT
+        plt.rcParams['axes.facecolor'] = '#ffffff'
+        plt.rcParams['figure.facecolor'] = '#ffffff'
+        plt.rcParams['grid.color'] = C_GRID
+        plt.rcParams['grid.linestyle'] = '-'
+        plt.rcParams['grid.linewidth'] = 0.5
+
+        # ---- 3. BOX Plot (측정된 웨이퍼만 플롯하되, X축은 1~25 고정) ----
+        fig_box, ax_box = plt.subplots(figsize=(7.8, 1.9))
+        box_data = []
+        box_positions = []
+        for w in measured_wafers:
+            try:
+                w_int = int(w)
+                box_positions.append(w_int)
+                box_data.append(grouped.get_group(w).values)
+            except ValueError: pass
+
+        if len(box_data) > 0:
+            bplot = ax_box.boxplot(
+                box_data, positions=box_positions, patch_artist=True,
+                showfliers=True,
+                flierprops={'marker': 'o', 'markerfacecolor': C_ACCENT, 'markeredgecolor': 'none', 'markersize': 3.5},
+                medianprops={'color': C_NEUTRAL, 'linewidth': 1.2},
+                whiskerprops={'color': '#94a3b8', 'linewidth': 0.8},
+                capprops={'color': '#94a3b8', 'linewidth': 0.8}
+            )
+            for i, patch in enumerate(bplot['boxes']):
+                w_str = str(box_positions[i])
+                patch.set_facecolor(w_colors.get(w_str, '#ffffff'))
+                patch.set_alpha(0.85)
+                patch.set_edgecolor(C_NEUTRAL)
+                patch.set_linewidth(0.8)
+
+        # Spec line은 그리되 범례(Spec Limit)는 표시하지 않음
+        if spec_low is not None:
+            ax_box.axhline(y=float(spec_low), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
+        if spec_high is not None:
+            ax_box.axhline(y=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
+        ax_box.set_xticks(range(1, 26))
+        ax_box.set_xticklabels([f"#{i}" for i in range(1, 26)])
+        ax_box.set_xlim(0.5, 25.5)
+        ax_box.tick_params(axis='x', rotation=45, labelsize=7)
+        _label_axes(ax_box, xlabel="Wafer #", ylabel=y_label)
+        _remove_spines(ax_box)
+        ax_box.set_axisbelow(True)
+        if log_scale:
+            # 로그 스케일: 데이터 범위가 한 decade 미만이어도 10의 거듭제곱마다 y축 선이 나오도록
+            # major(10^n) + minor(2~9×10^n) locator를 명시하고 둘 다 grid 표시.
+            from matplotlib.ticker import LogLocator, NullFormatter
+            ax_box.set_yscale('log')
+            ax_box.yaxis.set_major_locator(LogLocator(base=10.0, numticks=15))
+            ax_box.yaxis.set_minor_locator(
+                LogLocator(base=10.0, subs=(2, 3, 4, 5, 6, 7, 8, 9), numticks=15))
+            ax_box.yaxis.set_minor_formatter(NullFormatter())
+            ax_box.grid(True, which='major', axis='both', color=C_GRID, linestyle='-', linewidth=0.6)
+            ax_box.grid(True, which='minor', axis='y', color=C_GRID, linestyle='-', linewidth=0.35, alpha=0.6)
+        else:
+            ax_box.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
+            ax_box.grid(True, which='major', axis='both', color=C_GRID, linestyle='-', linewidth=0.5)
+        # 용량 다이어트를 위한 JPG 포맷 저장 및 quality 옵션 적용
+        fig_box.savefig(tmp_box, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
+        plt.close(fig_box)
+        out['imgs']['box'] = tmp_box.getvalue()
+
+        # ---- 4. WF MAP (행=PGM(pt), 열=wafer #1~25 고정) ----
+        # Wafer 좌표: flat-zone 회전이 반영된 보정 좌표(CHIP_X_ADJ/CHIP_Y_ADJ)가
+        # 있으면 우선 사용해 실제 웨이퍼 배치대로 그린다. 없으면 raw chip_x/y로 fallback.
+        map_x = 'CHIP_X_ADJ' if 'CHIP_X_ADJ' in item_df.columns else col_x
+        map_y = 'CHIP_Y_ADJ' if 'CHIP_Y_ADJ' in item_df.columns else col_y
+
+        # WF MAP 행 = PGM(pt)별 한 줄. PGM(pt) 컬럼이 있으면 그것으로 그룹핑(없으면 subitem).
+        _wfmap_grp_col = 'PGM(pt)' if 'PGM(pt)' in item_df.columns else col_sub
+        sub_groups = list(item_df.groupby(_wfmap_grp_col))
+        n_pgm = len(sub_groups) if len(sub_groups) > 0 else 1
+
+        global_x_min = item_df[map_x].min()
+        global_x_max = item_df[map_x].max()
+        global_y_min = item_df[map_y].min()
+        global_y_max = item_df[map_y].max()
+
+        x_range = global_x_max - global_x_min if global_x_max > global_x_min else 1
+        y_range = global_y_max - global_y_min if global_y_max > global_y_min else 1
+        # 가장자리 칩(사각 마커)이 잘리지 않도록 반칩 이상 여백 확보 (칩 간격 기준)
+        _nxu = max(int(item_df[map_x].nunique()), 1)
+        _nyu = max(int(item_df[map_y].nunique()), 1)
+        x_pad = (x_range / max(_nxu - 1, 1)) * 0.7 if _nxu > 1 else x_range * 0.1
+        y_pad = (y_range / max(_nyu - 1, 1)) * 0.7 if _nyu > 1 else y_range * 0.1
+        global_x_min -= x_pad
+        global_x_max += x_pad
+        global_y_min -= y_pad
+        global_y_max += y_pad
+
+        # ---- WF MAP 공유 컬러 스케일 (spec line 기준 diverging, HTML과 동일 규칙) ----
+        wfmap_norm = _wfmap_norm(direction, wfmap_spec_low, wfmap_spec_high, item_df[item_name])
+
+        # 칩 격자 차원(예: 13x13)
+        nx = max(int(item_df[map_x].nunique()), 1)
+        ny = max(int(item_df[map_y].nunique()), 1)
+        gdim = max(nx, ny)
+
+        # ---- WF MAP 배치: 행=PGM(pt), 열=wafer #1~25 고정 ----
+        FIXED_N_WAF = 25
+        grid_rows, grid_cols = n_pgm, FIXED_N_WAF
+        _multi_pgm = n_pgm > 1
+        cell_map = {(i, c): (sub_grp, str(c + 1), sub_name)
+                    for i, (sub_name, sub_grp) in enumerate(sub_groups)
+                    for c in range(FIXED_N_WAF)}
+
+        _cbar_w = 0.45                                 # 우측 컬러바 폭(인치)
+        render_cell = 0.55                             # 셀(=wafer 1칸) 크기(인치) — 25칸 고정
+        chip_pt = render_cell / gdim * 72.0            # 칩 1개 한 변(pt)
+        marker_s = max(0.5, (chip_pt * 0.9) ** 2)      # 격자가 커도(13x13) 겹치지 않게 자동 축소
+        fig_disp_w = grid_cols * render_cell           # 서브플롯 영역 폭(컬러바 제외, 항상 25*cell)
+        fig_h = grid_rows * render_cell + 0.15         # 하단 wafer 번호 라벨 여백
+
+        fig_map, axes_map = plt.subplots(grid_rows, grid_cols,
+                                         figsize=(fig_disp_w + _cbar_w, fig_h), squeeze=False,
+                                         gridspec_kw={'wspace': 0.06, 'hspace': 0.18})
+        sc = None
+        for r in range(grid_rows):
+            for c in range(grid_cols):
+                ax = axes_map[r, c]
+                sub_grp, w, sub_name = cell_map[(r, c)]
+                w_grp = sub_grp[sub_grp[w_col] == w]
+                if not w_grp.empty:   # 측정된 wafer만 die 산점, 없으면 빈 칸
+                    sc = ax.scatter(w_grp[map_x], w_grp[map_y], c=w_grp[item_name],
+                                    cmap=_wfmap_cmap(direction), norm=wfmap_norm,
+                                    s=marker_s, marker='s', alpha=1.0, linewidths=0)
+                ax.set_facecolor('white')
+                # 마지막(맨 아래) PGM 행에만 wafer 번호 표기
+                if r == grid_rows - 1:
+                    ax.set_xlabel(f"#{c + 1}", fontsize=5, labelpad=1, color=C_NEUTRAL)
+                # 다중 PGM이면 첫 열 좌측에 PGM(pt) 라벨(90도 회전)
+                if c == 0 and _multi_pgm:
+                    _pl = str(sub_name)
+                    if 'PGM(pt)' in sub_grp.columns:
+                        _u = sub_grp['PGM(pt)'].dropna()
+                        if len(_u): _pl = str(_u.iloc[0])
+                    ax.set_ylabel(_pl, fontsize=6, rotation=90, labelpad=6, color=C_NEUTRAL)
+                ax.set_xticks([]); ax.set_yticks([])
+                ax.set_aspect('equal', adjustable='box')   # 웨이퍼 정원형 유지
+                for spine in ax.spines.values():
+                    spine.set_visible(False)
+                # chip x 정방향(chip #1=왼쪽, 13=오른쪽): HTML WF MAP과 동일하게 xlim 역순으로 방향 교정
+                ax.set_xlim(global_x_max, global_x_min)
+                ax.set_ylim(global_y_min, global_y_max)
+
+        if sc is not None:
+            # 모든 wafer가 공유하는 단일 컬러바를 오른쪽에 배치
+            _cb_frac = fig_disp_w / (fig_disp_w + _cbar_w)
+            fig_map.subplots_adjust(left=0.02, right=_cb_frac, top=0.97, bottom=0.06)
+            cbar_ax = fig_map.add_axes([_cb_frac + 0.015, 0.12, 0.012, 0.76])
+            cbar = fig_map.colorbar(sc, cax=cbar_ax)
+            cbar.ax.tick_params(labelsize=6)
+        # 칩 격자가 선명하도록 해상도 상향
+        fig_map.savefig(tmp_map, format='jpg', dpi=max(int(dpi), 200), bbox_inches="tight",
+                        facecolor='white', pil_kwargs={'quality': map_q})
+        plt.close(fig_map)
+        out['imgs']['map'] = tmp_map.getvalue()
+        # 고정 크기 배치용 비율(25칸 고정 → wafer 수와 무관하게 동일). 조립부에서 사용.
+        out['map_ratio'] = fig_h / (fig_disp_w + _cbar_w)
+
+        # ---- 5. Trend Chart (vehicle/with_vehicle/target 비교 + vehicle 1~99% 구름대) ----
+        tdf = item_df_full.copy()
+        tdf['tkout_time'] = pd.to_datetime(tdf['tkout_time'])
+        has_mask = 'mask' in tdf.columns
+        has_lot = 'fab_lot_id' in tdf.columns
+
+        # ---- 특정 항목: site별 모든 값 대신 tkout_time 기준 집계점으로 Trend 표시 ----
+        #   config.trend_tkout_agg = {ALIAS: 'P10'/'P90'/'MEDIAN'/'MEAN'}.
+        _agg_map = cfg.get('trend_tkout_agg') or {}
+        _agg_spec = _agg_map.get(item_name) or _agg_map.get(spec_name)
+        # 'Window'가 들어간 항목(MAWIN 파생 포함)은 명시 설정이 없어도 Trend를 P10으로 집계
+        if not _agg_spec and ('window' in str(item_name).lower() or 'window' in str(spec_name).lower()):
+            _agg_spec = 'P10'
+        if _agg_spec:
+            _s = str(_agg_spec).strip().upper()
+            if _s in ('MEAN', 'AVG'):
+                _aggf = 'mean'
+            elif _s in ('MEDIAN', 'P50'):
+                _aggf = 'median'
+            else:
+                _m = re.match(r'P(\d+(?:\.\d+)?)$', _s)
+                _aggf = (lambda s, _q=min(max(float(_m.group(1)) / 100.0, 0.0), 1.0): s.quantile(_q)) if _m else 'median'
+            _gk = [k for k in ['mask', 'fab_lot_id', 'root_lot_id', 'wafer_id', 'match_key', 'tkout_time']
+                   if k in tdf.columns]
+            if 'tkout_time' in _gk and len(_gk) > 1:
+                tdf = (tdf.dropna(subset=[item_name])
+                          .groupby(_gk, as_index=False).agg({item_name: _aggf}))
+                tdf['tkout_time'] = pd.to_datetime(tdf['tkout_time'])
+
+        veh_df = tdf[tdf['mask'] == main_vehicle] if has_mask else tdf
+
+        def _draw_trend(ax):
+            # vehicle 기준 1~99% 구름대 + median (main vehicle 데이터만)
+            if len(veh_df) > 0:
+                b = veh_df[['tkout_time', item_name]].dropna().sort_values('tkout_time')
+                if len(b) > 0:
+                    b = b.assign(date=b['tkout_time'].dt.date)
+                    daily = b.groupby('date')[item_name].agg(
+                        median='median',
+                        q01=lambda x: x.quantile(0.01),
+                        q99=lambda x: x.quantile(0.99)).reset_index()
+                    daily['date'] = pd.to_datetime(daily['date'])
+                    daily = daily.set_index('date').sort_index()
+                    roll = daily.rolling('3D', min_periods=1).mean()
+                    ax.fill_between(roll.index, roll['q01'], roll['q99'], color=C_BAND, alpha=0.6, label=f'{main_vehicle} 1~99%', zorder=1)
+                    # 3일 기준 rolling median 라인 (검정색)
+                    ax.plot(roll.index, roll['median'], color='black', linewidth=1.5, alpha=1.0, zorder=6, label='3-day median')
+            # 색상 규칙: target lot=빨강(최상단) / 같은 vehicle 나머지=초록 / with_vehicle=회색
+            # 모든 마커는 얇은 검정 테두리(edgecolors='black', linewidths 얇게)를 적용
+            if has_lot:
+                tgt = _select_target_lot_frame(tdf, target_lot_id, target_root_lot_id, target_DC_step_id)
+                tgt_idx = set(tgt.index)
+                if has_mask:
+                    # 같은 vehicle이면서 대상 lot이 아닌 데이터 → 초록
+                    veh_other = tdf[(tdf['mask'] == main_vehicle) & (~tdf.index.isin(tgt_idx))]
+                    # with_vehicle(다른 vehicle) 데이터
+                    wv = tdf[tdf['mask'] != main_vehicle]
+                else:
+                    veh_other = tdf[~tdf.index.isin(tgt_idx)]; wv = tdf.iloc[0:0]
+                if len(veh_other) > 0:
+                    # 범례에 실제 vehicle 명(config.yaml) 표기
+                    ax.scatter(veh_other['tkout_time'], veh_other[item_name], s=10, alpha=0.5, color=C_VEHICLE, label=str(main_vehicle), edgecolors='black', linewidths=0.3, zorder=2)
+                if len(wv) > 0:
+                    # with_vehicle은 mask(=실제 vehicle 명)별로 분리하여 각각 다른 색 + 개별 범례
+                    for _wi, _wv_name in enumerate(sorted(wv['mask'].dropna().unique()) if has_mask else []):
+                        _wv_grp = wv[wv['mask'] == _wv_name]
+                        if len(_wv_grp) == 0: continue
+                        _wv_color = WV_PALETTE[_wi % len(WV_PALETTE)]
+                        ax.scatter(_wv_grp['tkout_time'], _wv_grp[item_name], s=10, alpha=0.5, color=_wv_color, label=str(_wv_name), edgecolors='black', linewidths=0.3, zorder=3)
+                if len(tgt) > 0:
+                    if multi_lot and lot_col:
+                        # 같은 root의 여러 lot_id → lot별 색으로 구분 (범례=lot_id)
+                        for _lot in target_lots:
+                            _tl = tgt[tgt[lot_col].astype(str) == _lot]
+                            if len(_tl) == 0: continue
+                            ax.scatter(_tl['tkout_time'], _tl[item_name], s=32, alpha=1.0,
+                                       color=lot_color[_lot], marker=lot_marker.get(_lot, 'o'),
+                                       label=f"{_lot}_{target_DC_step_id}", edgecolors='black', linewidths=0.5, zorder=12)
+                    else:
+                        # 단일 lot: 빨간색 + search_key 라벨 — 최상위 zorder로 다른 마커 위에 확실히 표시
+                        _tgt_label = f"{target_lot_id}_{target_DC_step_id}"
+                        ax.scatter(tgt['tkout_time'], tgt[item_name], s=32, alpha=1.0, color='red',
+                                   label=_tgt_label, edgecolors='black', linewidths=0.5, zorder=12)
+            else:
+                for w in measured_wafers:
+                    grp = tdf[tdf[w_col] == w] if w_col in tdf.columns else tdf.iloc[0:0]
+                    ax.scatter(grp['tkout_time'], grp[item_name], s=10, alpha=0.7, color=w_colors.get(str(w), 'blue'), edgecolors='black', linewidths=0.3, zorder=2)
+            # spec line(s) — 방향(REPORT DIRECTION) 반영된 spec_low/high (범례에는 표시하지 않음)
+            if spec_low is not None:
+                ax.axhline(y=float(spec_low), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
+            if spec_high is not None:
+                ax.axhline(y=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
+
+            # ── y축 범위 자동 조정: target lot 데이터 + spec line이 모두 보이도록 ──
+            if not log_scale:
+                try:
+                    _tgt_y = _select_target_lot_frame(tdf, target_lot_id, target_root_lot_id, target_DC_step_id)
+                except Exception:
+                    _tgt_y = tdf.iloc[0:0]
+                _yv = []
+                for _d in (_tgt_y, veh_df):
+                    if len(_d):
+                        _yv += pd.to_numeric(_d[item_name], errors='coerce').dropna().tolist()
+                if spec_low is not None:
+                    _yv.append(float(spec_low))
+                if spec_high is not None:
+                    _yv.append(float(spec_high))
+                _yv = [v for v in _yv if pd.notna(v)]
+                if _yv:
+                    _ylo, _yhi = min(_yv), max(_yv)
+                    _pad = (_yhi - _ylo) * 0.08 if _yhi > _ylo else (abs(_yhi) * 0.05 or 1.0)
+                    ax.set_ylim(_ylo - _pad, _yhi + _pad)
+            ax.set_title("")
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+            ax.tick_params(axis='x', rotation=0, labelsize=7)
+            ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=6))
+            _label_axes(ax, xlabel="Date", ylabel=y_label)
+            if log_scale: ax.set_yscale('log')
+            ax.legend(fontsize=6, loc='upper left', frameon=False)   # Trend 범례 좌상단 고정
+            _remove_spines(ax)
+            ax.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
+            ax.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
+
+        fig_trend, ax_trend = plt.subplots(figsize=(4.55, 1.75))
+        _draw_trend(ax_trend)
+        fig_trend.savefig(tmp_trend, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
+        plt.close(fig_trend)
+        out['imgs']['trend'] = tmp_trend.getvalue()
+
+        # index(alias) Trend scatter 차트만 RUN/TEMP에 alias명.png로 저장 (Anomaly/HTML 재사용)
+        safe_name = re.sub(r'[\\/:*?"<>|]', '_', str(item_name))
+        try:
+            run_temp = cfg.get('run_temp_dir') or os.path.join('RUN', 'TEMP')
+            os.makedirs(run_temp, exist_ok=True)
+            fig_trend_png, ax_trend_png = plt.subplots(figsize=(4.55, 2.0))
+            _draw_trend(ax_trend_png)
+            fig_trend_png.savefig(os.path.join(run_temp, f"{safe_name}.png"),
+                                  dpi=cfg.get('html_chart_dpi', 100), bbox_inches="tight")
+            plt.close(fig_trend_png)
+        except Exception as e:
+            out['warnings'].append(f"Failed to save RUN/TEMP/{safe_name}.png: {e}")
+
+        # ---- 지표 (Metrics) 계산 ----
+        try:
+            # global = vehicle 모집단(veh_df), target = 리포팅 대상 lot(item_df=target_df)
+            _gsrc = veh_df if len(veh_df) > 0 else item_df
+            g_med = float(_gsrc[item_name].median())
+            g_std = float(_gsrc[item_name].std())
+
+            t_df = item_df
+            t_med = float(t_df[item_name].median()) if len(t_df) > 0 else g_med
+            t_std = float(t_df[item_name].std()) if len(t_df) > 1 else g_std
+
+            dev = round(abs(t_med - g_med) / g_std, 2) if g_std > 0 else 0.0
+
+            # spec-out(이상) 분류는 '해당 lot_id'에만 한정 — 같은 root의 형제 lot은 이상으로 분류하지 않음
+            if 'fab_lot_id' in t_df.columns:
+                _t_spec = t_df[t_df['fab_lot_id'].astype(str) == str(target_lot_id)]
+                if len(_t_spec) == 0:
+                    _t_spec = t_df
+            else:
+                _t_spec = t_df
+
+            # spec 이탈 칩 목록 (기존 행별 iterrows → 벡터화)
+            _v = pd.to_numeric(_t_spec[item_name], errors='coerce')
+            _m = pd.Series(False, index=_t_spec.index)
+            if spec_low is not None:
+                _m = _m | (_v < float(spec_low))
+            if spec_high is not None:
+                _m = _m | (_v > float(spec_high))
+            _xcol = 'CHIP_X_ADJ' if 'CHIP_X_ADJ' in _t_spec.columns else (col_x if col_x in _t_spec.columns else None)
+            _ycol = 'CHIP_Y_ADJ' if 'CHIP_Y_ADJ' in _t_spec.columns else (col_y if col_y in _t_spec.columns else None)
+            _ov = _v[_m]
+            _ox = (pd.to_numeric(_t_spec.loc[_m, _xcol], errors='coerce').fillna(0.0)
+                   if _xcol else pd.Series(0.0, index=_ov.index))
+            _oy = (pd.to_numeric(_t_spec.loc[_m, _ycol], errors='coerce').fillna(0.0)
+                   if _ycol else pd.Series(0.0, index=_ov.index))
+            s_outs = [{"val": float(v), "x": float(x), "y": float(y)}
+                      for v, x, y in zip(_ov, _ox, _oy)]
+
+            out['metrics'] = {
+                "item": item_name,
+                "global_med": g_med,
+                "global_std": g_std,
+                "target_med": t_med,
+                "target_std": t_std,
+                "deviation": dev,
+                "spec_outs": s_outs,
+                "spec_out_count": len(s_outs)
+            }
+        except Exception as e:
+            out['warnings'].append(f"Failed to calculate metrics: {e}")
+
+        # ---- 6. Radius Plot (반경별 분포 + 3차 다항식 근사) ----
+        fig_rad, ax_rad = plt.subplots(figsize=(4.55, 1.75))
+        for w in measured_wafers:
+            w_df = item_df[item_df[w_col] == w].dropna(subset=[col_rad, item_name]).sort_values(by=col_rad)
+            if len(w_df) == 0: continue
+            p_color = w_colors.get(str(w), 'blue')
+            # 색=wafer, marker=lot_id (multi_lot일 때만 lot별 모양 구분)
+            if multi_lot and lot_col:
+                for _lot in target_lots:
+                    _wl = w_df[w_df[lot_col].astype(str) == _lot]
+                    if len(_wl) == 0: continue
+                    ax_rad.scatter(_wl[col_rad], _wl[item_name], s=14, alpha=0.85, color=p_color,
+                                   marker=lot_marker[_lot], edgecolors='black', linewidths=0.2)
+            else:
+                ax_rad.scatter(w_df[col_rad], w_df[item_name], s=12, alpha=0.85, color=p_color)
+            if len(w_df) >= 4:
+                try:
+                    z = np.polyfit(w_df[col_rad], w_df[item_name], 3)
+                    p = np.poly1d(z)
+                    ax_rad.plot(np.linspace(w_df[col_rad].min(), w_df[col_rad].max(), 50),
+                               p(np.linspace(w_df[col_rad].min(), w_df[col_rad].max(), 50)),
+                               color=p_color, alpha=0.6, linewidth=1.5)
+                except: pass
+        # lot_id marker 범례 (multi_lot)
+        if multi_lot:
+            from matplotlib.lines import Line2D
+            _lh = [Line2D([0], [0], marker=lot_marker[_lot], color='#444444', linestyle='none',
+                          markersize=6, label=str(_lot)) for _lot in target_lots]
+            ax_rad.legend(handles=_lh, fontsize=6, loc='upper left', bbox_to_anchor=(1.0, 1.0),
+                          frameon=False, title='Lot', title_fontsize=6)   # 차트 밖 우상단 고정
+        # Spec line은 그리되 범례(Spec Limit)는 표시하지 않음
+        if spec_low is not None:
+            ax_rad.axhline(y=float(spec_low), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
+        if spec_high is not None:
+            ax_rad.axhline(y=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
+        ax_rad.set_title("")
+        _label_axes(ax_rad, xlabel="Chip Radius", ylabel=y_label)
+        if log_scale: ax_rad.set_yscale('log')
+        _remove_spines(ax_rad)
+        ax_rad.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
+        ax_rad.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
+        fig_rad.savefig(tmp_rad, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
+        plt.close(fig_rad)
+        out['imgs']['rad'] = tmp_rad.getvalue()
+
+        # ---- 7. Cumulative Plot (누적 분포) ----
+        fig_cum, ax_cum = plt.subplots(figsize=(4.55, 1.85))
+        for w in fixed_wafers:
+            p_color = w_colors.get(str(w), 'blue')
+            if multi_lot and lot_col:
+                # 색=wafer, marker=lot_id. 같은 wafer라도 lot별로 모양이 달라짐
+                for _lot in target_lots:
+                    _sub = item_df[(item_df[w_col] == w) & (item_df[lot_col].astype(str) == _lot)][item_name].dropna()
+                    if len(_sub) == 0: continue
+                    _sd = np.sort(_sub.values)
+                    _yv = np.arange(len(_sd)) / float(len(_sd) - 1) if len(_sd) > 1 else [1.0]
+                    ax_cum.plot(_sd, _yv, marker=lot_marker[_lot], linestyle='-', markersize=4,
+                                linewidth=0.9, color=p_color, alpha=0.8)
+            elif w in grouped.groups:
+                grp = grouped.get_group(w)
+                sorted_data = np.sort(grp.values)
+                yvals = np.arange(len(sorted_data)) / float(len(sorted_data) - 1) if len(sorted_data) > 1 else [1.0]
+                # 같은 wafer_id 데이터를 선으로 연결 (마커 + 라인)
+                ax_cum.plot(sorted_data, yvals, marker='.', linestyle='-', markersize=4, linewidth=1.0, color=p_color, alpha=0.8)
+        if multi_lot:
+            from matplotlib.lines import Line2D
+            _lh = [Line2D([0], [0], marker=lot_marker[_lot], color='#444444', linestyle='none',
+                          markersize=6, label=str(_lot)) for _lot in target_lots]
+            ax_cum.legend(handles=_lh, fontsize=6, loc='upper left', bbox_to_anchor=(1.0, 1.0),
+                          frameon=False, title='Lot', title_fontsize=6)   # 차트 밖 우상단 고정
+        # Spec line은 그리되 범례(Spec Limit)는 표시하지 않음
+        if spec_low is not None:
+            ax_cum.axvline(x=float(spec_low), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
+        if spec_high is not None:
+            ax_cum.axvline(x=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
+        ax_cum.set_title("")
+        _label_axes(ax_cum, xlabel=y_label, ylabel="Cumulative Prob.")
+        if log_scale: ax_cum.set_xscale('log')
+        _remove_spines(ax_cum)
+        ax_cum.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
+        ax_cum.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
+        fig_cum.savefig(tmp_cum, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
+        plt.close(fig_cum)
+        out['imgs']['cum'] = tmp_cum.getvalue()
+
+        # ---- 임시 버퍼 해제 ----
+        for _b in [tmp_box, tmp_map, tmp_trend, tmp_rad, tmp_cum]:
+            try: _b.close()
+            except Exception: pass
+        gc.collect()
+
+    except Exception as e:
+        import traceback as _tb
+        out['status'] = 'error'
+        out['reason'] = f"{e}\n{_tb.format_exc()}"
+    return out
+
+
+def _wfmap_batch_task(payload):
+    """[워커] Score Board wafer WF MAP을 항목 묶음(chunk) 단위로 렌더링.
+
+    payload = {'df': 컬럼 슬라이스 df, 'items': [{'item','direction','spec_low','spec_high'}],
+               'common': {'min_pts','lot_prefix','dpi','by_lot'}}
+    """
+    df = payload['df']
+    common = payload['common']
+    out = {}
+    for it in payload['items']:
+        try:
+            m = render_wafer_wfmaps_b64(df, it['item'],
+                                        min_pts=common['min_pts'], lot_prefix=common['lot_prefix'],
+                                        direction=it.get('direction', 'BOTH'),
+                                        spec_low=it.get('spec_low'), spec_high=it.get('spec_high'),
+                                        dpi=common['dpi'], by_lot=common['by_lot'])
+        except Exception:
+            m = {}
+        if m:
+            out[it['item']] = m
+    return out
+
+
+def render_wafer_wfmaps_batch(df, item_specs, min_pts=50, lot_prefix=None,
+                              dpi=None, by_lot=True, workers=None):
+    """여러 index의 wafer WF MAP(render_wafer_wfmaps_b64)을 병렬 렌더링.
+
+    item_specs: [{'item', 'direction', 'spec_low', 'spec_high'}, ...]
+    반환: {item: {wafer_key: b64}} (WF MAP 없는 item은 미포함)
+    워커 수는 get_parallel_workers()로 자동 결정(1이면 직렬). 워커당 1 chunk로
+    묶어 df 전송(pickle)을 항목당이 아닌 워커당 1회로 최소화한다.
+    """
+    if dpi is None:
+        dpi = getattr(GLOBAL_CONFIG, 'html_wfmap_dpi', 110)
+    if workers is None:
+        workers = get_parallel_workers()
+
+    common = {'min_pts': min_pts, 'lot_prefix': lot_prefix, 'dpi': dpi, 'by_lot': by_lot}
+
+    def _serial():
+        out = {}
+        for it in item_specs:
+            m = render_wafer_wfmaps_b64(df, it['item'], min_pts=min_pts, lot_prefix=lot_prefix,
+                                        direction=it.get('direction', 'BOTH'),
+                                        spec_low=it.get('spec_low'), spec_high=it.get('spec_high'),
+                                        dpi=dpi, by_lot=by_lot)
+            if m:
+                out[it['item']] = m
+        return out
+
+    if workers <= 1 or len(item_specs) <= 1:
+        return _serial()
+
+    pool = _get_chart_pool(workers)
+    if pool is None:
+        return _serial()
+
+    meta_cols = [c for c in ['CHIP_X_ADJ', 'CHIP_Y_ADJ', 'CHIP_X_POS', 'CHIP_Y_POS',
+                             'chip_x_pos', 'chip_y_pos', 'WAFER_ID', 'wafer_id',
+                             'TKOUT_TIME', 'tkout_time', 'FAB_LOT_ID', 'fab_lot_id']
+                 if c in df.columns]
+    chunks = [item_specs[i::workers] for i in range(workers)]
+    try:
+        futs = []
+        for ch in chunks:
+            if not ch:
+                continue
+            _icols = [it['item'] for it in ch if it['item'] in df.columns]
+            _sub = df[list(dict.fromkeys(meta_cols + _icols))]
+            futs.append(pool.submit(_wfmap_batch_task,
+                                    {'df': _sub, 'items': ch, 'common': common}))
+        out = {}
+        for f in futs:
+            out.update(f.result())
+        return out
+    except Exception as e:
+        print(f"[WARN] WF MAP 병렬 렌더링 실패 → 직렬 폴백: {e}")
+        return _serial()
+
+
 def insert_plots(merged_df, prs, description_image_info_dict,
                  target_lot_id, target_root_lot_id,
                  target_DC_step, target_DC_step_id,
@@ -1364,17 +2272,19 @@ def insert_plots(merged_df, prs, description_image_info_dict,
         - 우측 상단: Trend Chart (시계열 + 3일 구름대)
         - 우측 중앙: Radius Plot (반경별 분포 + 3차 근사)
         - 우측 하단: Cumulative Plot (누적 분포)
+
+    렌더링(matplotlib, CPU 바운드)은 _render_item_charts를 통해 워커 프로세스에서
+    병렬 수행하고, 이 함수는 결과 이미지를 순서대로 PPT에 조립한다.
+    워커 수는 get_parallel_workers()가 환경(CPU/가용 메모리)을 보고 자동 결정하며
+    1이면 종전과 같은 직렬 렌더링으로 동작한다.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
     from pptx.util import Inches, Pt
     from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
     from pptx.dml.color import RGBColor
     from pptx.enum.shapes import MSO_SHAPE
+    import io as _io
     import gc
     import numpy as np
-    import shutil
     import re
 
     # ---- 차트 해상도/압축 품질 설정 (My_config.py에서 조정) ----
@@ -1413,52 +2323,11 @@ def insert_plots(merged_df, prs, description_image_info_dict,
     col_lot = _pick('fab_lot_id', 'FAB_LOT_ID')
     col_mask = _pick('mask', 'MASK')
 
-    # 고정된 25매 웨이퍼 리스트
-    fixed_wafers = [str(i) for i in range(1, 26)]
-
-    # ── Wafer ID별 고정 컬러 팔레트 (25색, 시각적으로 잘 구분되는 색) ──
-    # wafer #1 → WAFER_PALETTE[0], #2 → [1] ... 처럼 wafer 번호를 고정 색에 매핑합니다.
-    # 따라서 동일 wafer 번호는 모든 차트/리포트에서 항상 같은 색으로 표시됩니다.
-    # (Legend / Box / Trend / Radius / CDF 전부 이 w_colors를 공통 사용)
-    WAFER_PALETTE = [
-        '#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
-        '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990',
-        '#dcbeff', '#9a6324', '#bcbd22', '#800000', '#aaffc3',
-        '#808000', '#ffd8b1', '#000075', '#a9a9a9', '#ffe119',
-        '#1a1aff', '#ff4dd2', '#00cca3', '#b35900', '#5c5c8a',
-    ]
-    w_colors = {str(i): WAFER_PALETTE[(i - 1) % len(WAFER_PALETTE)] for i in range(1, 26)}
-
     current_cat = None
     metrics_dict = {}
 
     import os
     os.makedirs("RUN/TEMP", exist_ok=True)
-
-    def _remove_spines(ax):
-        for spine in ['top', 'right']:
-            ax.spines[spine].set_visible(False)
-        ax.spines['left'].set_color(C_SPINE)
-        ax.spines['bottom'].set_color(C_SPINE)
-        ax.spines['left'].set_linewidth(0.6)
-        ax.spines['bottom'].set_linewidth(0.6)
-
-    # 대상 lot 선택 헬퍼: fab_lot_id 정확일치 → 실패 시 root_lot prefix.
-    # (전체 vehicle로 확장하지 않음 — Box/Radius/CDF/Trend의 target은 해당 lot만)
-    def _select_target_lot(frame):
-        # 리포트 단위 = root_lot_id + step (match_key). 같은 root의 형제 lot_id를 모두 포함한다.
-        if 'match_key' in frame.columns and target_root_lot_id and target_DC_step_id:
-            mk = f"{target_root_lot_id}_{target_DC_step_id}"
-            sel = frame[frame['match_key'].astype(str) == mk]
-            if len(sel) > 0:
-                return sel
-        if 'fab_lot_id' not in frame.columns:
-            return frame
-        flid = frame['fab_lot_id'].astype(str)
-        sel = frame[flid == str(target_lot_id)]
-        if len(sel) == 0 and target_root_lot_id:
-            sel = frame[flid.str.startswith(str(target_root_lot_id))]
-        return sel
 
     # --- 페이지 index 목록 구성 (spec_data 항목 + Reformatize 파생 항목 포함) ---
     # Reformatize는 ADDP FORM으로 단일/다중 컬럼 파생 index를 만든다.
@@ -1493,7 +2362,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
     # ── ADDP 파생 index 제목 옆 'real 항목' 표시용 준비 ──
     # (1) 대상 lot에서 실제로 데이터가 있는(비어있지 않은) 항목 컬럼 집합
     try:
-        _tl_df = _select_target_lot(merged_df)
+        _tl_df = _select_target_lot_frame(merged_df, target_lot_id, target_root_lot_id, target_DC_step_id)
         _lot_present_cols = {c for c in _tl_df.columns if _tl_df[c].notna().any()}
     except Exception:
         _lot_present_cols = set(merged_df.columns)
@@ -1540,21 +2409,151 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 out.add(ref)
         return out
 
-    # --- 항목별 슬라이드 생성 루프 (Per-Item Slide Generation Loop) ---
+    # ================================================================
+    # 병렬 렌더링 준비 — 렌더링(워커)과 PPT 조립(메인)을 겹쳐 수행
+    # ================================================================
     total_items = len(plot_items)
     summary_rows = []   # 마지막 summary 페이지용 (index별 REPORT DIRECTION 기준 집계값)
+
+    n_workers = get_parallel_workers()
+    _avail = _get_available_mem_gb()
     print("=" * 60)
     print(f"[insert_plots] 차트 생성 시작 - 총 {total_items}개 index(파생 포함) 처리 예정")
+    print(f"[insert_plots] 렌더링 워커 {n_workers}개 "
+          f"(cores={os.cpu_count()}, 가용메모리={f'{_avail:.1f}GB' if _avail is not None else '측정불가'})")
     print("=" * 60)
+
+    # 워커에 넘길 경량 설정(dict) — 워커는 GLOBAL_CONFIG(yaml 미로드)를 참조하지 않는다
+    cfg_task = {
+        'dpi': dpi, 'jpg_q': jpg_q, 'map_q': map_q,
+        'C_NAVY': C_NAVY, 'C_ACCENT': C_ACCENT, 'C_NEUTRAL': C_NEUTRAL,
+        'C_GRID': C_GRID, 'C_SPINE': C_SPINE, 'C_VEHICLE': C_VEHICLE,
+        'C_BAND': C_BAND, 'WV_PALETTE': WV_PALETTE, 'FONT': FONT,
+        'main_vehicle': main_vehicle,
+        'trend_tkout_agg': getattr(GLOBAL_CONFIG, 'trend_tkout_agg', {}) or {},
+        'html_chart_dpi': getattr(GLOBAL_CONFIG, 'html_chart_dpi', 100),
+        'run_temp_dir': os.path.abspath(os.path.join('RUN', 'TEMP')),
+    }
+    w_col_src = _pick('wafer_id', 'WAFER_ID') or 'wafer_id'
+    cols_task = {'col_x': col_x, 'col_y': col_y, 'col_rad': col_rad, 'col_sub': col_sub,
+                 'col_time': col_time, 'col_lot': col_lot, 'col_mask': col_mask,
+                 'w_col_src': w_col_src}
+
+    # 모든 항목 공통 메타 컬럼 (per-item 데이터 슬라이스용)
+    req_cols = [w_col_src]
+    if col_x: req_cols += [col_x, col_y]
+    if col_rad: req_cols.append(col_rad)
+    if col_time: req_cols.append(col_time)
+    if col_sub: req_cols.append(col_sub)
+    if col_lot: req_cols.append(col_lot)
+    if col_mask: req_cols.append(col_mask)
+    if 'CHIP_X_ADJ' in merged_df.columns: req_cols.append('CHIP_X_ADJ')
+    if 'CHIP_Y_ADJ' in merged_df.columns: req_cols.append('CHIP_Y_ADJ')
+    if 'match_key' in merged_df.columns: req_cols.append('match_key')  # 형제 lot 묶음(root+step) 선택용
+    if 'PGM(pt)' in merged_df.columns: req_cols.append('PGM(pt)')      # WF MAP 행 좌측 PGM(pt) 라벨용
+
+    def _build_task(item_name, spec_name):
+        """항목 1개의 렌더링 task 생성. 데이터가 없으면 None."""
+        item_df = merged_df[list(set(req_cols)) + [item_name]].dropna(subset=[item_name])
+        if len(item_df) == 0:
+            return None
+
+        # ---- 스펙 범위 추출 (Spec Limits) + 방향/로그/단위 ----
+        spec_low = spec_data.loc[spec_name, "SPECLOW"]
+        spec_high = spec_data.loc[spec_name, "SPECHIGH"]
+        if pd.isna(spec_low): spec_low = None
+        if pd.isna(spec_high): spec_high = None
+        # WF MAP 컬러 anchor용 원본 spec(방향 nulling 전): speclow/spechigh 양끝 모두 보존
+        wfmap_spec_low, wfmap_spec_high = spec_low, spec_high
+
+        # REPORT DIRECTION: UPPER=상한만, LOWER=하한만, BOTH=둘 다
+        direction = 'BOTH'
+        if 'REPORT DIRECTION' in spec_data.columns:
+            _d = str(spec_data.loc[spec_name, 'REPORT DIRECTION']).strip().upper()
+            if _d in ('UPPER', 'LOWER', 'BOTH'):
+                direction = _d
+        if direction == 'UPPER':
+            spec_low = None
+        elif direction == 'LOWER':
+            spec_high = None
+
+        # REPORT LOG SCALE: 값 축 log10 적용 여부
+        log_scale = False
+        if 'REPORT LOG SCALE' in spec_data.columns:
+            _ls = spec_data.loc[spec_name, 'REPORT LOG SCALE']
+            log_scale = str(_ls).strip().lower() in ('true', '1', '1.0', 'yes')
+
+        # UNIT: 축 라벨 단위
+        unit = ''
+        if 'UNIT' in spec_data.columns:
+            _u = str(spec_data.loc[spec_name, 'UNIT']).strip()
+            if _u and _u.lower() != 'nan':
+                unit = _u
+        y_label = f"{item_name} [{unit}]" if unit else item_name
+
+        return {
+            'item_name': item_name, 'spec_name': spec_name,
+            'df': item_df, 'cols': cols_task, 'cfg': cfg_task,
+            'target_lot_id': target_lot_id,
+            'target_root_lot_id': target_root_lot_id,
+            'target_DC_step_id': target_DC_step_id,
+            'spec': {'spec_low': spec_low, 'spec_high': spec_high,
+                     'wfmap_spec_low': wfmap_spec_low, 'wfmap_spec_high': wfmap_spec_high,
+                     'direction': direction, 'log_scale': log_scale, 'y_label': y_label},
+        }
+
+    # task는 지연 생성 + 슬라이딩 윈도(워커수×2)로 제출 — 항목별 데이터 슬라이스가
+    # 한꺼번에 메모리에 쌓이지 않도록 하여 저사양(10GB)에서도 안전하게 동작한다.
+    pool = _get_chart_pool(n_workers) if n_workers > 1 else None
+    task_cache = {}      # i -> task dict | '_no_col' | '_empty'
+    futures = {}         # i -> Future
+    _state = {'next': 0, 'pool_ok': pool is not None}
+    _WINDOW = (n_workers * 2 + 1) if pool is not None else 0
+
+    def _get_task(i):
+        if i in task_cache:
+            return task_cache[i]
+        _in, _sn = plot_items[i]
+        if _in not in merged_df.columns:
+            t = '_no_col'
+        else:
+            t = _build_task(_in, _sn) or '_empty'
+        task_cache[i] = t
+        return t
+
+    def _pump():
+        """윈도가 빌 때까지 다음 항목들을 풀에 제출(렌더링과 조립을 겹치게 유지)."""
+        if pool is None or not _state['pool_ok']:
+            return
+        while _state['next'] < total_items:
+            _busy = sum(1 for f in futures.values() if not f.done())
+            if _busy >= _WINDOW:
+                break
+            i = _state['next']
+            _state['next'] = i + 1
+            t = _get_task(i)
+            if isinstance(t, dict):
+                try:
+                    futures[i] = pool.submit(_render_item_charts, t)
+                except Exception as _pe:
+                    print(f"[WARN] 병렬 렌더링 제출 실패 → 직렬로 폴백: {_pe}")
+                    _state['pool_ok'] = False
+                    break
+
+    _pump()
+
+    # 슬라이드 공통 정적 요소: Wafer 색 범례는 항목과 무관 → 1회만 렌더링해 재사용
+    leg_bytes = _render_wafer_legend_bytes(cfg_task)
+
+    # --- 항목별 슬라이드 조립 루프 (렌더링 결과를 REPORT ORDER 순서로 소비) ---
     for idx, (item_name, spec_name) in enumerate(plot_items, start=1):
-        if item_name not in merged_df.columns:
+        i = idx - 1
+        _pump()
+        t = _get_task(i)
+        if t == '_no_col':
             print(f"[{idx}/{total_items}] {item_name} 건너뜀 (merged_df에 데이터 없음)")
             continue
         print(f"[{idx}/{total_items}] {item_name} 처리 중...")
-
-        # 파일명 안전화: index명에 '/' 등 경로/금지문자가 있으면 '_'로 치환
-        # (예: 'IDSAT_N/IDSAT_P' → 'IDSAT_N_IDSAT_P') → 저장 시 에러 방지
-        safe_name = re.sub(r'[\\/:*?"<>|]', '_', str(item_name))
 
         # ---- 카테고리 간지(Description) 슬라이드 삽입 ----
         if 'CAT2' in spec_data.columns:
@@ -1590,156 +2589,45 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 else:
                     print(f"[WARN] CAT2 '{cat2}' description 슬라이드를 찾지 못해 간지 생략")
 
-        try:
-            # ---- 데이터 준비 (Data Preparation) ----
-            w_col_src = _pick('wafer_id', 'WAFER_ID') or 'wafer_id'
-            req_cols = [w_col_src]
-            if col_x: req_cols += [col_x, col_y]
-            if col_rad: req_cols.append(col_rad)
-            if col_time: req_cols.append(col_time)
-            if col_sub: req_cols.append(col_sub)
-            if col_lot: req_cols.append(col_lot)
-            if col_mask: req_cols.append(col_mask)
-            if 'CHIP_X_ADJ' in merged_df.columns: req_cols.append('CHIP_X_ADJ')
-            if 'CHIP_Y_ADJ' in merged_df.columns: req_cols.append('CHIP_Y_ADJ')
-            if 'match_key' in merged_df.columns: req_cols.append('match_key')  # 형제 lot 묶음(root+step) 선택용
-            if 'PGM(pt)' in merged_df.columns: req_cols.append('PGM(pt)')      # WF MAP 행 좌측 PGM(pt) 라벨용
+        if t == '_empty':
+            task_cache.pop(i, None)
+            continue
 
-            item_df = merged_df[list(set(req_cols)) + [item_name]].dropna(subset=[item_name]).copy()
-            if len(item_df) == 0:
-                continue
-
-            # 메타 컬럼명을 canonical 소문자로 통일 (merged_df가 대문자여도 안전)
-            rename_map = {}
-            if col_time and col_time != 'tkout_time': rename_map[col_time] = 'tkout_time'
-            if col_lot and col_lot != 'fab_lot_id': rename_map[col_lot] = 'fab_lot_id'
-            if col_mask and col_mask != 'mask': rename_map[col_mask] = 'mask'
-            if w_col_src != 'wafer_id': rename_map[w_col_src] = 'wafer_id'
-            if rename_map:
-                item_df = item_df.rename(columns=rename_map)
-            w_col = 'wafer_id'
-
-            # 누락 컬럼 대체 (Fallback for missing columns)
-            if not col_x:
-                item_df['chip_x_pos'] = np.random.rand(len(item_df))
-                item_df['chip_y_pos'] = np.random.rand(len(item_df))
-                col_x, col_y = 'chip_x_pos', 'chip_y_pos'
-            if not col_rad:
-                item_df['chip_radius'] = np.sqrt(item_df[col_x]**2 + item_df[col_y]**2)
-                col_rad = 'chip_radius'
-            if not col_sub:
-                item_df['subitem_id'] = 'ALL'
-                col_sub = 'subitem_id'
-            if 'tkout_time' not in item_df.columns:
-                item_df['tkout_time'] = pd.to_datetime('today')
-
-            item_df[w_col] = item_df[w_col].astype(str).str.replace('#', '')
-            item_df['tkout_time'] = pd.to_datetime(item_df['tkout_time'])
-            item_df = item_df.sort_values(by='tkout_time')
-
-            # ---- 데이터 스코프 분리 ----
-            # item_df_full: 전 vehicle·전 lot (Trend 비교 전용)
-            # item_df(=target_df): 리포팅 대상 lot만 (Box/WF MAP/통계표/Radius/CDF/통계)
-            # NOTE: 대상 lot 매칭 실패 시에도 전체 vehicle 데이터로 확장하지 않는다.
-            #       (Box/Radius/CDF는 반드시 해당 lot의 wafer만 표시되어야 함)
-            item_df_full = item_df
-            target_df = _select_target_lot(item_df)
-            item_df = target_df
-            if len(item_df) == 0:
-                print(f"[{idx}/{total_items}] {item_name} 건너뜀 (대상 lot '{target_lot_id}' 데이터 없음)")
-                continue
-
-            measured_wafers = sorted(item_df[w_col].unique(), key=lambda x: int(x) if str(x).isdigit() else x)
-            grouped = item_df.groupby(w_col)[item_name]
-
-            # ---- 다중 lot_id 구분 (같은 root_lot_id에 여러 lot_id가 묶여 함께 reporting될 때) ----
-            #  - Radius/CDF: lot_id별 marker 모양으로 구분 (wafer 색은 유지)
-            #  - Trend: lot_id별 색으로 구분
-            lot_col = 'fab_lot_id' if 'fab_lot_id' in item_df.columns else None
-            target_lots = (sorted(item_df[lot_col].astype(str).unique()) if lot_col else [])
-            multi_lot = len(target_lots) > 1
-            LOT_MARKERS = ['o', '^', 's', 'D', 'v', 'P', 'X', '*']
-            LOT_LINE_COLORS = ['#d62728', '#1f77b4', '#2ca02c', '#9467bd', '#ff7f0e', '#8c564b', '#e377c2', '#17becf']
-            lot_marker = {lot: LOT_MARKERS[i % len(LOT_MARKERS)] for i, lot in enumerate(target_lots)}
-            lot_color = {lot: LOT_LINE_COLORS[i % len(LOT_LINE_COLORS)] for i, lot in enumerate(target_lots)}
-
-            # ---- 스펙 범위 추출 (Spec Limits) + 방향/로그/단위 ----
-            spec_low = spec_data.loc[spec_name, "SPECLOW"]
-            spec_high = spec_data.loc[spec_name, "SPECHIGH"]
-            if pd.isna(spec_low): spec_low = None
-            if pd.isna(spec_high): spec_high = None
-            # WF MAP 컬러 anchor용 원본 spec(방향 nulling 전): speclow/spechigh 양끝 모두 보존
-            wfmap_spec_low, wfmap_spec_high = spec_low, spec_high
-
-            # REPORT DIRECTION: UPPER=상한만, LOWER=하한만, BOTH=둘 다
-            direction = 'BOTH'
-            if 'REPORT DIRECTION' in spec_data.columns:
-                _d = str(spec_data.loc[spec_name, 'REPORT DIRECTION']).strip().upper()
-                if _d in ('UPPER', 'LOWER', 'BOTH'):
-                    direction = _d
-            if direction == 'UPPER':
-                spec_low = None
-            elif direction == 'LOWER':
-                spec_high = None
-
-            # REPORT LOG SCALE: 값 축 log10 적용 여부
-            log_scale = False
-            if 'REPORT LOG SCALE' in spec_data.columns:
-                _ls = spec_data.loc[spec_name, 'REPORT LOG SCALE']
-                log_scale = str(_ls).strip().lower() in ('true', '1', '1.0', 'yes')
-
-            # UNIT: 축 라벨 단위
-            unit = ''
-            if 'UNIT' in spec_data.columns:
-                _u = str(spec_data.loc[spec_name, 'UNIT']).strip()
-                if _u and _u.lower() != 'nan':
-                    unit = _u
-            y_label = f"{item_name} [{unit}]" if unit else item_name
-
-            # ---- Index Aggregation Table용 (lot, wafer)별 집계값 ----
-            # REPORT DIRECTION → BOTH=Median / UPPER=P90 / LOWER=P10. lot_id별로 분리해 wafer별 1값.
+        # ---- 렌더링 결과 수령 (병렬이면 풀 Future, 아니면 이 자리에서 직렬 렌더) ----
+        res = None
+        if i in futures:
             try:
-                if direction == 'UPPER':
-                    _q, _sstat = 0.90, 'P90'
-                elif direction == 'LOWER':
-                    _q, _sstat = 0.10, 'P10'
-                else:
-                    _q, _sstat = None, 'Median'
+                res = futures.pop(i).result()
+            except Exception as _fe:
+                print(f"[WARN] 워커 렌더링 실패({item_name}) → 메인에서 직렬 재시도: {_fe}")
+                _state['pool_ok'] = False
+                res = None
+        if res is None:
+            res = _render_item_charts(t)
+        task_cache.pop(i, None)   # task(df 슬라이스) 메모리 조기 해제
 
-                def _aggv(s):
-                    s = pd.to_numeric(s, errors='coerce').dropna()
-                    if len(s) == 0:
-                        return None
-                    return float(s.median()) if _q is None else float(s.quantile(_q))
+        for _w in res.get('warnings', []):
+            print(f"[WARN] {item_name}: {_w}")
+        if res['status'] == 'skip':
+            print(f"[{idx}/{total_items}] {item_name} 건너뜀 ({res['reason']})")
+            continue
+        if res['status'] == 'error':
+            print(f"[ERROR] {item_name} 차트 생성 중 에러 발생: {res['reason']}")
+            continue
 
-                _lc = 'fab_lot_id' if 'fab_lot_id' in item_df.columns else None
-                _wv = {}   # {(lot, wafer_int): value}
-                if _lc:
-                    for (_lot, _waf), _g in item_df.groupby([_lc, w_col]):
-                        _v = _aggv(_g[item_name])
-                        if _v is None:
-                            continue
-                        try:
-                            _waf = int(float(_waf))
-                        except (ValueError, TypeError):
-                            pass
-                        _wv[(str(_lot), _waf)] = _v
-                else:
-                    _v = _aggv(item_df[item_name])
-                    if _v is not None:
-                        _wv[(str(target_lot_id), 0)] = _v
-                if _wv:
-                    summary_rows.append({'index': item_name, 'stat': _sstat, 'wafer_vals': _wv})
-            except Exception as _se:
-                print(f"[WARN] summary 집계 실패 ({item_name}): {_se}")
+        if res.get('metrics'):
+            metrics_dict[item_name] = res['metrics']
+        if res.get('summary_row'):
+            summary_rows.append(res['summary_row'])
 
+        try:
             slide = prs.slides.add_slide(prs.slide_layouts[6])
-            
+
             # 슬라이드 배경색 설정 (흰색)
             slide_bg = slide.background
             slide_bg.fill.solid()
             slide_bg.fill.fore_color.rgb = RGBColor(255, 255, 255)
-            
+
             # ---- 레이아웃 상수 (와이드 16:9 13.333x7.5, 여백 최소화·꽉 채움) ----
             # 좌/우 2열을 슬라이드 폭(13.333")에 꽉 차게 배치, 여백 최소화
             LX, RX = 0.12, 8.50          # 좌/우 열 X 좌표 (테이블·그림·타이틀 공통)
@@ -1831,45 +2719,27 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                     par.font.size = Pt(7)
                     par.font.name = FONT
                     par.alignment = PP_ALIGN.CENTER
-            
-            # REPORT DIRECTION별 통계 행 구성
-            #   UPPER: Max P90 Med P10 / LOWER: P90 Med P10 Min / BOTH: P90 Med P10 Std
-            if direction == 'UPPER':
-                stat_defs = [("Max", lambda s: s.max()), ("P90", lambda s: s.quantile(0.90)),
-                             ("Med", lambda s: s.median()), ("P10", lambda s: s.quantile(0.10))]
-            elif direction == 'LOWER':
-                stat_defs = [("P90", lambda s: s.quantile(0.90)), ("Med", lambda s: s.median()),
-                             ("P10", lambda s: s.quantile(0.10)), ("Min", lambda s: s.min())]
-            else:
-                stat_defs = [("P90", lambda s: s.quantile(0.90)), ("Med", lambda s: s.median()),
-                             ("P10", lambda s: s.quantile(0.10)),
-                             ("Std", lambda s: s.std() if len(s) > 1 else float('nan'))]
-            row_labels = [lbl for lbl, _ in stat_defs]
-            for r_idx, label in enumerate(row_labels):
+
+            # REPORT DIRECTION별 통계 행/값은 워커(_render_item_charts)가 계산 완료
+            stat_cells = res['stat_cells']
+            for r_idx, label in enumerate(res['stat_rows']):
                 table_shape.cell(r_idx + 1, 0).text = label
 
             # Wafer별 통계 (1~25 고정 루프, Stat 라벨이 0열이므로 wafer #w → c_idx=w)
             for w_idx in range(1, 26):
-                w_str = str(w_idx)
-                c_idx = w_idx
-                if w_str in grouped.groups:
-                    grp_data = pd.to_numeric(grouped.get_group(w_str), errors='coerce').dropna()
-                    for r_idx, (_lbl, _fn) in enumerate(stat_defs, start=1):
-                        try:
-                            _v = _fn(grp_data)
-                            table_shape.cell(r_idx, c_idx).text = _fmt_stat_value(_v)
-                        except Exception:
-                            table_shape.cell(r_idx, c_idx).text = "-"
+                vals = stat_cells.get(w_idx)
+                if vals:
+                    for r_idx, _v in enumerate(vals, start=1):
+                        table_shape.cell(r_idx, w_idx).text = _v
                 else:
                     for r_idx in range(1, 5):
-                        table_shape.cell(r_idx, c_idx).text = "-"
-                
+                        table_shape.cell(r_idx, w_idx).text = "-"
+
             for r_idx, row in enumerate(table_shape.rows):
                 if r_idx == 0: continue
                 bg_color = RGBColor(245, 247, 250) if r_idx % 2 == 1 else RGBColor(255, 255, 255)
                 for c_idx, cell in enumerate(row.cells):
-                    w_num_str = str(c_idx)  # 0열=Stat 라벨, 1~25열=wafer #1~#25
-                    if c_idx >= 1 and w_num_str not in grouped.groups:
+                    if c_idx >= 1 and stat_cells.get(c_idx) is None:
                         # 빈 데이터 웨이퍼는 연한 그레이 채우기
                         cell.fill.solid()
                         cell.fill.fore_color.rgb = RGBColor(240, 240, 240)
@@ -1888,499 +2758,24 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                         par.font.name = FONT
                         par.alignment = PP_ALIGN.CENTER
 
-            # ---- 차트 임시 버퍼 (디스크에 파일 생성하지 않고 메모리에서 처리 → PPT 임베드 후 폐기) ----
-            import io as _io
-            tmp_box = _io.BytesIO()
-            tmp_map = _io.BytesIO()
-            tmp_trend = _io.BytesIO()
-            tmp_rad = _io.BytesIO()
-            tmp_cum = _io.BytesIO()
-            tmp_leg = _io.BytesIO()
-            
-            plt.rcParams['axes.linewidth'] = 0.6
-            plt.rcParams['font.size'] = 7.5
-            plt.rcParams['font.family'] = FONT
-            plt.rcParams['axes.facecolor'] = '#ffffff'
-            plt.rcParams['figure.facecolor'] = '#ffffff'
-            plt.rcParams['grid.color'] = C_GRID
-            plt.rcParams['grid.linestyle'] = '-'
-            plt.rcParams['grid.linewidth'] = 0.5
-
-            # 차트 축 라벨 공통 스타일 헬퍼 (단위 컬럼이 없어 항목명/의미 라벨 사용)
-            def _label_axes(ax, xlabel=None, ylabel=None):
-                if xlabel is not None:
-                    ax.set_xlabel(xlabel, fontsize=7, color=C_NAVY, fontname=FONT)
-                if ylabel is not None:
-                    ax.set_ylabel(ylabel, fontsize=7, color=C_NAVY, fontname=FONT)
-
-            # Wafer 색상 고정 매핑은 루프 밖에서 WAFER_PALETTE로 1회 정의됨(w_colors)
-
-            # ---- Wafer Color Legend ----
-            #  (lot_id↔wafer 구분은 Radius/Cumulative의 Lot marker 범례 및 Trend 색으로 표기)
-            fig_leg, ax_leg = plt.subplots(figsize=(8.0, 0.2))
-            plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
-            ax_leg.axis('off')
-            ax_leg.text(0, 0, "Wafer Color:", va='center', ha='left', fontsize=8, fontweight='bold', color=C_NAVY)
-            for i in range(1, 26):
-                ax_leg.scatter([i*0.85 + 2.5], [0], color=w_colors.get(str(i)), s=25)
-                ax_leg.text(i*0.85 + 2.5 + 0.15, 0, f"#{i}", va='center', ha='left', fontsize=6, color=C_NEUTRAL)
-            ax_leg.set_xlim(0, 25)
-            ax_leg.set_ylim(-1, 1)
-            fig_leg.savefig(tmp_leg, format='jpg', dpi=dpi, facecolor='#f8fafc', pil_kwargs={'quality': jpg_q})
-            plt.close(fig_leg)
-            tmp_leg.seek(0)
-            slide.shapes.add_picture(tmp_leg, Inches(LX), Inches(Y_LEG), width=Inches(LW))
-
-            # ---- 3. BOX Plot (측정된 웨이퍼만 플롯하되, X축은 1~25 고정) ----
-            fig_box, ax_box = plt.subplots(figsize=(7.8, 1.9))
-            box_data = []
-            box_positions = []
-            for w in measured_wafers:
-                try:
-                    w_int = int(w)
-                    box_positions.append(w_int)
-                    box_data.append(grouped.get_group(w).values)
-                except ValueError: pass
-                    
-            if len(box_data) > 0:
-                bplot = ax_box.boxplot(
-                    box_data, positions=box_positions, patch_artist=True,
-                    showfliers=True,
-                    flierprops={'marker': 'o', 'markerfacecolor': C_ACCENT, 'markeredgecolor': 'none', 'markersize': 3.5},
-                    medianprops={'color': C_NEUTRAL, 'linewidth': 1.2},
-                    whiskerprops={'color': '#94a3b8', 'linewidth': 0.8},
-                    capprops={'color': '#94a3b8', 'linewidth': 0.8}
-                )
-                for i, patch in enumerate(bplot['boxes']):
-                    w_str = str(box_positions[i])
-                    patch.set_facecolor(w_colors.get(w_str, '#ffffff'))
-                    patch.set_alpha(0.85)
-                    patch.set_edgecolor(C_NEUTRAL)
-                    patch.set_linewidth(0.8)
-
-            # Spec line은 그리되 범례(Spec Limit)는 표시하지 않음
-            if spec_low is not None:
-                ax_box.axhline(y=float(spec_low), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
-            if spec_high is not None:
-                ax_box.axhline(y=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
-            ax_box.set_xticks(range(1, 26))
-            ax_box.set_xticklabels([f"#{i}" for i in range(1, 26)])
-            ax_box.set_xlim(0.5, 25.5)
-            ax_box.tick_params(axis='x', rotation=45, labelsize=7)
-            _label_axes(ax_box, xlabel="Wafer #", ylabel=y_label)
-            _remove_spines(ax_box)
-            ax_box.set_axisbelow(True)
-            if log_scale:
-                # 로그 스케일: 데이터 범위가 한 decade 미만이어도 10의 거듭제곱마다 y축 선이 나오도록
-                # major(10^n) + minor(2~9×10^n) locator를 명시하고 둘 다 grid 표시.
-                from matplotlib.ticker import LogLocator, NullFormatter
-                ax_box.set_yscale('log')
-                ax_box.yaxis.set_major_locator(LogLocator(base=10.0, numticks=15))
-                ax_box.yaxis.set_minor_locator(
-                    LogLocator(base=10.0, subs=(2, 3, 4, 5, 6, 7, 8, 9), numticks=15))
-                ax_box.yaxis.set_minor_formatter(NullFormatter())
-                ax_box.grid(True, which='major', axis='both', color=C_GRID, linestyle='-', linewidth=0.6)
-                ax_box.grid(True, which='minor', axis='y', color=C_GRID, linestyle='-', linewidth=0.35, alpha=0.6)
-            else:
-                ax_box.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
-                ax_box.grid(True, which='major', axis='both', color=C_GRID, linestyle='-', linewidth=0.5)
-            # 용량 다이어트를 위한 JPG 포맷 저장 및 quality 옵션 적용
-            fig_box.savefig(tmp_box, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
-            plt.close(fig_box)
-            tmp_box.seek(0)
-            slide.shapes.add_picture(tmp_box, Inches(LX), Inches(Y_BOX), Inches(LW), Inches(2.05))
-
-            # ---- 4. WF MAP (PGM/Wafer 다중 분할, 모자이크 타일 방식 적용, 3행 기준 고정 비율) ----
-            # Wafer 좌표: flat-zone 회전이 반영된 보정 좌표(CHIP_X_ADJ/CHIP_Y_ADJ)가
-            # 있으면 우선 사용해 실제 웨이퍼 배치대로 그린다. 없으면 raw chip_x/y로 fallback.
-            map_x = 'CHIP_X_ADJ' if 'CHIP_X_ADJ' in item_df.columns else col_x
-            map_y = 'CHIP_Y_ADJ' if 'CHIP_Y_ADJ' in item_df.columns else col_y
-
-            # WF MAP 행 = PGM(pt)별 한 줄. PGM(pt) 컬럼이 있으면 그것으로 그룹핑(없으면 subitem).
-            _wfmap_grp_col = 'PGM(pt)' if 'PGM(pt)' in item_df.columns else col_sub
-            sub_groups = list(item_df.groupby(_wfmap_grp_col))
-            n_pgm = len(sub_groups) if len(sub_groups) > 0 else 1
-            # 측정된 wafer만 컬럼으로 표시(빈 컬럼 제거 → 각 wafer 셀을 최대한 크게)
-            measured_sorted = sorted(measured_wafers, key=lambda x: int(x) if str(x).isdigit() else 0)
-            n_waf = max(len(measured_sorted), 1)
-
-            global_x_min = item_df[map_x].min()
-            global_x_max = item_df[map_x].max()
-            global_y_min = item_df[map_y].min()
-            global_y_max = item_df[map_y].max()
-
-            x_range = global_x_max - global_x_min if global_x_max > global_x_min else 1
-            y_range = global_y_max - global_y_min if global_y_max > global_y_min else 1
-            # 가장자리 칩(사각 마커)이 잘리지 않도록 반칩 이상 여백 확보 (칩 간격 기준)
-            _nxu = max(int(item_df[map_x].nunique()), 1)
-            _nyu = max(int(item_df[map_y].nunique()), 1)
-            x_pad = (x_range / max(_nxu - 1, 1)) * 0.7 if _nxu > 1 else x_range * 0.1
-            y_pad = (y_range / max(_nyu - 1, 1)) * 0.7 if _nyu > 1 else y_range * 0.1
-            global_x_min -= x_pad
-            global_x_max += x_pad
-            global_y_min -= y_pad
-            global_y_max += y_pad
-
-            # ---- WF MAP 공유 컬러 스케일 (spec line 기준 diverging) ----
-            # 모든 PGM(pt) 행이 '같은' 스케일/컬러바 1개를 공유한다.
-            # speclow→파랑끝 · spechigh→빨강끝 · median→연회색 center (LOWER는 cmap 반전으로 색 반대).
-            # HTML Score Board WF MAP과 동일 규칙(_wfmap_norm)으로 산출 → PPT/HTML 색이 일치.
-            wfmap_norm = _wfmap_norm(direction, wfmap_spec_low, wfmap_spec_high, item_df[item_name])
-
-            # 칩 격자 차원(예: 13x13)
-            nx = max(int(item_df[map_x].nunique()), 1)
-            ny = max(int(item_df[map_y].nunique()), 1)
-            gdim = max(nx, ny)
+            # ---- 3. 렌더링된 차트 이미지 삽입 (워커가 만든 jpg bytes) ----
+            imgs = res['imgs']
+            # Wafer Color Legend (전 슬라이드 공통 1회 렌더 재사용)
+            slide.shapes.add_picture(_io.BytesIO(leg_bytes), Inches(LX), Inches(Y_LEG), width=Inches(LW))
+            # BOX Plot
+            slide.shapes.add_picture(_io.BytesIO(imgs['box']), Inches(LX), Inches(Y_BOX), Inches(LW), Inches(2.05))
+            # WF MAP — 고정 25칸 비율(map_ratio) 유지, 세로가 넘칠 때만 축소
             map_avail = SLIDE_BOTTOM - Y_MAP
-
-            # ---- WF MAP 배치: 행=PGM(pt), 열=wafer #1~25 고정 ----
-            # 측정 wafer 수와 무관하게 항상 25칸(고정) → WF MAP 전체 크기가 1매든 25매든 동일.
-            # 없는 wafer 자리는 빈 칸으로 둔다. die별 색은 spec/median 기준(_wfmap_norm/_wfmap_cmap, HTML과 동일).
-            FIXED_N_WAF = 25
-            grid_rows, grid_cols = n_pgm, FIXED_N_WAF
-            _multi_pgm = n_pgm > 1
-            # (pgm_row, wafer_col) → (sub_grp, wafer_str, sub_name)  — 열 c는 항상 wafer #(c+1)
-            cell_map = {(i, c): (sub_grp, str(c + 1), sub_name)
-                        for i, (sub_name, sub_grp) in enumerate(sub_groups)
-                        for c in range(FIXED_N_WAF)}
-
-            _cbar_w = 0.45                                 # 우측 컬러바 폭(인치)
-            render_cell = 0.55                             # 셀(=wafer 1칸) 크기(인치) — 25칸 고정
-            chip_pt = render_cell / gdim * 72.0            # 칩 1개 한 변(pt)
-            marker_s = max(0.5, (chip_pt * 0.9) ** 2)      # 격자가 커도(13x13) 겹치지 않게 자동 축소
-            fig_disp_w = grid_cols * render_cell           # 서브플롯 영역 폭(컬러바 제외, 항상 25*cell)
-            fig_h = grid_rows * render_cell + 0.15         # 하단 wafer 번호 라벨 여백
-
-            fig_map, axes_map = plt.subplots(grid_rows, grid_cols,
-                                             figsize=(fig_disp_w + _cbar_w, fig_h), squeeze=False,
-                                             gridspec_kw={'wspace': 0.06, 'hspace': 0.18})
-            sc = None
-            for r in range(grid_rows):
-                for c in range(grid_cols):
-                    ax = axes_map[r, c]
-                    sub_grp, w, sub_name = cell_map[(r, c)]
-                    w_grp = sub_grp[sub_grp[w_col] == w]
-                    if not w_grp.empty:   # 측정된 wafer만 die 산점, 없으면 빈 칸
-                        sc = ax.scatter(w_grp[map_x], w_grp[map_y], c=w_grp[item_name],
-                                        cmap=_wfmap_cmap(direction), norm=wfmap_norm,
-                                        s=marker_s, marker='s', alpha=1.0, linewidths=0)
-                    ax.set_facecolor('white')
-                    # 마지막(맨 아래) PGM 행에만 wafer 번호 표기
-                    if r == grid_rows - 1:
-                        ax.set_xlabel(f"#{c + 1}", fontsize=5, labelpad=1, color=C_NEUTRAL)
-                    # 다중 PGM이면 첫 열 좌측에 PGM(pt) 라벨(90도 회전)
-                    if c == 0 and _multi_pgm:
-                        _pl = str(sub_name)
-                        if 'PGM(pt)' in sub_grp.columns:
-                            _u = sub_grp['PGM(pt)'].dropna()
-                            if len(_u): _pl = str(_u.iloc[0])
-                        ax.set_ylabel(_pl, fontsize=6, rotation=90, labelpad=6, color=C_NEUTRAL)
-                    ax.set_xticks([]); ax.set_yticks([])
-                    ax.set_aspect('equal', adjustable='box')   # 웨이퍼 정원형 유지
-                    for spine in ax.spines.values():
-                        spine.set_visible(False)
-                    # chip x 정방향(chip #1=왼쪽, 13=오른쪽): HTML WF MAP과 동일하게 xlim 역순으로 방향 교정
-                    ax.set_xlim(global_x_max, global_x_min)
-                    ax.set_ylim(global_y_min, global_y_max)
-
-            if sc is not None:
-                # 모든 wafer가 공유하는 단일 컬러바를 오른쪽에 배치
-                _cb_frac = fig_disp_w / (fig_disp_w + _cbar_w)
-                fig_map.subplots_adjust(left=0.02, right=_cb_frac, top=0.97, bottom=0.06)
-                cbar_ax = fig_map.add_axes([_cb_frac + 0.015, 0.12, 0.012, 0.76])
-                cbar = fig_map.colorbar(sc, cax=cbar_ax)
-                cbar.ax.tick_params(labelsize=6)
-            # 칩 격자가 선명하도록 해상도 상향
-            fig_map.savefig(tmp_map, format='jpg', dpi=max(int(dpi), 200), bbox_inches="tight",
-                            facecolor='white', pil_kwargs={'quality': map_q})
-            plt.close(fig_map)
-
-            # 고정 크기 배치: 25칸 고정이므로 aspect가 항상 동일 → wafer 수와 무관하게 같은 크기.
-            # 좌열 폭(LW)에 맞추되 세로가 map_avail을 넘으면만 축소.
-            _ratio = fig_h / (fig_disp_w + _cbar_w)
+            _ratio = res['map_ratio'] or 0.1
             pic_w, pic_h = LW, LW * _ratio
             if pic_h > map_avail:
                 pic_h = map_avail
                 pic_w = pic_h / _ratio
-            tmp_map.seek(0)
-            slide.shapes.add_picture(tmp_map, Inches(LX), Inches(Y_MAP), Inches(pic_w), Inches(pic_h))
-
-            # ---- 5. Trend Chart (우측 상단 - vehicle/with_vehicle/target 비교 + vehicle 1~99% 구름대) ----
-            import matplotlib.dates as mdates
-            tdf = item_df_full.copy()
-            tdf['tkout_time'] = pd.to_datetime(tdf['tkout_time'])
-            has_mask = 'mask' in tdf.columns
-            has_lot = 'fab_lot_id' in tdf.columns
-
-            # ---- 특정 항목: site별 모든 값 대신 tkout_time 기준 집계점으로 Trend 표시 ----
-            #   config.trend_tkout_agg = {ALIAS: 'P10'/'P90'/'MEDIAN'/'MEAN'}.
-            #   (lot/mask/wafer + tkout_time)별로 site 값을 1점으로 집계 → 같은 측정의 site 노이즈 제거.
-            _agg_map = getattr(GLOBAL_CONFIG, 'trend_tkout_agg', {}) or {}
-            _agg_spec = _agg_map.get(item_name) or _agg_map.get(spec_name)
-            # 'Window'가 들어간 항목(MAWIN 파생 포함)은 명시 설정이 없어도 Trend를 P10으로 집계
-            if not _agg_spec and ('window' in str(item_name).lower() or 'window' in str(spec_name).lower()):
-                _agg_spec = 'P10'
-            if _agg_spec:
-                _s = str(_agg_spec).strip().upper()
-                if _s in ('MEAN', 'AVG'):
-                    _aggf = 'mean'
-                elif _s in ('MEDIAN', 'P50'):
-                    _aggf = 'median'
-                else:
-                    _m = re.match(r'P(\d+(?:\.\d+)?)$', _s)
-                    _aggf = (lambda s, _q=min(max(float(_m.group(1)) / 100.0, 0.0), 1.0): s.quantile(_q)) if _m else 'median'
-                _gk = [k for k in ['mask', 'fab_lot_id', 'root_lot_id', 'wafer_id', 'match_key', 'tkout_time']
-                       if k in tdf.columns]
-                if 'tkout_time' in _gk and len(_gk) > 1:
-                    tdf = (tdf.dropna(subset=[item_name])
-                              .groupby(_gk, as_index=False).agg({item_name: _aggf}))
-                    tdf['tkout_time'] = pd.to_datetime(tdf['tkout_time'])
-
-            veh_df = tdf[tdf['mask'] == main_vehicle] if has_mask else tdf
-
-            def _draw_trend(ax):
-                # vehicle 기준 1~99% 구름대 + median (main vehicle 데이터만)
-                if len(veh_df) > 0:
-                    b = veh_df[['tkout_time', item_name]].dropna().sort_values('tkout_time')
-                    if len(b) > 0:
-                        b = b.assign(date=b['tkout_time'].dt.date)
-                        daily = b.groupby('date')[item_name].agg(
-                            median='median',
-                            q01=lambda x: x.quantile(0.01),
-                            q99=lambda x: x.quantile(0.99)).reset_index()
-                        daily['date'] = pd.to_datetime(daily['date'])
-                        daily = daily.set_index('date').sort_index()
-                        roll = daily.rolling('3D', min_periods=1).mean()
-                        ax.fill_between(roll.index, roll['q01'], roll['q99'], color=C_BAND, alpha=0.6, label=f'{main_vehicle} 1~99%', zorder=1)
-                        # 3일 기준 rolling median 라인 (검정색)
-                        ax.plot(roll.index, roll['median'], color='black', linewidth=1.5, alpha=1.0, zorder=6, label='3-day median')
-                # 색상 규칙: target lot=빨강(최상단) / 같은 vehicle 나머지=초록 / with_vehicle=회색
-                # 모든 마커는 얇은 검정 테두리(edgecolors='black', linewidths 얇게)를 적용
-                if has_lot:
-                    tgt = _select_target_lot(tdf)                 # 대상 lot (robust 매칭)
-                    tgt_idx = set(tgt.index)
-                    if has_mask:
-                        # 같은 vehicle이면서 대상 lot이 아닌 데이터 → 초록
-                        veh_other = tdf[(tdf['mask'] == main_vehicle) & (~tdf.index.isin(tgt_idx))]
-                        # with_vehicle(다른 vehicle) 데이터
-                        wv = tdf[tdf['mask'] != main_vehicle]
-                    else:
-                        veh_other = tdf[~tdf.index.isin(tgt_idx)]; wv = tdf.iloc[0:0]
-                    if len(veh_other) > 0:
-                        # 범례에 실제 vehicle 명(config.yaml) 표기
-                        ax.scatter(veh_other['tkout_time'], veh_other[item_name], s=10, alpha=0.5, color=C_VEHICLE, label=str(main_vehicle), edgecolors='black', linewidths=0.3, zorder=2)
-                    if len(wv) > 0:
-                        # with_vehicle은 mask(=실제 vehicle 명)별로 분리하여 각각 다른 색 + 개별 범례
-                        for _wi, _wv_name in enumerate(sorted(wv['mask'].dropna().unique()) if has_mask else []):
-                            _wv_grp = wv[wv['mask'] == _wv_name]
-                            if len(_wv_grp) == 0: continue
-                            _wv_color = WV_PALETTE[_wi % len(WV_PALETTE)]
-                            ax.scatter(_wv_grp['tkout_time'], _wv_grp[item_name], s=10, alpha=0.5, color=_wv_color, label=str(_wv_name), edgecolors='black', linewidths=0.3, zorder=3)
-                    if len(tgt) > 0:
-                        if multi_lot and lot_col:
-                            # 같은 root의 여러 lot_id → lot별 색으로 구분 (범례=lot_id)
-                            for _lot in target_lots:
-                                _tl = tgt[tgt[lot_col].astype(str) == _lot]
-                                if len(_tl) == 0: continue
-                                ax.scatter(_tl['tkout_time'], _tl[item_name], s=32, alpha=1.0,
-                                           color=lot_color[_lot], marker=lot_marker.get(_lot, 'o'),
-                                           label=f"{_lot}_{target_DC_step_id}", edgecolors='black', linewidths=0.5, zorder=12)
-                        else:
-                            # 단일 lot: 빨간색 + search_key 라벨 — 최상위 zorder로 다른 마커 위에 확실히 표시
-                            _tgt_label = f"{target_lot_id}_{target_DC_step_id}"
-                            ax.scatter(tgt['tkout_time'], tgt[item_name], s=32, alpha=1.0, color='red',
-                                       label=_tgt_label, edgecolors='black', linewidths=0.5, zorder=12)
-                else:
-                    for w in measured_wafers:
-                        grp = tdf[tdf[w_col] == w] if w_col in tdf.columns else tdf.iloc[0:0]
-                        ax.scatter(grp['tkout_time'], grp[item_name], s=10, alpha=0.7, color=w_colors.get(str(w), 'blue'), edgecolors='black', linewidths=0.3, zorder=2)
-                # spec line(s) — 방향(REPORT DIRECTION) 반영된 spec_low/high (범례에는 표시하지 않음)
-                if spec_low is not None:
-                    ax.axhline(y=float(spec_low), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
-                if spec_high is not None:
-                    ax.axhline(y=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
-
-                # ── y축 범위 자동 조정: target lot 데이터 + spec line이 모두 보이도록 ──
-                if not log_scale:
-                    try:
-                        _tgt_y = _select_target_lot(tdf)
-                    except Exception:
-                        _tgt_y = tdf.iloc[0:0]
-                    _yv = []
-                    for _d in (_tgt_y, veh_df):
-                        if len(_d):
-                            _yv += pd.to_numeric(_d[item_name], errors='coerce').dropna().tolist()
-                    if spec_low is not None:
-                        _yv.append(float(spec_low))
-                    if spec_high is not None:
-                        _yv.append(float(spec_high))
-                    _yv = [v for v in _yv if pd.notna(v)]
-                    if _yv:
-                        _ylo, _yhi = min(_yv), max(_yv)
-                        _pad = (_yhi - _ylo) * 0.08 if _yhi > _ylo else (abs(_yhi) * 0.05 or 1.0)
-                        ax.set_ylim(_ylo - _pad, _yhi + _pad)
-                ax.set_title("")
-                ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
-                ax.tick_params(axis='x', rotation=0, labelsize=7)
-                ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=6))
-                _label_axes(ax, xlabel="Date", ylabel=y_label)
-                if log_scale: ax.set_yscale('log')
-                ax.legend(fontsize=6, loc='upper left', frameon=False)   # Trend 범례 좌상단 고정
-                _remove_spines(ax)
-                ax.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
-                ax.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
-
-            fig_trend, ax_trend = plt.subplots(figsize=(4.55, 1.75))
-            _draw_trend(ax_trend)
-            fig_trend.savefig(tmp_trend, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
-            plt.close(fig_trend)
-            tmp_trend.seek(0)
-            slide.shapes.add_picture(tmp_trend, Inches(RX), Inches(Y_TREND), Inches(RW), Inches(1.95))
-
-            # index(alias) Trend scatter 차트만 RUN/TEMP에 alias명.png로 저장 (Anomaly/HTML 재사용)
-            try:
-                fig_trend_png, ax_trend_png = plt.subplots(figsize=(4.55, 2.0))
-                _draw_trend(ax_trend_png)
-                _html_dpi = getattr(GLOBAL_CONFIG, 'html_chart_dpi', 100)
-                fig_trend_png.savefig(f"RUN/TEMP/{safe_name}.png", dpi=_html_dpi, bbox_inches="tight")
-                plt.close(fig_trend_png)
-            except Exception as e:
-                print(f"[WARN] Failed to save RUN/TEMP/{safe_name}.png: {e}")
-
-            # 지표 (Metrics) 계산 및 저장
-            try:
-                # global = vehicle 모집단(veh_df), target = 리포팅 대상 lot(item_df=target_df)
-                _gsrc = veh_df if len(veh_df) > 0 else item_df
-                g_med = float(_gsrc[item_name].median())
-                g_std = float(_gsrc[item_name].std())
-
-                t_df = item_df
-                t_med = float(t_df[item_name].median()) if len(t_df) > 0 else g_med
-                t_std = float(t_df[item_name].std()) if len(t_df) > 1 else g_std
-
-                dev = round(abs(t_med - g_med) / g_std, 2) if g_std > 0 else 0.0
-
-                # spec-out(이상) 분류는 '해당 lot_id'에만 한정 — 같은 root의 형제 lot은 이상으로 분류하지 않음
-                if 'fab_lot_id' in t_df.columns:
-                    _t_spec = t_df[t_df['fab_lot_id'].astype(str) == str(target_lot_id)]
-                    if len(_t_spec) == 0:
-                        _t_spec = t_df
-                else:
-                    _t_spec = t_df
-
-                s_outs = []
-                for _, row in _t_spec.iterrows():
-                    v = row[item_name]
-                    if (spec_low is not None and v < float(spec_low)) or (spec_high is not None and v > float(spec_high)):
-                        cx = row.get('CHIP_X_ADJ', row.get(col_x, 0))
-                        cy = row.get('CHIP_Y_ADJ', row.get(col_y, 0))
-                        s_outs.append({"val": float(v), "x": float(cx), "y": float(cy)})
-                
-                metrics_dict[item_name] = {
-                    "item": item_name,
-                    "global_med": g_med,
-                    "global_std": g_std,
-                    "target_med": t_med,
-                    "target_std": t_std,
-                    "deviation": dev,
-                    "spec_outs": s_outs,
-                    "spec_out_count": len(s_outs)
-                }
-            except Exception as e:
-                print(f"[WARN] Failed to calculate metrics for {item_name}: {e}")
-
-            # ---- 6. Radius Plot (반경별 분포 + 3차 다항식 근사) ----
-            fig_rad, ax_rad = plt.subplots(figsize=(4.55, 1.75))
-            for w in measured_wafers:
-                w_df = item_df[item_df[w_col] == w].dropna(subset=[col_rad, item_name]).sort_values(by=col_rad)
-                if len(w_df) == 0: continue
-                p_color = w_colors.get(str(w), 'blue')
-                # 색=wafer, marker=lot_id (multi_lot일 때만 lot별 모양 구분)
-                if multi_lot and lot_col:
-                    for _lot in target_lots:
-                        _wl = w_df[w_df[lot_col].astype(str) == _lot]
-                        if len(_wl) == 0: continue
-                        ax_rad.scatter(_wl[col_rad], _wl[item_name], s=14, alpha=0.85, color=p_color,
-                                       marker=lot_marker[_lot], edgecolors='black', linewidths=0.2)
-                else:
-                    ax_rad.scatter(w_df[col_rad], w_df[item_name], s=12, alpha=0.85, color=p_color)
-                if len(w_df) >= 4:
-                    try:
-                        z = np.polyfit(w_df[col_rad], w_df[item_name], 3)
-                        p = np.poly1d(z)
-                        ax_rad.plot(np.linspace(w_df[col_rad].min(), w_df[col_rad].max(), 50),
-                                   p(np.linspace(w_df[col_rad].min(), w_df[col_rad].max(), 50)),
-                                   color=p_color, alpha=0.6, linewidth=1.5)
-                    except: pass
-            # lot_id marker 범례 (multi_lot)
-            if multi_lot:
-                from matplotlib.lines import Line2D
-                _lh = [Line2D([0], [0], marker=lot_marker[_lot], color='#444444', linestyle='none',
-                              markersize=6, label=str(_lot)) for _lot in target_lots]
-                ax_rad.legend(handles=_lh, fontsize=6, loc='upper left', bbox_to_anchor=(1.0, 1.0),
-                              frameon=False, title='Lot', title_fontsize=6)   # 차트 밖 우상단 고정
-            # Spec line은 그리되 범례(Spec Limit)는 표시하지 않음
-            if spec_low is not None:
-                ax_rad.axhline(y=float(spec_low), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
-            if spec_high is not None:
-                ax_rad.axhline(y=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
-            ax_rad.set_title("")
-            _label_axes(ax_rad, xlabel="Chip Radius", ylabel=y_label)
-            if log_scale: ax_rad.set_yscale('log')
-            _remove_spines(ax_rad)
-            ax_rad.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
-            ax_rad.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
-            fig_rad.savefig(tmp_rad, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
-            plt.close(fig_rad)
-            tmp_rad.seek(0)
-            slide.shapes.add_picture(tmp_rad, Inches(RX), Inches(Y_RAD), Inches(RW), Inches(1.95))
-
-            # ---- 7. Cumulative Plot (누적 분포) ----
-            fig_cum, ax_cum = plt.subplots(figsize=(4.55, 1.85))
-            for w in fixed_wafers:
-                p_color = w_colors.get(str(w), 'blue')
-                if multi_lot and lot_col:
-                    # 색=wafer, marker=lot_id. 같은 wafer라도 lot별로 모양이 달라짐
-                    for _lot in target_lots:
-                        _sub = item_df[(item_df[w_col] == w) & (item_df[lot_col].astype(str) == _lot)][item_name].dropna()
-                        if len(_sub) == 0: continue
-                        _sd = np.sort(_sub.values)
-                        _yv = np.arange(len(_sd)) / float(len(_sd) - 1) if len(_sd) > 1 else [1.0]
-                        ax_cum.plot(_sd, _yv, marker=lot_marker[_lot], linestyle='-', markersize=4,
-                                    linewidth=0.9, color=p_color, alpha=0.8)
-                elif w in grouped.groups:
-                    grp = grouped.get_group(w)
-                    sorted_data = np.sort(grp.values)
-                    yvals = np.arange(len(sorted_data)) / float(len(sorted_data) - 1) if len(sorted_data) > 1 else [1.0]
-                    # 같은 wafer_id 데이터를 선으로 연결 (마커 + 라인)
-                    ax_cum.plot(sorted_data, yvals, marker='.', linestyle='-', markersize=4, linewidth=1.0, color=p_color, alpha=0.8)
-            if multi_lot:
-                from matplotlib.lines import Line2D
-                _lh = [Line2D([0], [0], marker=lot_marker[_lot], color='#444444', linestyle='none',
-                              markersize=6, label=str(_lot)) for _lot in target_lots]
-                ax_cum.legend(handles=_lh, fontsize=6, loc='upper left', bbox_to_anchor=(1.0, 1.0),
-                              frameon=False, title='Lot', title_fontsize=6)   # 차트 밖 우상단 고정
-            # Spec line은 그리되 범례(Spec Limit)는 표시하지 않음
-            if spec_low is not None:
-                ax_cum.axvline(x=float(spec_low), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
-            if spec_high is not None:
-                ax_cum.axvline(x=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
-            ax_cum.set_title("")
-            _label_axes(ax_cum, xlabel=y_label, ylabel="Cumulative Prob.")
-            if log_scale: ax_cum.set_xscale('log')
-            _remove_spines(ax_cum)
-            ax_cum.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
-            ax_cum.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
-            fig_cum.savefig(tmp_cum, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
-            plt.close(fig_cum)
-            tmp_cum.seek(0)
-            slide.shapes.add_picture(tmp_cum, Inches(RX), Inches(Y_CUM), Inches(RW), Inches(2.15))
-
-            # ---- 임시 차트 버퍼 해제 (디스크 파일 없음) ----
-            for _b in [tmp_box, tmp_map, tmp_trend, tmp_rad, tmp_cum, tmp_leg]:
-                try: _b.close()
-                except Exception: pass
-            gc.collect()
+            slide.shapes.add_picture(_io.BytesIO(imgs['map']), Inches(LX), Inches(Y_MAP), Inches(pic_w), Inches(pic_h))
+            # Trend / Radius / Cumulative
+            slide.shapes.add_picture(_io.BytesIO(imgs['trend']), Inches(RX), Inches(Y_TREND), Inches(RW), Inches(1.95))
+            slide.shapes.add_picture(_io.BytesIO(imgs['rad']), Inches(RX), Inches(Y_RAD), Inches(RW), Inches(1.95))
+            slide.shapes.add_picture(_io.BytesIO(imgs['cum']), Inches(RX), Inches(Y_CUM), Inches(RW), Inches(2.15))
 
         except Exception as e:
             import traceback

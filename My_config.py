@@ -585,6 +585,18 @@ class Config:
         self.html_wfmap_dpi = 100          # HTML에 들어가는 WF MAP PNG 해상도(Score Board/anomaly)
 
         # ──────────────────────────────────────────────────────
+        # 병렬 렌더링 설정 (Parallel chart rendering)
+        # 차트/WF MAP 렌더링(matplotlib)을 워커 프로세스로 병렬화하여 발행 속도를 높인다.
+        # 워커 수는 실행 환경의 CPU 코어 수와 '가용' 메모리를 보고 자동 결정된다:
+        #   workers = min(코어수, (가용GB - reserve) / per_worker, 상한 8)
+        #   예) 4코어/50GB → 4워커, 2코어/10GB → 2워커, 가용 메모리 부족 → 1(직렬 폴백)
+        # ──────────────────────────────────────────────────────
+        self.parallel_workers = 0             # 워커 수 강제 지정 (0=환경 보고 자동 결정)
+        self.parallel_max_workers = 8         # 자동 결정 시 상한
+        self.parallel_mem_per_worker_gb = 1.2  # 워커 1개당 예상 메모리(GB) — pandas/matplotlib 상주 + 작업분
+        self.parallel_reserve_gb = 3.0        # 메인 프로세스(merged_df/PPT 조립) 몫으로 남겨둘 가용 메모리(GB)
+
+        # ──────────────────────────────────────────────────────
         # 차트 공통 색 팔레트 (Chart color palette, matplotlib hex)
         # 차트 내부 요소(제목/축/보조선/그리드)의 색을 한 곳에서 통일합니다.
         # ──────────────────────────────────────────────────────

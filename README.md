@@ -429,6 +429,24 @@ interpret_with_ai(findings, metrics, knowledge_text, _LLM_FN, ...)
 | `trend_tkout_agg` | `{'MAWIN':'P10'}` | 특정 항목은 site 전체 대신 tkout별 집계점(P10/P90/MEDIAN/MEAN)으로 Trend 표시 |
 | `vramp_lookback_days` | 365 | VRAMP MAX 조회 기간(일) |
 
+### 병렬 렌더링 (발행 속도)
+
+차트/WF MAP 렌더링(matplotlib, 발행 시간의 대부분)을 **워커 프로세스로 병렬화**해
+리포트 발행 속도를 높입니다. 워커 수는 실행 환경의 CPU 코어 수와 '가용' 메모리를
+보고 매 실행 시 자동 결정됩니다.
+
+| 변수 | 기본값 | 설명 |
+|------|--------|------|
+| `parallel_workers` | 0 | 워커 수 강제 지정 (0 = 환경 보고 자동 결정) |
+| `parallel_max_workers` | 8 | 자동 결정 시 상한 |
+| `parallel_mem_per_worker_gb` | 1.2 | 워커 1개당 예상 메모리(GB) |
+| `parallel_reserve_gb` | 3.0 | 메인 프로세스 몫으로 남겨둘 가용 메모리(GB) |
+
+- 자동 결정식: `workers = min(코어수, 상한, (가용GB − reserve) ÷ per_worker)` — 예) 4코어/50GB → 4워커, 2코어/10GB → 2워커.
+- 가용 메모리가 부족하면 자동으로 **1(직렬)** 로 폴백해 종전과 동일하게 동작합니다(저사양 안전).
+- 렌더링 결과(이미지 bytes)는 REPORT ORDER 순서대로 메인 프로세스가 PPT에 조립하므로 **산출물(PPT/HTML)은 직렬 실행과 동일**합니다.
+- ⚠️ Windows 프로세스 spawn은 워커가 `__main__`(Main.py)을 다시 import 하므로, Main.py 실행 본문은 반드시 `if __name__ == "__main__":` 가드 안에 있어야 합니다(현재 구조 유지 필수).
+
 ---
 
 ## 리포트 구성 요소
