@@ -682,7 +682,7 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
         tbl = slide.shapes.add_table(nrows, ncols, Inches(0.22), Inches(0.72),
                                      Inches(12.89), table_height).table
 
-        item_w = 3.4    # ITEM명 최대 45자를 한 줄에 담을 폭 확보
+        item_w = 2.25   # ITEM명 폭(약 45자→30자, 15자 축소). 남는 폭은 wafer 열로 분배
         ww = max(0.14, (12.89 - item_w) / max(len(order), 1))
         tbl.columns[0].width = Inches(item_w)
         for j in range(1, ncols):
@@ -2455,7 +2455,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             white = RGBColor(255, 255, 255); black = RGBColor(0, 0, 0)
 
             # 고정 열 너비: Index 넓게(잘림 방지) + wafer 좁게(상한 캡으로 일정 유지)
-            _idx_w, _stat_w = 3.4, 0.55   # Index명 최대 45자를 한 줄에 담을 폭 확보
+            _idx_w, _stat_w = 2.25, 0.55   # Index명 폭(약 45자→30자, 15자 축소)
             _ww = min(0.40, max(0.14, (13.333 - 0.24 - _idx_w - _stat_w) / max(len(_ordered), 1)))
             _tbl_w = min(13.10, _idx_w + _stat_w + _ww * len(_ordered))
 

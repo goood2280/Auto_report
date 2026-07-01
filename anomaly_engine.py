@@ -422,7 +422,11 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             return None
 
     def _specout_by_wafer(tgt_it, col, it, lo, hi):
-        """target lot을 wafer별 spec-out pt 개수로 그룹핑 → (텍스트, 총개수, {pt개수: [wafer,...]})."""
+        """target lot을 wafer별 (총 측정 pt, spec-out pt)로 그룹핑.
+
+        반환: (텍스트, 총 spec-out개수, {spec-out pt개수: [wafer,...]}).
+        텍스트 형식은 '총 몇pt 측정 중 몇pt out'을 함께 표기 — 예: "150pt 중 5pt out: #3, #7".
+        """
         _v = pd.to_numeric(tgt_it[it], errors='coerce')
         _om = pd.Series(False, index=tgt_it.index)
         if lo is not None: _om = _om | (_v < lo)
@@ -430,14 +434,22 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         n_total = int(_om.sum())
         if n_total == 0:
             return '', 0, {}
-        by_cnt = defaultdict(list)
-        for w, cnt in tgt_it[_om.values].groupby(col).size().items():
+        measured_by_w = tgt_it.groupby(col).size()          # wafer별 총 측정 pt
+        # (측정 pt, out pt)가 같은 wafer끼리 묶어 "{측정}pt 중 {out}pt out: #.." 표기
+        by_key = defaultdict(list)
+        for w, ocnt in tgt_it[_om.values].groupby(col).size().items():
+            mcnt = int(measured_by_w.get(w, ocnt))
             wi = _waf_int(w)
-            by_cnt[int(cnt)].append(wi if wi is not None else w)
+            by_key[(mcnt, int(ocnt))].append(wi if wi is not None else w)
         txt = ' / '.join(
-            f"{c}pt out: {', '.join('#' + str(w) for w in sorted(by_cnt[c], key=lambda z: (z is None, z)))}"
-            for c in sorted(by_cnt))
-        return txt, n_total, {int(c): sorted(by_cnt[c], key=lambda z: (z is None, z)) for c in by_cnt}
+            f"{m}pt 중 {o}pt out: "
+            + ', '.join('#' + str(w) for w in sorted(by_key[(m, o)], key=lambda z: (z is None, z)))
+            for (m, o) in sorted(by_key, key=lambda k: (k[0], k[1])))
+        # 하위호환 map: {out pt개수: [wafer,...]}
+        _cnt_map = defaultdict(list)
+        for (m, o), ws in by_key.items():
+            _cnt_map[o].extend(ws)
+        return txt, n_total, {int(o): sorted(v, key=lambda z: (z is None, z)) for o, v in _cnt_map.items()}
 
     # ---- 각 Index 항목별 '한 개'의 이상 finding ----
     #   유형(우선순위): spec-out(CRITICAL) > median 이탈 > 산포 확대 (WARNING).
@@ -583,7 +595,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         if n_out > 0:
             findings.append(_finding(
                 "CRITICAL", "SPEC_OUT", it,
-                f"Spec-out: {it} ({n_out}개 이탈)", detail.strip()))
+                f"Spec-out: {it}", detail.strip()))
             continue
 
         if lot_dev > sigma_med:
