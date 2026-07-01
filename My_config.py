@@ -194,21 +194,21 @@ _REPORT_HTML_TEMPLATE = r"""<!DOCTYPE html>
            좌측 고정열: LOT_ID / category / Item
            (클래스 기반 sticky — category 셀 rowspan 병합에도 안 깨짐)
            ============================================================ */
-        /* category (가장 왼쪽 고정열) */
+        /* category (가장 왼쪽 고정열) — 기존 64px의 1.2배 = 77px */
         .score-board th.sb-cat, .score-board td.sb-cat {
             position: sticky;
             left: 0;
             z-index: 6;
-            width: 64px; min-width: 64px; max-width: 64px;
+            width: 77px; min-width: 77px; max-width: 77px;
             background-color: #ebf4ff;
         }
-        /* Item (두번째 고정열, category 폭 64px 만큼 오프셋) */
+        /* Item (두번째 고정열, category 폭 77px 만큼 오프셋) — 기존 150px의 2배 = 300px */
         /* Item명이 길어도 잘리지 않도록 폭을 넉넉히 + 셀 안에서 줄바꿈 허용 */
         .score-board th.sb-item, .score-board td.sb-item {
             position: sticky;
-            left: 64px;
+            left: 77px;
             z-index: 6;
-            width: 150px; min-width: 150px; max-width: 150px;
+            width: 300px; min-width: 300px; max-width: 300px;
             background-color: #ebf4ff;
             white-space: normal;       /* 길면 줄바꿈(잘림 방지) */
             word-break: break-word;
@@ -220,7 +220,7 @@ _REPORT_HTML_TEMPLATE = r"""<!DOCTYPE html>
             position: sticky;
             left: 0;
             z-index: 12;
-            width: 214px; min-width: 214px; max-width: 214px;  /* 64(cat)+150(item) */
+            width: 377px; min-width: 377px; max-width: 377px;  /* 77(cat)+300(item) */
             text-align: center;
         }
         /* 헤더의 고정열 셀은 top(thead) + left 동시 고정(코너) → z-index 상향 */

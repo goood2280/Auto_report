@@ -884,7 +884,8 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
         ax.scatter(g[cx].astype(float), g[cy].astype(float), c=g[item].astype(float),
                    cmap=cmap, norm=norm, s=s, marker='s', linewidths=0)
         ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal', adjustable='box'); ax.set_facecolor('#f8f9fa')
-        ax.set_xlim(_gx0 - _xpad, _gx1 + _xpad)
+        # chip x 정방향(chip #1=왼쪽, 큰 번호=오른쪽): invert_xaxis 대신 xlim을 역순으로 두어 방향 교정
+        ax.set_xlim(_gx1 + _xpad, _gx0 - _xpad)
         ax.set_ylim(_gy0 - _ypad, _gy1 + _ypad)
         for sp in ax.spines.values():
             sp.set_visible(False)
@@ -1009,7 +1010,8 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
         ax.scatter(g[cx].astype(float), g[cy].astype(float), c=colors,
                    s=s, marker='s', linewidths=0)
         ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal', adjustable='box'); ax.set_facecolor('#f8f9fa')
-        ax.set_xlim(gx0 - xpad, gx1 + xpad)
+        # chip x 정방향(chip #1=왼쪽): xlim 역순으로 방향 교정
+        ax.set_xlim(gx1 + xpad, gx0 - xpad)
         ax.set_ylim(gy0 - ypad, gy1 + ypad)
         for sp in ax.spines.values():
             sp.set_visible(False)
@@ -1159,8 +1161,8 @@ def calcaulate_description_image_info_dict(description_ppt_path, img_quality=20)
     파일만 있으면 되고, 이후 insert_plots가 매칭된 슬라이드를 python-pptx로 **직접 복사**해
     삽입한다. (PowerPoint 설치·COM 불필요, RUN/TEMP/desc_slide_*.png 미생성)
 
-    반환: {category_text_lower: source_slide_object}. source_slide는 원본 Presentation을
-    참조하므로, 반환 dict가 살아있는 동안 원본 패키지도 유지된다.
+    반환: {category_text_lower: {'slide': slide, 'w': src_slide_width, 'h': src_slide_height}}.
+    source slide/크기를 함께 넘겨, insert_plots가 현재 PPT 크기에 맞게 스케일 복사한다.
     """
     from pptx import Presentation
 
@@ -1171,6 +1173,7 @@ def calcaulate_description_image_info_dict(description_ppt_path, img_quality=20)
 
     try:
         src_prs = Presentation(description_ppt_path)
+        _src_w, _src_h = int(src_prs.slide_width), int(src_prs.slide_height)
         for slide in src_prs.slides:
             best_text, min_dist = None, float('inf')
             # 슬라이드 내 모든 도형 스캔 후 (0,0) 좌상단에 가장 가까운 텍스트를 Category로
@@ -1189,18 +1192,19 @@ def calcaulate_description_image_info_dict(description_ppt_path, img_quality=20)
             if best_text:
                 key = best_text.replace('\x0b', '').strip().lower()
                 if key:
-                    desc_dict[key] = slide
+                    desc_dict[key] = {'slide': slide, 'w': _src_w, 'h': _src_h}
     except Exception as e:
         print(f"[ERROR] Description PPT 파싱 중 에러 발생: {e}")
 
     return desc_dict
 
 
-def _copy_slide_into(dest_prs, src_slide):
+def _copy_slide_into(dest_prs, src_slide, src_w=None, src_h=None):
     """src_slide(다른 Presentation의 슬라이드)를 dest_prs에 새 슬라이드로 직접 복사.
 
     python-pptx로 도형 XML을 복사하고, 이미지 등 관계(rel)를 dest로 옮기며 rId를
-    재매핑한다. PNG 변환 없이 원본 슬라이드 내용을 그대로 삽입한다.
+    재매핑한다. 원본 슬라이드 크기(src_w/src_h)가 현재 PPT와 다르면 각 도형의
+    위치/크기를 스케일하여 **현재 PPT 크기에 맞게 조정**한다(PNG 변환 없이 이미지처럼 꽉 차게).
     """
     import copy as _copy
     _R = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
@@ -1238,6 +1242,28 @@ def _copy_slide_into(dest_prs, src_slide):
             for attr in list(el.attrib):
                 if attr.startswith(_R) and el.attrib[attr] in rid_map:
                     el.attrib[attr] = rid_map[el.attrib[attr]]
+
+    # 원본↔현재 슬라이드 크기 차이만큼 각 도형의 위치/크기 스케일 (현재 PPT에 맞춤)
+    try:
+        _sw = int(src_w) if src_w else int(dest_prs.slide_width)
+        _sh = int(src_h) if src_h else int(dest_prs.slide_height)
+        sx = dest_prs.slide_width / _sw if _sw else 1.0
+        sy = dest_prs.slide_height / _sh if _sh else 1.0
+        if abs(sx - 1.0) > 1e-6 or abs(sy - 1.0) > 1e-6:
+            for sh in dest_slide.shapes:
+                try:
+                    if sh.left is not None:
+                        sh.left = int(round(sh.left * sx))
+                    if sh.top is not None:
+                        sh.top = int(round(sh.top * sy))
+                    if sh.width is not None:
+                        sh.width = int(round(sh.width * sx))
+                    if sh.height is not None:
+                        sh.height = int(round(sh.height * sy))
+                except Exception:
+                    pass
+    except Exception as _se:
+        print(f"[WARN] description 슬라이드 크기 스케일 실패: {_se}")
     return dest_slide
 
 
@@ -1434,25 +1460,30 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             cat2 = str(spec_data.loc[spec_name, 'CAT2']).strip()
             if cat2 != current_cat and cat2.lower() != 'nan':
                 current_cat = cat2
-                matched_slide = None
+                matched_entry = None
                 ck = cat2.lower().strip()
                 # 1) CAT2 글자와 정확히 일치하는 description 슬라이드 우선
-                for key, _src_slide in description_image_info_dict.items():
+                for key, _entry in description_image_info_dict.items():
                     if key.lower().strip() == ck:
-                        matched_slide = _src_slide
+                        matched_entry = _entry
                         break
                 # 2) 없으면 CAT2 글자가 포함(부분일치)된 description 슬라이드 탐색
-                if matched_slide is None and ck:
-                    for key, _src_slide in description_image_info_dict.items():
+                if matched_entry is None and ck:
+                    for key, _entry in description_image_info_dict.items():
                         kl = key.lower().strip()
                         if ck in kl or kl in ck:
-                            matched_slide = _src_slide
+                            matched_entry = _entry
                             break
 
-                # CAT2 그룹 시작 전에 description 슬라이드를 python-pptx로 직접 복사해 삽입 (PNG 변환 없음)
-                if matched_slide is not None:
+                # CAT2 그룹 시작 전에 description 슬라이드를 현재 PPT 크기에 맞게 복사 삽입 (PNG 변환 없음)
+                if matched_entry is not None:
                     try:
-                        _copy_slide_into(prs, matched_slide)
+                        # 하위호환: entry가 dict({'slide','w','h'})이거나 과거 slide 객체일 수 있음
+                        if isinstance(matched_entry, dict):
+                            _copy_slide_into(prs, matched_entry.get('slide'),
+                                             src_w=matched_entry.get('w'), src_h=matched_entry.get('h'))
+                        else:
+                            _copy_slide_into(prs, matched_entry)
                     except Exception as _de:
                         print(f"[WARN] CAT2 '{cat2}' description 슬라이드 복사 실패: {_de}")
                 else:
@@ -1933,7 +1964,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                     ax.set_aspect('equal', adjustable='box')   # 웨이퍼 정원형 유지
                     for spine in ax.spines.values():
                         spine.set_visible(False)
-                    ax.set_xlim(global_x_min, global_x_max)
+                    # chip x 정방향(chip #1=왼쪽, 13=오른쪽): HTML WF MAP과 동일하게 xlim 역순으로 방향 교정
+                    ax.set_xlim(global_x_max, global_x_min)
                     ax.set_ylim(global_y_min, global_y_max)
 
             if sc is not None:
@@ -2032,14 +2064,14 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                             for _lot in target_lots:
                                 _tl = tgt[tgt[lot_col].astype(str) == _lot]
                                 if len(_tl) == 0: continue
-                                ax.scatter(_tl['tkout_time'], _tl[item_name], s=26, alpha=1.0,
+                                ax.scatter(_tl['tkout_time'], _tl[item_name], s=32, alpha=1.0,
                                            color=lot_color[_lot], marker=lot_marker.get(_lot, 'o'),
-                                           label=f"{_lot}_{target_DC_step_id}", edgecolors='black', linewidths=0.4, zorder=10)
+                                           label=f"{_lot}_{target_DC_step_id}", edgecolors='black', linewidths=0.5, zorder=12)
                         else:
-                            # 단일 lot: 빨간색 + search_key 라벨
+                            # 단일 lot: 빨간색 + search_key 라벨 — 최상위 zorder로 다른 마커 위에 확실히 표시
                             _tgt_label = f"{target_lot_id}_{target_DC_step_id}"
-                            ax.scatter(tgt['tkout_time'], tgt[item_name], s=24, alpha=1.0, color='red',
-                                       label=_tgt_label, edgecolors='black', linewidths=0.4, zorder=10)
+                            ax.scatter(tgt['tkout_time'], tgt[item_name], s=32, alpha=1.0, color='red',
+                                       label=_tgt_label, edgecolors='black', linewidths=0.5, zorder=12)
                 else:
                     for w in measured_wafers:
                         grp = tdf[tdf[w_col] == w] if w_col in tdf.columns else tdf.iloc[0:0]
@@ -2049,6 +2081,26 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                     ax.axhline(y=float(spec_low), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
                 if spec_high is not None:
                     ax.axhline(y=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
+
+                # ── y축 범위 자동 조정: target lot 데이터 + spec line이 모두 보이도록 ──
+                if not log_scale:
+                    try:
+                        _tgt_y = _select_target_lot(tdf)
+                    except Exception:
+                        _tgt_y = tdf.iloc[0:0]
+                    _yv = []
+                    for _d in (_tgt_y, veh_df):
+                        if len(_d):
+                            _yv += pd.to_numeric(_d[item_name], errors='coerce').dropna().tolist()
+                    if spec_low is not None:
+                        _yv.append(float(spec_low))
+                    if spec_high is not None:
+                        _yv.append(float(spec_high))
+                    _yv = [v for v in _yv if pd.notna(v)]
+                    if _yv:
+                        _ylo, _yhi = min(_yv), max(_yv)
+                        _pad = (_yhi - _ylo) * 0.08 if _yhi > _ylo else (abs(_yhi) * 0.05 or 1.0)
+                        ax.set_ylim(_ylo - _pad, _yhi + _pad)
                 ax.set_title("")
                 ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
                 ax.tick_params(axis='x', rotation=0, labelsize=7)
