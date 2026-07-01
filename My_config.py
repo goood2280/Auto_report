@@ -539,6 +539,10 @@ class Config:
         self.anomaly_site_recurrence_min_lots = 2  # 동일 site spec-out 재발 최소 lot 수
         self.anomaly_pchk_check = True           # 동일 site PCHK(reformatter SPEC) 이탈 시 측정 의심 표기
         self.scoreboard_wfmap_min_pts = 50       # Score Board(HTML)에 wafer별 WF MAP을 넣을 최소 측정 point 수
+        # WF MAP 제외 키워드: item(ALIAS)명에 아래 키워드가 포함되면 측정 point 수와
+        # 무관하게 Score Board WF MAP을 표시하지 않는다. (예: PCHK 측정 항목)
+        # 새 키워드를 추가하려면 이 리스트에 문자열을 넣으면 된다.
+        self.wfmap_exclude_keywords = ['PCHK']
 
         # ── [0] Anomaly Trend Chart 우측 spec-out WF MAP ──
         #   SPEC OUT(이상) 항목은 Trend 차트 우측에 spec-out(=flier) 칩맵을 최대한 많이 그린다.

@@ -723,7 +723,19 @@ if reformatter_check :
                     pivot_group = pivot_group.T
                     VIP_group_raw = pd.merge(pivot_group, reformatter[['REPORT ORDER','PPT_ONLY']], right_index=True, left_index=True, how='right').sort_values('REPORT ORDER').dropna(subset=['REPORT ORDER'])
                     VIP_group = VIP_group_raw.drop('REPORT ORDER',axis=1).dropna(how='all')
-                    VIP_group_raw = VIP_group_raw[(VIP_group_raw['PPT_ONLY'] != 1.0)]
+                    # PPT_ONLY=True 항목은 HTML score board에서 제외(PPT에만 표시).
+                    # 값이 bool/1.0/"True"/"1"/"Y" 등 어떤 형태여도 truthy로 인식하도록 처리.
+                    def _ppt_only_true(v):
+                        if pd.isna(v):
+                            return False
+                        if isinstance(v, str):
+                            return v.strip().lower() in ('true', '1', '1.0', 'y', 'yes', 't')
+                        try:
+                            return float(v) == 1.0
+                        except (TypeError, ValueError):
+                            return bool(v)
+                    _ppt_mask = VIP_group_raw['PPT_ONLY'].map(_ppt_only_true)
+                    VIP_group_raw = VIP_group_raw[~_ppt_mask]   # HTML용: PPT_ONLY 제외
                     VIP_group_raw = VIP_group_raw.drop('PPT_ONLY', axis=1)
 
                     # VIP_group 생성 *presentation 생성용 dataframe
@@ -933,9 +945,13 @@ if reformatter_check :
 
                     # wafer별 WF MAP (≥min_pts 측정 index만) — index 점수행 아래에 'WF MAP 행'으로, wafer 열에 정렬
                     _wf_min = getattr(GLOBAL_CONFIG, 'scoreboard_wfmap_min_pts', 50)
+                    _wf_excl = [str(k).upper() for k in getattr(GLOBAL_CONFIG, 'wfmap_exclude_keywords', [])]
                     wfmaps_by_item = {}
                     try:
                         for _it in list(dict.fromkeys([idx[1] for idx, _ in sb_rows])):
+                            # 제외 키워드(예: PCHK)가 포함된 item은 pt수와 무관하게 WF MAP 미표시
+                            if any(_kw in str(_it).upper() for _kw in _wf_excl):
+                                continue
                             _dir = 'BOTH'
                             _slow = _shigh = None
                             try:

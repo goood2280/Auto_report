@@ -2116,41 +2116,12 @@ def insert_plots(merged_df, prs, description_image_info_dict,
     print(f"[insert_plots] 차트 생성 완료 - 총 {total_items}개 index 처리")
     print("=" * 60)
 
-    # ==================== 마지막 Summary 페이지 (index별 집계 테이블) ====================
+    # ==================== 마지막 Index Aggregation Table 페이지(들) ====================
     # 값 산출 기준: REPORT DIRECTION → BOTH=Median / UPPER=P90 / LOWER=P10
+    # index가 많으면 30개씩 페이지 분할. 모든 페이지가 동일한 (lot,wafer) 컬럼 구성을
+    # 공유하여 칸 크기가 페이지마다 바뀌지 않도록 한다.
     if summary_rows:
         try:
-            s_slide = prs.slides.add_slide(prs.slide_layouts[6])
-            sbg = s_slide.background
-            sbg.fill.solid(); sbg.fill.fore_color.rgb = RGBColor(255, 255, 255)
-
-            # 상단 헤더 바
-            hdr = s_slide.shapes.add_shape(1, Inches(0), Inches(0), prs.slide_width, Inches(0.62))
-            hdr.fill.solid(); hdr.fill.fore_color.rgb = RGBColor(*NAVY_RGB); hdr.line.fill.background()
-            htf = hdr.text_frame; htf.word_wrap = True
-            htf.margin_left = Inches(0.2)
-            hp = htf.paragraphs[0]
-            hp.text = "Index Aggregation Table"
-            hp.font.size = Pt(18); hp.font.bold = True
-            hp.font.color.rgb = RGBColor(255, 255, 255); hp.font.name = FONT
-            hp.alignment = PP_ALIGN.LEFT
-
-            # ---- (lot, wafer) 컬럼 구성: target lot 먼저, lot내 wafer 오름차순 ----
-            _all_keys = set()
-            for _r in summary_rows:
-                _all_keys.update(_r.get('wafer_vals', {}).keys())
-            _lots = sorted({k[0] for k in _all_keys},
-                           key=lambda l: (0 if str(l) == str(target_lot_id) else 1, str(l)))
-            def _wkey(k):
-                return k[1] if isinstance(k[1], int) else 10 ** 9
-            _lot_groups = []   # (lot, [(lot,wafer), ...])
-            _ordered = []
-            for _lot in _lots:
-                _wc = sorted([k for k in _all_keys if k[0] == _lot], key=_wkey)
-                if _wc:
-                    _lot_groups.append((_lot, _wc))
-                    _ordered.extend(_wc)
-
             def _set_cell_borders(cell):
                 from pptx.oxml.xmlchemy import OxmlElement
                 tcPr = cell._tc.get_or_add_tcPr()
@@ -2171,12 +2142,15 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 if f != 0 and (abs(f) > 10000 or abs(f) <= 0.0001):
                     mant, exp = f"{f:.1E}".split('E')
                     return f"{mant}E{int(exp)}"
-                return f"{f:.3f}"
+                if abs(f) >= 100:          # 100 이상은 소수점 첫째자리까지 (예: 1234.5)
+                    return f"{f:.1f}"
+                return f"{f:.3f}"          # 100 미만은 기존대로(소수점 3자리)
 
-            def _style(cell, text, bg, fg, bold=False, sz=8):
+            def _style(cell, text, bg, fg, bold=False, sz=8, wrap=False):
                 cell.text = str(text)
                 cell.fill.solid(); cell.fill.fore_color.rgb = bg
                 cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+                cell.text_frame.word_wrap = wrap
                 _set_cell_borders(cell)
                 cell.margin_left = Inches(0.01); cell.margin_right = Inches(0.01)
                 cell.margin_top = Inches(0.0); cell.margin_bottom = Inches(0.0)
@@ -2184,49 +2158,86 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                     par.font.size = Pt(sz); par.font.bold = bold; par.font.name = FONT
                     par.font.color.rgb = fg; par.alignment = PP_ALIGN.CENTER
 
-            ncol = 2 + len(_ordered)
-            nrow = 2 + len(summary_rows)
-            top = Inches(0.78)
-            tbl_h = Inches(min(6.5, max(0.26 * nrow, 0.6)))
-            table = s_slide.shapes.add_table(nrow, ncol, Inches(0.12), top,
-                                             prs.slide_width - Inches(0.24), tbl_h).table
-            _idx_w, _stat_w = 1.35, 0.62
-            table.columns[0].width = Inches(_idx_w)
-            table.columns[1].width = Inches(_stat_w)
-            _ww = max(0.16, (13.333 - 0.24 - _idx_w - _stat_w) / max(len(_ordered), 1))
-            for _ci in range(2, ncol):
-                table.columns[_ci].width = Inches(_ww)
+            # ---- (lot, wafer) 컬럼 구성(전체 index 기준, 모든 페이지 공통) ----
+            _all_keys = set()
+            for _r in summary_rows:
+                _all_keys.update(_r.get('wafer_vals', {}).keys())
+            _lots = sorted({k[0] for k in _all_keys},
+                           key=lambda l: (0 if str(l) == str(target_lot_id) else 1, str(l)))
+            def _wkey(k):
+                return k[1] if isinstance(k[1], int) else 10 ** 9
+            _lot_groups = []   # (lot, [(lot,wafer), ...])
+            _ordered = []
+            for _lot in _lots:
+                _wc = sorted([k for k in _all_keys if k[0] == _lot], key=_wkey)
+                if _wc:
+                    _lot_groups.append((_lot, _wc))
+                    _ordered.extend(_wc)
 
             NAVY = RGBColor(*NAVY_RGB)
             LOTBG = RGBColor(0xD9, 0xE1, 0xF2)
             WAFBG = RGBColor(0xF0, 0xF0, 0xF0)
             white = RGBColor(255, 255, 255); black = RGBColor(0, 0, 0)
 
-            # 헤더: Index/Stat 세로 병합, lot 가로 병합 + 그 아래 #wafer
-            table.cell(0, 0).merge(table.cell(1, 0)); _style(table.cell(0, 0), "Index", NAVY, white, True, 9)
-            table.cell(0, 1).merge(table.cell(1, 1)); _style(table.cell(0, 1), "Stat", NAVY, white, True, 9)
-            _ci = 2
-            for _lot, _wc in _lot_groups:
-                _c0 = _ci; _c1 = _ci + len(_wc) - 1
-                if _c1 > _c0:
-                    table.cell(0, _c0).merge(table.cell(0, _c1))
-                _style(table.cell(0, _c0), str(_lot), LOTBG, black, True, 8)
-                for (_lot2, _waf) in _wc:
-                    _style(table.cell(1, _ci), f"#{_waf}", WAFBG, black, True, 7)
-                    _ci += 1
+            # 고정 열 너비: Index 넓게(잘림 방지) + wafer 좁게(상한 캡으로 일정 유지)
+            _idx_w, _stat_w = 2.05, 0.55
+            _ww = min(0.40, max(0.14, (13.333 - 0.24 - _idx_w - _stat_w) / max(len(_ordered), 1)))
+            _tbl_w = min(13.10, _idx_w + _stat_w + _ww * len(_ordered))
 
-            # 본문: Index | Stat | (lot,wafer)별 값 (전 셀 흰색, 빨강 강조 없음)
-            for _ri, _r in enumerate(summary_rows, start=2):
-                _style(table.cell(_ri, 0), str(_r['index']), white, black, True, 8)
-                _style(table.cell(_ri, 1), str(_r.get('stat', '')), white, black, False, 8)
-                _wv = _r.get('wafer_vals', {})
-                for _cj, _key in enumerate(_ordered, start=2):
-                    _val = _wv.get(_key)
-                    _style(table.cell(_ri, _cj), '' if _val is None else _fmt_num(_val), white, black, False, 7)
+            _CHUNK = 30
+            _total_pages = (len(summary_rows) - 1) // _CHUNK + 1
+            for _pg in range(_total_pages):
+                _chunk = summary_rows[_pg * _CHUNK:(_pg + 1) * _CHUNK]
+                s_slide = prs.slides.add_slide(prs.slide_layouts[6])
+                s_slide.background.fill.solid()
+                s_slide.background.fill.fore_color.rgb = RGBColor(255, 255, 255)
 
-            print(f"[insert_plots] Summary 페이지 생성 완료 ({len(summary_rows)}개 index)")
+                # 상단 헤더 바
+                hdr = s_slide.shapes.add_shape(1, Inches(0), Inches(0), prs.slide_width, Inches(0.62))
+                hdr.fill.solid(); hdr.fill.fore_color.rgb = NAVY; hdr.line.fill.background()
+                htf = hdr.text_frame; htf.word_wrap = True; htf.margin_left = Inches(0.2)
+                hp = htf.paragraphs[0]
+                _sfx = f"  ({_pg + 1}/{_total_pages})" if _total_pages > 1 else ""
+                hp.text = f"Index Aggregation Table{_sfx}"
+                hp.font.size = Pt(18); hp.font.bold = True
+                hp.font.color.rgb = RGBColor(255, 255, 255); hp.font.name = FONT
+                hp.alignment = PP_ALIGN.LEFT
+
+                ncol = 2 + len(_ordered)
+                nrow = 2 + len(_chunk)
+                tbl_h = Inches(min(6.5, max(0.26 * nrow, 0.6)))
+                table = s_slide.shapes.add_table(nrow, ncol, Inches(0.12), Inches(0.78),
+                                                 Inches(_tbl_w), tbl_h).table
+                table.columns[0].width = Inches(_idx_w)
+                table.columns[1].width = Inches(_stat_w)
+                for _ci in range(2, ncol):
+                    table.columns[_ci].width = Inches(_ww)
+
+                # 헤더: Index/Stat 세로 병합, lot 가로 병합 + 그 아래 #wafer
+                table.cell(0, 0).merge(table.cell(1, 0)); _style(table.cell(0, 0), "Index", NAVY, white, True, 9, wrap=True)
+                table.cell(0, 1).merge(table.cell(1, 1)); _style(table.cell(0, 1), "Stat", NAVY, white, True, 8)
+                _ci = 2
+                for _lot, _wc in _lot_groups:
+                    _c0 = _ci; _c1 = _ci + len(_wc) - 1
+                    if _c1 > _c0:
+                        table.cell(0, _c0).merge(table.cell(0, _c1))
+                    _style(table.cell(0, _c0), str(_lot), LOTBG, black, True, 8)
+                    for (_lot2, _waf) in _wc:
+                        _style(table.cell(1, _ci), f"#{_waf}", WAFBG, black, True, 7)
+                        _ci += 1
+
+                # 본문: Index | Stat | (lot,wafer)별 값
+                for _ri, _r in enumerate(_chunk, start=2):
+                    _style(table.cell(_ri, 0), str(_r['index']), white, black, True, 8, wrap=True)  # Index명 잘림 방지
+                    _style(table.cell(_ri, 1), str(_r.get('stat', '')), white, black, False, 8)
+                    _wv = _r.get('wafer_vals', {})
+                    for _cj, _key in enumerate(_ordered, start=2):
+                        _val = _wv.get(_key)
+                        _style(table.cell(_ri, _cj), '' if _val is None else _fmt_num(_val), white, black, False, 7)
+
+            print(f"[insert_plots] Index Aggregation Table 생성 완료 ({len(summary_rows)}개 index, {_total_pages}페이지)")
         except Exception as _e:
-            print(f"[WARN] Summary 페이지 생성 실패: {_e}")
+            print(f"[WARN] Index Aggregation Table 생성 실패: {_e}")
 
     return prs, metrics_dict
 
