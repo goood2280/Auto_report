@@ -1823,67 +1823,59 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             gdim = max(nx, ny)
             map_avail = SLIDE_BOTTOM - Y_MAP
 
-            # ---- WF MAP 배치: 각 wafer(및 PGM)를 '개별 격자 셀'로 그린다 ----
-            # (HTML Score Board WF MAP과 동일한 die별 색(_wfmap_norm/_wfmap_cmap) 개별 격자.)
-            # 25매를 한 줄로 늘어놓으면 얇은 띠로 뭉개지므로, 셀이 최대한 크고 정사각형에
-            # 가깝도록 여러 행으로 재배치한다(가용영역 LW x map_avail 비율 기준 열 수 산정).
-            import math as _math
-            # (PGM, wafer) 셀을 평탄화
-            flat_cells = []   # (sub_name, sub_grp, w)
-            for _sub_name, _sub_grp in sub_groups:
-                for _w in measured_sorted:
-                    flat_cells.append((_sub_name, _sub_grp, _w))
-            total_cells = max(len(flat_cells), 1)
+            # ---- WF MAP 배치: 행=PGM(pt), 열=wafer #1~25 고정 ----
+            # 측정 wafer 수와 무관하게 항상 25칸(고정) → WF MAP 전체 크기가 1매든 25매든 동일.
+            # 없는 wafer 자리는 빈 칸으로 둔다. die별 색은 spec/median 기준(_wfmap_norm/_wfmap_cmap, HTML과 동일).
+            FIXED_N_WAF = 25
+            grid_rows, grid_cols = n_pgm, FIXED_N_WAF
             _multi_pgm = n_pgm > 1
+            # (pgm_row, wafer_col) → (sub_grp, wafer_str, sub_name)  — 열 c는 항상 wafer #(c+1)
+            cell_map = {(i, c): (sub_grp, str(c + 1), sub_name)
+                        for i, (sub_name, sub_grp) in enumerate(sub_groups)
+                        for c in range(FIXED_N_WAF)}
 
-            _cbar_w = 0.5                                  # 우측 컬러바 폭(인치)
-            _area_aspect = (LW - _cbar_w) / max(map_avail, 0.6)   # 가용영역 가로/세로
-            grid_cols = max(1, min(total_cells, int(round(_math.sqrt(total_cells * _area_aspect)))))
-            grid_rows = _math.ceil(total_cells / grid_cols)
-
-            render_cell = 0.95                             # 렌더 셀 크기(인치) — 셀당 wafer 1장
+            _cbar_w = 0.45                                 # 우측 컬러바 폭(인치)
+            render_cell = 0.55                             # 셀(=wafer 1칸) 크기(인치) — 25칸 고정
             chip_pt = render_cell / gdim * 72.0            # 칩 1개 한 변(pt)
-            marker_s = max(1.0, (chip_pt * 0.9) ** 2)      # 격자가 커도(13x13) 겹치지 않게 자동 축소
-            fig_disp_w = grid_cols * render_cell           # 서브플롯 영역 폭(컬러바 제외)
-            fig_h = grid_rows * render_cell
+            marker_s = max(0.5, (chip_pt * 0.9) ** 2)      # 격자가 커도(13x13) 겹치지 않게 자동 축소
+            fig_disp_w = grid_cols * render_cell           # 서브플롯 영역 폭(컬러바 제외, 항상 25*cell)
+            fig_h = grid_rows * render_cell + 0.15         # 하단 wafer 번호 라벨 여백
 
             fig_map, axes_map = plt.subplots(grid_rows, grid_cols,
                                              figsize=(fig_disp_w + _cbar_w, fig_h), squeeze=False,
-                                             gridspec_kw={'wspace': 0.12, 'hspace': 0.40})
+                                             gridspec_kw={'wspace': 0.06, 'hspace': 0.18})
             sc = None
-            for _ic in range(grid_rows * grid_cols):
-                r, c = divmod(_ic, grid_cols)
-                ax = axes_map[r, c]
-                if _ic < total_cells:
-                    sub_name, sub_grp, w = flat_cells[_ic]
+            for r in range(grid_rows):
+                for c in range(grid_cols):
+                    ax = axes_map[r, c]
+                    sub_grp, w, sub_name = cell_map[(r, c)]
                     w_grp = sub_grp[sub_grp[w_col] == w]
-                    if not w_grp.empty:
+                    if not w_grp.empty:   # 측정된 wafer만 die 산점, 없으면 빈 칸
                         sc = ax.scatter(w_grp[map_x], w_grp[map_y], c=w_grp[item_name],
                                         cmap=_wfmap_cmap(direction), norm=wfmap_norm,
                                         s=marker_s, marker='s', alpha=1.0, linewidths=0)
-                    # wafer 번호(+ PGM 다중이면 PGM) 라벨을 각 셀 상단에
-                    _lbl = f"#{w}"
-                    if _multi_pgm:
+                    ax.set_facecolor('white')
+                    # 마지막(맨 아래) PGM 행에만 wafer 번호 표기
+                    if r == grid_rows - 1:
+                        ax.set_xlabel(f"#{c + 1}", fontsize=5, labelpad=1, color=C_NEUTRAL)
+                    # 다중 PGM이면 첫 열 좌측에 PGM(pt) 라벨(90도 회전)
+                    if c == 0 and _multi_pgm:
                         _pl = str(sub_name)
                         if 'PGM(pt)' in sub_grp.columns:
                             _u = sub_grp['PGM(pt)'].dropna()
                             if len(_u): _pl = str(_u.iloc[0])
-                        _lbl = f"#{w} · {_pl}"
-                    ax.set_title(_lbl, fontsize=6, pad=2, color=C_NEUTRAL)
-                    ax.set_facecolor('white')
+                        ax.set_ylabel(_pl, fontsize=6, rotation=90, labelpad=6, color=C_NEUTRAL)
                     ax.set_xticks([]); ax.set_yticks([])
                     ax.set_aspect('equal', adjustable='box')   # 웨이퍼 정원형 유지
                     for spine in ax.spines.values():
                         spine.set_visible(False)
                     ax.set_xlim(global_x_min, global_x_max)
                     ax.set_ylim(global_y_min, global_y_max)
-                else:
-                    ax.axis('off')   # 남는 칸 비움
 
             if sc is not None:
                 # 모든 wafer가 공유하는 단일 컬러바를 오른쪽에 배치
                 _cb_frac = fig_disp_w / (fig_disp_w + _cbar_w)
-                fig_map.subplots_adjust(left=0.01, right=_cb_frac, top=0.93, bottom=0.02)
+                fig_map.subplots_adjust(left=0.02, right=_cb_frac, top=0.97, bottom=0.06)
                 cbar_ax = fig_map.add_axes([_cb_frac + 0.015, 0.12, 0.012, 0.76])
                 cbar = fig_map.colorbar(sc, cax=cbar_ax)
                 cbar.ax.tick_params(labelsize=6)
@@ -1892,7 +1884,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                             facecolor='white', pil_kwargs={'quality': map_q})
             plt.close(fig_map)
 
-            # 좌열 가용공간(LW x map_avail)에 비율 유지하며 최대 크기로 배치
+            # 고정 크기 배치: 25칸 고정이므로 aspect가 항상 동일 → wafer 수와 무관하게 같은 크기.
+            # 좌열 폭(LW)에 맞추되 세로가 map_avail을 넘으면만 축소.
             _ratio = fig_h / (fig_disp_w + _cbar_w)
             pic_w, pic_h = LW, LW * _ratio
             if pic_h > map_avail:
