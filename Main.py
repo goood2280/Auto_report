@@ -814,6 +814,11 @@ if reformatter_check :
                     inline_grouped_dict = inline_grouped.set_index('STEP_DESC_ITEM_ID')['Module'].to_dict() #Inline ITEM과 Module Matching된 dict
                     inline_grouped_dict_ITEMNAME = inline_filtered.set_index('STEP_DESC_ITEM_ID')['ITEMNAME'].to_dict() #Inline ITEM과 ITEMNAME Matching된 dict
                     inline_grouped_dict_ITEM_ID = inline_filtered.set_index('STEP_DESC_ITEM_ID')['ITEM_ID'].to_dict() #Inline ITEM과 ITEM_ID Matching된 dict
+                    # STEP_DESC 열이 있으면 'Step desc' 컬럼 소스로 사용(없으면 ITEMNAME fallback)
+                    if 'STEP_DESC' in inline_filtered.columns:
+                        inline_grouped_dict_STEP_DESC = inline_filtered.set_index('STEP_DESC_ITEM_ID')['STEP_DESC'].to_dict()
+                    else:
+                        inline_grouped_dict_STEP_DESC = inline_grouped_dict_ITEMNAME
                     inline_filtered_columns = sorted(inline_grouped['STEP_DESC_ITEM_ID'].unique().tolist(), key=lambda s: float(s.split()[0]))
 
                     valid_columns = [col for col in inline_filtered_columns if col in inlinedata_pivot.columns]
@@ -836,12 +841,12 @@ if reformatter_check :
 
                     inlinedata_filtered_pivot = pd.merge(inlinedata_spec, inlinedata_filtered_pivot,how='right', on='STEP_DESC_ITEM_ID')
                     
-                    # [PATCH] Inline Table 멀티 인덱스 복구 (UCL 앞 3열: Module / Step desc / Item)
-                    #  - Module    : inline setting의 실제 Module (inline_grouped_dict)
-                    #  - Step desc : ITEMNAME (스텝 설명)
-                    #  - Item      : ITEM_ID
+                    # [PATCH] Inline Table 멀티 인덱스 (UCL 앞 3열: Module / Step desc / Item)
+                    #  - Module    : inline setting의 실제 Module 열 (inline_grouped_dict)  → 첫번째 인덱스
+                    #  - Step desc : STEP_DESC 열 (inline_grouped_dict_STEP_DESC)
+                    #  - Item      : ITEM_ID 열
                     inlinedata_filtered_pivot['Module'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict)
-                    inlinedata_filtered_pivot['Step_desc'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_ITEMNAME)
+                    inlinedata_filtered_pivot['Step_desc'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_STEP_DESC)
                     inlinedata_filtered_pivot['ITEM_ID'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_ITEM_ID)
                     inlinedata_filtered_pivot = inlinedata_filtered_pivot.set_index(['Module', 'Step_desc', 'ITEM_ID'])
                     inlinedata_filtered_pivot.index.names = ['Module', 'Step desc', 'Item']
@@ -949,9 +954,9 @@ if reformatter_check :
                         cat_span[_j] = _k - _j + 1
                         _j = _k + 1
 
-                    # WF MAP이 있으면 wafer 열 폭을 약간만 넓혀 표시 (작게 + 여백 최소)
+                    # WF MAP이 있으면 wafer 열 폭을 약간만 넓혀 표시 (48→45px, ~5% 축소 → #25까지 표시)
                     _has_wf = len(wfmaps_by_item) > 0
-                    _wf_w = 48
+                    _wf_w = 45
                     sb_html = ''
                     if _has_wf:
                         sb_html += (f'<style>.score-board td.sb-val, .score-board th.sb-waf'
@@ -1032,7 +1037,7 @@ if reformatter_check :
                             it_html += f'      <th style="background-color:#f0f0f0 !important;">{col}</th>\n'
                         else:
                             col_str = str(col) if str(col).startswith('#') else '#' + str(col)
-                            it_html += f'      <th style="background-color:#f0f0f0 !important; width:70px; min-width:70px; max-width:70px;">{col_str}</th>\n'
+                            it_html += f'      <th style="background-color:#f0f0f0 !important; width:56px; min-width:56px; max-width:56px;">{col_str}</th>\n'
                     it_html += '    </tr>\n'
                     it_html += '  </thead>\n'
                     it_html += '  <tbody>\n'
@@ -1058,8 +1063,18 @@ if reformatter_check :
                             elif col in _head_cols:
                                 style = 'background-color:#f0fff4;'
                             else:
-                                style = 'width:70px; min-width:70px; max-width:70px;'
-                            
+                                # wafer 값 셀: LCL/UCL 벗어나면 셀 배경 빨강 강조
+                                _cellbg = ''
+                                if not pd.isna(val):
+                                    try:
+                                        _v = float(val)
+                                        _ucl = row.get('UCL'); _lcl = row.get('LCL')
+                                        if (pd.notna(_ucl) and _v > float(_ucl)) or (pd.notna(_lcl) and _v < float(_lcl)):
+                                            _cellbg = 'background-color:#ff4d4d; color:#ffffff; font-weight:bold;'
+                                    except (ValueError, TypeError):
+                                        pass
+                                style = f'width:56px; min-width:56px; max-width:56px; {_cellbg}'
+
                             it_html += f'      <td style="{style}">{formatted_val}</td>\n'
                         it_html += '    </tr>\n'
                     it_html += '  </tbody>\n'
@@ -1172,12 +1187,18 @@ if reformatter_check :
                                                 target_lot=target_lot_id, max_maps=_wf_max)
                                             if _wfmaps:
                                                 _cells = ''
-                                                for _lab, _b in _wfmaps:
+                                                for _wf in _wfmaps:
+                                                    # (label, b64, is_target) — 하위호환: 2-튜플이면 target 아님
+                                                    _lab, _b = _wf[0], _wf[1]
+                                                    _is_tgt = _wf[2] if len(_wf) > 2 else False
+                                                    # target lot WF MAP 라벨은 진한 파란색 + 볼드로 강조
+                                                    _lab_style = ('font-size:8px; white-space:nowrap; '
+                                                                  + ('color:#0033cc; font-weight:bold;' if _is_tgt else 'color:#555;'))
                                                     _cells += (
                                                         '<div style="text-align:center;">'
                                                         f'<img src="data:image/png;base64,{_b}" '
                                                         'style="width:58px; height:58px; display:block; margin:0 auto; border:1px solid #1f4e79;"/>'
-                                                        f'<div style="font-size:8px; color:#555; white-space:nowrap;">{_lab}</div>'
+                                                        f'<div style="{_lab_style}">{_lab}</div>'
                                                         '</div>')
                                                 _wf_block = (
                                                     '<div style="flex:1; display:grid; grid-template-columns: repeat(auto-fill, 64px); '
@@ -1340,6 +1361,7 @@ if reformatter_check :
                 finally:
                     clear_temp_inside_run()
                     clear_anomaly_inside_run()
+                    clear_run_temp_files()   # 랏 리포트 완료 후 RUN/TEMP 내부 파일 비우기(폴더 유지)
                     gc.collect()
 
         else:

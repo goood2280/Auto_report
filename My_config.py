@@ -203,12 +203,12 @@ _REPORT_HTML_TEMPLATE = r"""<!DOCTYPE html>
             background-color: #ebf4ff;
         }
         /* Item (두번째 고정열, category 폭 77px 만큼 오프셋) */
-        /* Item명이 최대 45자까지 '한 줄'에 들어가도록 nowrap + 넉넉한 폭(420px) */
+        /* Item명 nowrap 유지하되 폭을 줄여(330px) 풀스크린에서 wafer #25까지 보이게 함 */
         .score-board th.sb-item, .score-board td.sb-item {
             position: sticky;
             left: 77px;
             z-index: 6;
-            width: 420px; min-width: 420px; max-width: 420px;
+            width: 330px; min-width: 330px; max-width: 330px;
             background-color: #ebf4ff;
             white-space: nowrap;       /* 줄바꿈 방지(한 줄 표시) */
             word-break: normal;
@@ -220,7 +220,7 @@ _REPORT_HTML_TEMPLATE = r"""<!DOCTYPE html>
             position: sticky;
             left: 0;
             z-index: 12;
-            width: 497px; min-width: 497px; max-width: 497px;  /* 77(cat)+420(item) */
+            width: 407px; min-width: 407px; max-width: 407px;  /* 77(cat)+330(item) */
             text-align: center;
         }
         /* 헤더의 고정열 셀은 top(thead) + left 동시 고정(코너) → z-index 상향 */
@@ -228,9 +228,9 @@ _REPORT_HTML_TEMPLATE = r"""<!DOCTYPE html>
         .score-board thead th.sb-item {
             z-index: 11;
         }
-        /* wafer 열: 폭 최소화 → 풀스크린에서 25개까지 한 화면에 표시 */
+        /* wafer 열: 폭 최소화 → 풀스크린에서 25개까지 한 화면에 표시 (34→32px, ~5% 축소) */
         .score-board th.sb-waf, .score-board td.sb-val {
-            width: 34px; min-width: 34px; max-width: 34px;
+            width: 32px; min-width: 32px; max-width: 32px;
             padding: 2px 1px;
             font-size: 10px;
             white-space: nowrap;
@@ -554,7 +554,7 @@ class Config:
         #   (lot 25매 전부 spec이면 25장 다 표시), 남는 칸은 다른 lot을 TKOUT_TIME 최신순으로 채운다.
         #   anomaly_wfmap_max_count는 'target 외'를 포함한 총 표시 상한(target spec wafer는 상한과 무관하게 모두 표시).
         self.anomaly_wfmap_specout = True        # spec-out WF MAP 표시 on/off
-        self.anomaly_wfmap_max_count = 25        # 총 표시 상한(target spec wafer는 항상 전부 표시)
+        self.anomaly_wfmap_max_count = 36        # 총 표시 상한(target spec wafer는 항상 전부 표시)
 
         # ── PPT Trend chart: 특정 항목은 site(모든 값) 대신 tkout_time 기준 집계점으로 표시 ──
         #   {항목명(ALIAS): 'P10'} 형식. 'P10'=10퍼센타일, 'P90', 'MEDIAN'(=P50), 'MEAN' 지원.

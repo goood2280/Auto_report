@@ -497,6 +497,23 @@ def clear_anomaly_inside_run():
             pass
 
 
+def clear_run_temp_files():
+    """RUN/TEMP 폴더 '내부 파일'을 모두 삭제(폴더/하위폴더 구조는 유지).
+
+    랏 리포트 1건 생성이 끝난 뒤 호출 — Trend PNG({alias}.png)·anomaly_basis(json/csv) 등
+    임시 산출물을 비운다. HTML은 이미지가 base64로 내장돼 있어 파일 삭제 후에도 정상 표시된다.
+    """
+    _tdir = os.path.join('RUN', 'TEMP')
+    if not os.path.isdir(_tdir):
+        return
+    for _root, _dirs, _files in os.walk(_tdir):
+        for _f in _files:
+            try:
+                os.remove(os.path.join(_root, _f))
+            except OSError:
+                pass
+
+
 # ===================================================================
 #  PPT 생성 함수 (PowerPoint Generation)
 # ===================================================================
@@ -775,12 +792,17 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         _rc, _rm = float(radius_zones[0]), float(radius_zones[1])
     except Exception:
         _rc, _rm = 60.0, 100.0
+    _sig = getattr(GLOBAL_CONFIG, 'anomaly_lot_median_sigma', 2.0)
+    _dsp = getattr(GLOBAL_CONFIG, 'anomaly_lot_dispersion_ratio', 1.5)
     _note_lines = [
         f"※ 참고: 모든 비교 기준은 제품({_veh}) 내입니다.",
         "· 제품 전체 산포 = 제품 전체 chip 값의 robust 산포(1.4826×MAD, 0이면 IQR/1.349, 그래도 0이면 std).",
         "· 랏내 산포 = 랏 내부 chip 값의 robust 산포이며, '보통의 랏 산포'는 제품 내 각 랏 산포의 중앙값입니다.",
         "· 'Nσ' = (lot median − 제품 median) / 제품 전체 산포,   'N배' = 랏내 산포 / 보통의 랏 산포.",
         f"· 위치(radius zone): Center ≤ {_rc:g}, Middle {_rc:g}~{_rm:g}, Edge > {_rm:g}.",
+        f"· 판정 기준 — 이상: spec(LCL/UCL) 이탈. 주의: spec 이내라도 (lot median이 {_sig:g}σ 초과 이탈) "
+        f"또는 (랏내 산포가 보통의 랏 산포의 {_dsp:g}배 초과). 둘 다 아니면 참고.",
+        "· 우선순위: 이상 > 주의 > 참고 순, 같은 등급 내에서는 spec-out 개수·이탈 크기(deviation)가 큰 순.",
     ]
     for _k, _ln in enumerate(_note_lines):
         _np = tf.paragraphs[0] if _k == 0 else tf.add_paragraph()
@@ -1048,7 +1070,8 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
             _wv = int(_wv)
         except (ValueError, TypeError):
             pass
-        res.append((f"{_root} #{_wv}", base64.b64encode(buf.getvalue()).decode('utf-8')))
+        # (label, base64, is_target_lot) — target lot WF MAP은 HTML에서 라벨을 진한 파란색 강조
+        res.append((f"{_root} #{_wv}", base64.b64encode(buf.getvalue()).decode('utf-8'), _is_tgt(gd)))
     return res
 
 
