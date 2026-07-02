@@ -320,8 +320,12 @@ def item_excluded(name, patterns):
     return any(fnmatch.fnmatch(s, str(p).upper()) for p in patterns)
 
 
-def _finding(sev, ftype, item, title, detail=""):
-    return {"severity": sev, "type": ftype, "item": item, "title": title, "detail": detail}
+def _finding(sev, ftype, item, title, detail="", **extra):
+    """Finding dict 생성. extra(display_name·cat2·spec_out_* 등)는 AI 해석 입력용 부가정보 —
+    HTML/PPT 렌더러는 severity/title/detail만 읽으므로 키 추가에 안전하다."""
+    d = {"severity": sev, "type": ftype, "item": item, "title": title, "detail": detail}
+    d.update({k: v for k, v in extra.items() if v not in (None, "", [], {})})
+    return d
 
 
 def _convert_name(x, prefixes=None, suffixes=None, repl=None):
@@ -341,6 +345,289 @@ def _convert_name(x, prefixes=None, suffixes=None, repl=None):
     for o, n in (repl or {}).items():
         x = x.replace(o, n)
     return x
+
+
+# ──────────────────────────────────────────────────────────────────────
+# spec-out 공간 패턴(특이맵) 분류 — 제품/좌표계 무관, '규칙 목록' 기반
+#   - 규칙(패턴)의 추가/삭제/순서변경/임계조정 = My_config.anomaly_pattern_rules(list)로
+#     통째 교체(코드 수정 불필요). 전역 옵션은 anomaly_pattern_thresholds(dict).
+#   - 어떤 규칙이 어떤 값으로 평가·통과했는지는 stats['rules'] trace로 남는다
+#     (anomaly_basis_<lot>.json의 spec_out_pattern_stats — "왜 이 특이맵인지" 근거).
+#   - 판정식 상세·규칙 type별 파라미터는 README '특이맵(공간 패턴) 판정 기준' 참조.
+# ──────────────────────────────────────────────────────────────────────
+_PATTERN_OPT_DEFAULT = {
+    'min_pts': 3,           # 패턴 판정 최소 unique 좌표 수(미만이면 '소수 pt' 보류)
+    'y_positive_up': True,  # 좌표 y+가 웨이퍼 위(12시) 방향인지(반대면 False → 상/하 반전)
+}
+
+_PATTERN_RULES_DEFAULT = [
+    # 위에서부터 평가 — '먼저 통과'한 규칙의 라벨 채택(구체적 패턴을 위에).
+    {'name': '전면성',            'type': 'global',      'min_share': 0.5},
+    {'name': '세로 줄성',         'type': 'line',        'axis': 'x', 'max_lanes': 2, 'min_pts': 4},
+    {'name': '가로 줄성',         'type': 'line',        'axis': 'y', 'max_lanes': 2, 'min_pts': 4},
+    {'name': 'Center 집중',       'type': 'radius_band', 'r_min': 0.0,  'r_max': 0.45, 'cover': 0.7},
+    {'name': 'Edge ring',         'type': 'radius_band', 'r_min': 0.85, 'r_max': 1.01, 'cover': 0.7},
+    {'name': 'Middle 환형',       'type': 'radius_band', 'r_min': 0.45, 'r_max': 0.85, 'cover': 0.7},
+    # 방향 집중도 R(단위벡터 평균 길이): 균일 60°부채꼴≈0.955, 90°(사분면)≈0.90, 반구≈0.64
+    #   → 0.92 = '사분면보다 좁은(≲75°) 클러스터'만 k시 방향으로 판정.
+    {'name': 'k시 방향 클러스터', 'type': 'clock',       'min_rnorm': 0.4, 'resultant': 0.92, 'min_frac': 0.75},
+    {'name': '사분면',            'type': 'quadrant',    'cover': 0.7},
+    {'name': '반구',              'type': 'half',        'cover': 0.75},
+]
+
+
+def classify_specout_pattern(out_xy, all_xy, radius_of=None, rules=None, options=None):
+    """spec-out chip 좌표 집합의 공간 패턴(특이맵)을 분류한다 — 제품/좌표계 무관.
+
+    제품별 chip 좌표 범위가 달라도 동작하도록 모든 판정을 정규화 좌표로 수행:
+      - 중심(cx,cy) = 제품 전체 chip 좌표(all_xy)의 평균(centroid)
+      - r_norm      = 좌표별 radius / 제품 최대 radius. radius는 radius_of
+                      (설정파일 Chip_Radius 매핑, Data Extractor) 우선,
+                      없으면 centroid 유클리드 거리로 대체
+      - 방향        = centroid 기준 시계 각도(12시=위, 3시=오른쪽)
+
+    rules(목록, 위에서부터 '먼저 통과'한 라벨 채택 — 없으면 _PATTERN_RULES_DEFAULT):
+      type='global'      : min_share — unique out 좌표/제품 전체 좌표 ≥ → 전면성
+      type='line'        : axis('x'|'y'), max_lanes, min_pts — 서로 다른 축값 개수 ≤ → 줄성
+      type='radius_band' : r_min, r_max, cover — r_norm∈[r_min,r_max) 비율 ≥ cover → 환형/링/센터
+      type='clock'       : min_rnorm, resultant, min_frac — 방향 집중도 R ≥ → k시 방향
+      type='quadrant'    : cover — 한 사분면(우상/좌상/좌하/우하) 비율 ≥
+      type='half'        : cover — 한 반면(상/하/좌/우) 비율 ≥
+    options: _PATTERN_OPT_DEFAULT(min_pts, y_positive_up) override.
+
+    unique 좌표 수 < min_pts면 '소수 pt'(판정 보류). 좌표는 wafer간 중복을 제거해
+    'lot 전체에서 그 위치가 이상인가'로 본다.
+
+    반환 (label, stats):
+      label = 패턴명(비율/방향 포함). 아무 규칙도 통과 못 하면 '산발(특정 패턴 없음)'.
+      stats = 판정 근거 — 'rules'에 **모든 규칙의 평가값·통과여부 trace**가 남아
+              "이 맵이 왜 이 특이맵으로 분류됐는지"를 basis에서 확인할 수 있다.
+    """
+    import math
+    opt = dict(_PATTERN_OPT_DEFAULT)
+    opt.update(options or {})
+    rule_list = rules if rules else _PATTERN_RULES_DEFAULT
+    try:
+        pts = sorted({(float(x), float(y)) for x, y in out_xy})
+        allp = [(float(x), float(y)) for x, y in all_xy]
+    except (TypeError, ValueError):
+        return '', {}
+    if not pts or not allp:
+        return '', {}
+    cx = sum(p[0] for p in allp) / len(allp)
+    cy = sum(p[1] for p in allp) / len(allp)
+    _ysign = 1.0 if opt.get('y_positive_up', True) else -1.0
+
+    def _rad(p):
+        if radius_of:
+            r = radius_of.get((p[0], p[1]))
+            if r is not None:
+                return float(r)
+        return math.hypot(p[0] - cx, p[1] - cy)
+
+    rmax = max(_rad(p) for p in allp) or 1.0
+    rn = [_rad(p) / rmax for p in pts]
+    n = len(pts)
+    stats = {'n_out_coords': n, 'n_all_coords': len(allp),
+             'out_coord_share': round(n / len(allp), 3), 'rules': []}
+    if n < int(opt.get('min_pts', 3)):
+        return f'소수 pt({n}개 좌표)', stats
+
+    def _fmt_vals(vals):
+        return ', '.join(str(int(v)) if float(v).is_integer() else f'{v:g}'
+                         for v in sorted(vals))
+
+    # 공용 파생값(사분면/반구/방향)
+    q = {'우상': 0, '좌상': 0, '좌하': 0, '우하': 0}
+    for p in pts:
+        dx, dy = p[0] - cx, _ysign * (p[1] - cy)
+        q['우상' if dx >= 0 and dy >= 0 else
+          '좌상' if dx < 0 and dy >= 0 else
+          '좌하' if dx < 0 else '우하'] += 1
+    h = {'상': (q['우상'] + q['좌상']) / n, '하': (q['좌하'] + q['우하']) / n,
+         '우': (q['우상'] + q['우하']) / n, '좌': (q['좌상'] + q['좌하']) / n}
+
+    label = ''
+    for rule in rule_list:
+        t = str(rule.get('type', '')).lower()
+        nm = rule.get('name', t)
+        passed, metric, lab = False, None, ''
+        try:
+            if t == 'global':
+                metric = stats['out_coord_share']
+                passed = metric >= float(rule.get('min_share', 0.5))
+                lab = f"{nm}(전 좌표의 {metric:.0%})"
+            elif t == 'line':
+                axis = str(rule.get('axis', 'x')).lower()
+                vals = {p[0] for p in pts} if axis == 'x' else {p[1] for p in pts}
+                metric = len(vals)
+                passed = (n >= int(rule.get('min_pts', 4))
+                          and metric <= int(rule.get('max_lanes', 2)))
+                lab = f"{nm}({axis}={_fmt_vals(vals)})"
+            elif t == 'radius_band':
+                r_lo = float(rule.get('r_min', 0.0))
+                r_hi = float(rule.get('r_max', 1.01))
+                metric = round(sum(1 for r in rn if r_lo <= r < r_hi) / n, 3)
+                passed = metric >= float(rule.get('cover', 0.7))
+                lab = f"{nm}({metric:.0%})"
+            elif t == 'clock':
+                dirs = []
+                for p, r in zip(pts, rn):
+                    if r < float(rule.get('min_rnorm', 0.4)):
+                        continue
+                    dx, dy = p[0] - cx, _ysign * (p[1] - cy)
+                    d = math.hypot(dx, dy)
+                    if d > 0:
+                        dirs.append((dx / d, dy / d))
+                if len(dirs) >= int(opt.get('min_pts', 3)) \
+                        and len(dirs) / n >= float(rule.get('min_frac', 0.75)):
+                    ux = sum(d[0] for d in dirs) / len(dirs)
+                    uy = sum(d[1] for d in dirs) / len(dirs)
+                    metric = round(math.hypot(ux, uy), 3)   # 방향 집중도 R
+                    passed = metric >= float(rule.get('resultant', 0.92))
+                    if passed:
+                        ang = math.degrees(math.atan2(ux, uy)) % 360   # 12시=0°, 시계방향
+                        hour = int(round(ang / 30.0)) % 12 or 12
+                        stats['clock_hour'] = hour
+                        lab = (nm.replace('k시', f'{hour}시') if 'k시' in nm
+                               else f'{hour}시 {nm}') + f'(집중도 {metric:.2f})'
+            elif t == 'quadrant':
+                bk = max(q, key=lambda k: q[k])
+                metric = {'best': bk, 'frac': round(q[bk] / n, 2),
+                          'all': {k: round(v / n, 2) for k, v in q.items()}}
+                passed = q[bk] / n >= float(rule.get('cover', 0.7))
+                lab = f"{bk} 사분면({q[bk] / n:.0%})"
+            elif t == 'half':
+                bk = max(h, key=lambda k: h[k])
+                metric = {'best': bk, 'frac': round(h[bk], 2),
+                          'all': {k: round(v, 2) for k, v in h.items()}}
+                passed = h[bk] >= float(rule.get('cover', 0.75))
+                lab = (f'{bk}반구({h[bk]:.0%})' if bk in ('상', '하')
+                       else f'{bk}측 반면({h[bk]:.0%})')
+            else:
+                metric = f'알 수 없는 type: {t}'
+        except Exception as _ce:
+            metric = f'평가 실패: {_ce}'
+        stats['rules'].append({'name': nm, 'type': t, 'metric': metric, 'passed': bool(passed)})
+        if passed and not label:
+            label = lab
+    return (label or '산발(특정 패턴 없음)'), stats
+
+
+def _parse_defect_modes(text):
+    """ANOMALY_KNOWLEDGE.md의 '불량 모드 판정표'(DEFECT_MODE_TABLE 마커 사이) 파싱.
+
+    블록 형식: `N. MODE: 모드명` + `WHEN:/COMMENT:/LINK:`(LINK는 선택).
+    반환: [{'num','mode','when','comment','link'}, ...] (표 순서 = 우선순위).
+    AI Final의 구조화(JSON) 판정 검증용 — defect_mode/LINK가 표에 있는 값인지 대조한다.
+    """
+    import re
+    out = []
+    if not text:
+        return out
+    _s = text.find('DEFECT_MODE_TABLE:start')
+    _e = text.find('DEFECT_MODE_TABLE:end')
+    if _s == -1 or _e == -1 or _e <= _s:
+        return out
+    cur = None
+    for line in text[_s:_e].splitlines():
+        m = re.match(r'\s*([\d][\d\-.]*)\.?\s*MODE\s*[:：]\s*(.+)$', line)
+        if m:
+            if cur:
+                out.append(cur)
+            cur = {'num': m.group(1).rstrip('.'), 'mode': m.group(2).strip(),
+                   'when': '', 'comment': '', 'link': ''}
+            continue
+        if cur is None:
+            continue
+        m = re.match(r'\s*(WHEN|COMMENT|NOTE|LINK)\s*[:：]\s*(.+)$', line, re.IGNORECASE)
+        if m:
+            k = m.group(1).lower()
+            cur['comment' if k == 'note' else k] = m.group(2).strip()
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _extract_json_obj(text):
+    """LLM 응답에서 JSON 객체를 추출(코드펜스/설명문 혼입 허용). 실패 시 None."""
+    import json
+    t = str(text or '').strip()
+    i, j = t.find('{'), t.rfind('}')
+    if i == -1 or j <= i:
+        return None
+    try:
+        obj = json.loads(t[i:j + 1])
+    except Exception:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _assemble_final_html(final_text, modes):
+    """AI Final 단계의 구조화(JSON) 출력을 검증하고 HTML <ul>로 조립.
+
+    검증 규칙(할루시네이션 차단):
+    - defect_mode는 판정표(modes) MODE명과 대조 — 없으면 '특정 불량 모드 미매칭(수동 검토)'.
+    - LINK는 LLM 출력이 아니라 **매칭된 판정표 항목의 LINK만** <a>로 첨부(LINK는 선택 — 없으면 미첨부).
+    - COMMENT도 매칭된 표 항목의 값을 권고 조치에 덧붙임.
+    JSON 파싱 실패 시(비-JSON 응답) 종전처럼 텍스트/HTML 그대로 사용(하위호환).
+    """
+    import html as _html
+
+    def _esc(x):
+        return _html.escape(str(x), quote=False)
+
+    data = _extract_json_obj(final_text)
+    if not isinstance(data, dict):
+        t = str(final_text or '').strip()
+        return t if '<' in t else f'<ul><li>{_esc(t)}</li></ul>'
+
+    # 불량 모드 검증 — 판정표 MODE명과 대조(공백 차이 허용, 부분 포함까지)
+    mode_raw = data.get('defect_mode')
+    mode_raw = str(mode_raw).strip() if isinstance(mode_raw, str) and str(mode_raw).strip().lower() not in ('null', 'none') else ''
+    entry = None
+    if mode_raw and modes:
+        for _m in modes:
+            _mm = _m.get('mode', '').strip()
+            if _mm and (_mm == mode_raw or _mm in mode_raw or mode_raw in _mm):
+                entry = _m
+                break
+    if entry:
+        mode_txt = entry['mode']
+    elif mode_raw:
+        mode_txt = f'특정 불량 모드 미매칭(수동 검토) — AI 제안: {mode_raw}'
+    else:
+        mode_txt = '특정 불량 모드 미매칭(수동 검토)'
+
+    basis = data.get('basis_items') or []
+    if isinstance(basis, str):
+        basis = [basis]
+    basis_txt = ', '.join(_esc(b) for b in basis if b)
+
+    lis = []
+    _li = f'<li><b>[불량 모드 판정]</b> {_esc(mode_txt)}'
+    if basis_txt:
+        _li += f' — 근거: {basis_txt}'
+    if entry and entry.get('link'):
+        _li += f' <a href="{_html.escape(entry["link"], quote=True)}" target="_blank">관련 링크</a>'
+    _li += '</li>'
+    lis.append(_li)
+
+    _ms = data.get('meas_suspect')
+    if isinstance(_ms, str) and _ms.strip() and _ms.strip().lower() not in ('null', 'none'):
+        lis.append(f'<li><b>[측정이상 추정]</b> {_esc(_ms.strip())}</li>')
+    if data.get('summary'):
+        lis.append(f'<li><b>[종합 판단]</b> {_esc(data["summary"])}</li>')
+    if data.get('phenomenon'):
+        lis.append(f'<li><b>[핵심 현상]</b> {_esc(data["phenomenon"])}</li>')
+    _act = _esc(data.get('actions') or '').strip()
+    if entry and entry.get('comment'):
+        _cm = _esc(entry['comment'])
+        if _cm not in _act:
+            _act = (_act + ' · ' if _act else '') + f'(판정표) {_cm}'
+    if _act:
+        lis.append(f'<li><b>[권고 조치]</b> {_act}</li>')
+    return '<ul>' + ''.join(lis) + '</ul>'
 
 
 def _parse_pchk_item_map(text):
@@ -438,7 +725,7 @@ def _parse_knowledge_rules(text):
 
 def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         main_vehicle=None, config=None, reformatter=None,
-                        knowledge_text=""):
+                        knowledge_text="", item_stats_out=None):
     """코드 기반 다중 detector로 이상/commonality Finding 리스트를 산출.
 
     AI 사용 여부와 무관하게 항상 코드로 동작합니다. 각 detector는 독립적으로
@@ -452,6 +739,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     spec_data : pd.DataFrame    ALIAS 인덱스, SPECLOW/SPECHIGH 보유
     main_vehicle : str          모집단 기준 vehicle 명(없으면 전체 사용)
     config : object             임계값/룰셋(My_config). 없으면 기본값
+    item_stats_out : dict|None  전달 시 항목별 통계 요약({item: {...}})을 채워 반환
+                                (AI 해석의 [항목 통계] 입력 — interpret_with_ai로 전달)
 
     Returns
     -------
@@ -521,6 +810,19 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         except Exception as _re:
             print(f"[anomaly] Chip_Radius 좌표 매핑 실패: {_re}")
             _coord_radius = {}
+
+    # ── 특이맵(공간 패턴) 판정용 제품 전체 좌표 집합 ──
+    #   설정파일 기반 Chip_Radius 매핑(_coord_radius)이 있으면 그 좌표를,
+    #   없으면 모집단 측정 좌표(unique)를 사용 — 제품별 좌표계가 달라도 정규화로 동작.
+    _pat_all_xy = list(_coord_radius.keys())
+    if not _pat_all_xy and col_x and col_y:
+        try:
+            _pc = pop[[col_x, col_y]].dropna().drop_duplicates()
+            _pat_all_xy = [(float(a), float(b)) for a, b in zip(_pc[col_x], _pc[col_y])]
+        except Exception:
+            _pat_all_xy = []
+    _pat_rules = cfg('anomaly_pattern_rules', None) or None   # None → _PATTERN_RULES_DEFAULT
+    _pat_opt = cfg('anomaly_pattern_thresholds', {}) or {}    # 전역 옵션(min_pts, y_positive_up)
 
     # spec dict {alias: (low, high)} — 차트 항목은 spec_data, PCHK 등 비차트 항목은 reformatter에서 보강
     spec = {}
@@ -659,23 +961,39 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             return 'Middle'
         return 'Edge'
 
-    def _specout_extra(it, lo, hi):
-        """spec-out chip의 PGM(pt) 목록과 radius zone(Center/Middle/Edge) 분포 반환."""
-        cols = [c for c in [col_x, col_y, col_pgm, it] if c and c in tgt.columns]
+    def _specout_extra(it, lo, hi, max_positions=20):
+        """spec-out chip의 PGM(pt) 목록·radius zone 분포·위치 예시·공간 패턴을 반환.
+
+        반환 (pgms, zones, positions, pattern, pattern_stats, commonality):
+        - pgms      : spec-out chip의 PGM(pt) 목록(중복 제거)
+        - zones     : {Center/Middle/Edge: 개수}
+        - positions : [{'wafer','x','y','pgm'}, ...] 이상 pt의 실제 위치(최대 max_positions개).
+                      AI가 PCHK와 '동일 wafer·좌표·PGM(pt)' 겹침(측정이상 추정)을 대조하는 입력.
+        - pattern   : 특이맵 라벨(classify_specout_pattern — Edge ring/줄성/k시 방향 등).
+                      **wafer 게이트**: 이상 wafer가 1~2개면 spec-out 총 gate_few_wafer_min_pts(4)pt
+                      이상일 때만 판정(미만이면 '' — 소수 pt 노이즈로 인한 오분류 방지).
+        - pattern_stats : 패턴 판정에 쓴 수치/게이트 사유(basis 기록용)
+        - commonality   : 이상 wafer가 repeat_min_wafers(3)개 이상일 때 wafer간 반복 코멘트 —
+                      '동일 shot 반복'(같은 좌표가 3개 wafer 이상 spec-out) 또는
+                      'wafer간 유사 위치 반복'(out 좌표의 절반 이상이 2개 wafer 이상 겹침). 없으면 ''.
+        """
+        cols = [c for c in [col_waf, col_x, col_y, col_pgm, it] if c and c in tgt.columns]
         if it not in tgt.columns or not cols:
-            return [], {}
+            return [], {}, [], '', {}, ''
         _sub = tgt[cols].dropna(subset=[it])
         if len(_sub) == 0:
-            return [], {}
+            return [], {}, [], '', {}, ''
         _v = pd.to_numeric(_sub[it], errors='coerce')
         _om = pd.Series(False, index=_sub.index)
         if lo is not None: _om = _om | (_v < lo)
         if hi is not None: _om = _om | (_v > hi)
         _so = _sub[_om.values]
         if len(_so) == 0:
-            return [], {}
+            return [], {}, [], '', {}, ''
         # PGM(pt) 뒤 Duplicate_Count 기본값('_1.0'/'_1') 접미사는 불필요 → 제거(중복>1은 유지)
-        pgms = ([re.sub(r'_1(?:\.0+)?$', '', str(p)) for p in _so[col_pgm].dropna().unique()]
+        def _pgm_clean(p):
+            return re.sub(r'_1(?:\.0+)?$', '', str(p))
+        pgms = ([_pgm_clean(p) for p in _so[col_pgm].dropna().unique()]
                 if col_pgm and col_pgm in _so.columns else [])
         # zone: Data Extractor Chip_Radius(mm)를 좌표로 조회해 Center/Middle/Edge 판정
         zones = {}
@@ -688,19 +1006,91 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 if _rr is not None:
                     _z = _zone_of(_rr)
                     zones[_z] = zones.get(_z, 0) + 1
-        return pgms, zones
+        # 이상 pt 위치 목록 (wafer·좌표·PGM(pt)) — 프롬프트 크기 제한 위해 상한 적용
+        positions = []
+        _n_more = 0
+        if col_waf in _so.columns and col_x and col_y \
+                and col_x in _so.columns and col_y in _so.columns:
+            for _ridx, _row in _so.iterrows():
+                if len(positions) >= max_positions:
+                    _n_more += 1
+                    continue
+                _w = _waf_int(_row[col_waf])
+                try:
+                    _xx, _yy = int(_row[col_x]), int(_row[col_y])
+                except Exception:
+                    _xx, _yy = _row[col_x], _row[col_y]
+                positions.append({
+                    'wafer': _w if _w is not None else _row[col_waf],
+                    'x': _xx, 'y': _yy,
+                    'pgm': _pgm_clean(_row[col_pgm])
+                           if col_pgm and col_pgm in _so.columns and pd.notna(_row[col_pgm]) else ''})
+        if _n_more:
+            positions.append({'note': f'외 {_n_more}pt 생략(전체는 anomaly_basis 참조)'})
+        # 특이맵(공간 패턴) 분류 — wafer간 중복 좌표는 제거하고 lot 전체 관점으로 판정
+        pattern, pattern_stats, commonality = '', {}, ''
+        if col_x and col_y and col_x in _so.columns and col_y in _so.columns and _pat_all_xy:
+            try:
+                _oxy = [(a, b) for a, b in zip(_so[col_x], _so[col_y])
+                        if pd.notna(a) and pd.notna(b)]
+                _n_wf_out = int(_so[col_waf].nunique()) if col_waf in _so.columns else 1
+                _total_pts = len(_oxy)
+                # wafer 게이트: 이상 wafer 1~2개면 spec-out 4pt 이상일 때만 특이맵 판정
+                _gate_wf = int(_pat_opt.get('gate_few_wafer_max', 2))
+                _gate_pts = int(_pat_opt.get('gate_few_wafer_min_pts', 4))
+                if _n_wf_out <= _gate_wf and _total_pts < _gate_pts:
+                    pattern_stats = {'gated': f'이상 wafer {_n_wf_out}개·{_total_pts}pt'
+                                              f'(<{_gate_pts}pt) → 특이맵 판정 보류',
+                                     'n_out_wafers': _n_wf_out}
+                else:
+                    pattern, pattern_stats = classify_specout_pattern(
+                        _oxy, _pat_all_xy, _coord_radius,
+                        rules=_pat_rules, options=_pat_opt)
+                    pattern_stats['n_out_wafers'] = _n_wf_out
+                # 이상 wafer가 3개 이상이면 (pt 수가 적어도) wafer간 반복성 코멘트.
+                #   단 채택 패턴이 '전면성(global)'이면 생략 — 전 좌표가 out이라 반복이 자명(노이즈).
+                _adopted_type = next((r.get('type') for r in (pattern_stats.get('rules') or [])
+                                      if r.get('passed')), '')
+                _rep_min = int(_pat_opt.get('repeat_min_wafers', 3))
+                if _n_wf_out >= _rep_min and _adopted_type != 'global' and col_waf in _so.columns:
+                    _by_coord = {}
+                    for _w, _a, _b in zip(_so[col_waf], _so[col_x], _so[col_y]):
+                        if pd.notna(_a) and pd.notna(_b):
+                            _by_coord.setdefault((float(_a), float(_b)), set()).add(_w)
+                    _rep = sorted(((k, len(v)) for k, v in _by_coord.items()
+                                   if len(v) >= _rep_min), key=lambda z: -z[1])
+                    if _rep:
+                        _top = ', '.join(f"({x:g},{y:g})×{c}wf" for (x, y), c in _rep[:3])
+                        commonality = (f"동일 shot 반복: {len(_rep)}개 좌표가 "
+                                       f"{_rep_min}개 wafer 이상에서 spec-out — {_top}"
+                                       + (' 외' if len(_rep) > 3 else ''))
+                    elif _by_coord:
+                        _n_multi = sum(1 for v in _by_coord.values() if len(v) >= 2)
+                        _frac = _n_multi / len(_by_coord)
+                        if _frac >= float(_pat_opt.get('similar_overlap_frac', 0.5)):
+                            commonality = (f"wafer간 유사 위치 반복: out 좌표의 {_frac:.0%}가 "
+                                           f"2개 wafer 이상에서 겹침({_n_wf_out}개 wafer 발생)")
+                    if commonality:
+                        pattern_stats['commonality'] = commonality
+            except Exception as _pe:
+                print(f"[anomaly] 특이맵 분류 실패({it}): {_pe}")
+        return pgms, zones, positions, pattern, pattern_stats, commonality
 
     # PCHK 계열도 '동일한 index 항목'으로 같은 루프에서 함께 분석하고, 판정도 동일하게 적용한다.
     #   - 비차트(REPORT ORDER 없음)라 metrics_dict엔 없지만 merged_df엔 컬럼으로 존재 → items에 합류.
     #   - spec-out이면 다른 Index와 똑같이 '이상(CRITICAL)'으로 본다(별도 MEAS_SUSPECT 없음).
     #   - 단, '동일 shot 다른 항목 동시 spec-out' 겹침 신호는 basis에만 기록해 AI 측정이상 추정에 넘긴다.
     pchk_aliases = []
+    cat2_map = {}   # ALIAS → CAT2 (AI Triage의 '같은 CAT2끼리 그룹핑' 입력용)
     try:
         if reformatter is not None and 'ALIAS' in reformatter.columns:
             for _, r in reformatter.iterrows():
                 a = r.get('ALIAS')
                 if pd.isna(a):
                     continue
+                _c2 = r.get('CAT2')
+                if pd.notna(_c2) and str(_c2).strip():
+                    cat2_map[a] = str(_c2).strip()
                 cat2 = str(r.get('CAT2', '')).upper()
                 if (cat2 == 'PCHK' or str(a).upper().startswith('PCHK')) \
                         and a in merged_df.columns and a not in items:
@@ -719,12 +1109,26 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         _kw = str(_kw).strip()
         if _kw:
             _excl.append(f"*{_kw}*")
+    _meas_only = set()   # 제외 키워드에 걸린 PCHK — 이상/주의 '판정'에선 제외하되,
+    #                      spec-out·동일 shot 겹침은 계산해 '측정이상 추정(NOTICE)' 신호로만 산출.
+    #                      (PCHK를 통째로 빼면 AI가 측정이상 추정을 할 수 없게 되므로 신호는 유지)
     if _excl:
         _n0 = len(items)
-        items = [it for it in items if not item_excluded(it, _excl)]
-        pchk_set = {a for a in pchk_set if not item_excluded(a, _excl)}
+        _keep = []
+        for it in items:
+            if item_excluded(it, _excl):
+                if it in pchk_set:
+                    _meas_only.add(it)
+                    _keep.append(it)      # 루프에 남겨 겹침 신호만 계산
+            else:
+                _keep.append(it)
+        items = _keep
+        pchk_set = {a for a in pchk_set if a in items}
         if len(items) < _n0:
             print(f"[anomaly] anomaly_exclude_items로 {_n0 - len(items)}개 항목 통계분석 제외")
+        if _meas_only:
+            print(f"[anomaly] 제외 키워드 PCHK {len(_meas_only)}개는 판정 제외, "
+                  f"측정이상 추정 신호만 산출: {sorted(_meas_only)}")
 
     # ── PCHK 종류별 '검증 대상 ITEM' 매핑 (ANOMALY_KNOWLEDGE.md에서 관리) ──
     #   예) PCHK_LKG → [VTH_N, VTH_P, ...] : PCHK_LKG가 이 항목들과 동일 PGM(pt)·shot에서
@@ -815,8 +1219,9 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         _xx, _yy = int(tgt.at[idx, col_x]), int(tgt.at[idx, col_y])
                     except Exception:
                         _xx, _yy = tgt.at[idx, col_x], tgt.at[idx, col_y]
-                    # 이 shot(=행)의 PGM(pt) — 겹친 항목 전부 이 값과 동일(같은 행이므로)
-                    _pgm = (str(tgt.at[idx, col_pgm])
+                    # 이 shot(=행)의 PGM(pt) — 겹친 항목 전부 이 값과 동일(같은 행이므로).
+                    # Duplicate_Count 기본 접미사('_1'/'_1.0')는 표기에서 제거(중복>1은 유지).
+                    _pgm = (re.sub(r'_1(?:\.0+)?$', '', str(tgt.at[idx, col_pgm]))
                             if col_pgm and col_pgm in tgt.columns else '')
                     examples.append((_w, _xx, _yy, _pgm, co))
         return ov_shots, ov_items, examples
@@ -871,7 +1276,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
 
     _basis = []      # 판단 근거 중간 데이터 (RUN/TEMP 저장용) — 전 Index 통합
     _rankinfo = {}   # 항목별 정렬 지표 (spec-out 비율/wafer 수/이탈 크기/REPORT ORDER)
-    _item_ctx = {}   # 규칙 평가용 항목별 컨텍스트 {level, disp, tmed, pmed, pspread}
+    _item_ctx = {}   # 규칙 평가용 항목별 컨텍스트 {level, disp, tmed, pmed, pspread, tmed_pctile}
+    _item_stats = {} # AI 해석용 항목별 통계 요약(전 항목) — item_stats_out으로 반환
     for it in items:
         is_pchk = it in pchk_set
         lo, hi = spec.get(it, (None, None))
@@ -918,12 +1324,14 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         # spec-out을 wafer별 pt개수로 그룹 + 순위지표(최고 wafer 비율/spec-out wafer 수) + PGM(pt)/zone
         specout_txt, n_out, specout_map = ('', 0, {})
         so_max_ratio, so_n_wafers = 0.0, 0
-        so_pgms, so_zones = [], {}
+        so_pgms, so_zones, so_positions = [], {}, []
+        so_pattern, so_pattern_stats, so_commonality = '', {}, ''
         if tgt_it is not None and (lo is not None or hi is not None):
             specout_txt, n_out, specout_map, so_max_ratio, so_n_wafers = \
                 _specout_by_wafer(tgt_it, col_waf, it, lo, hi)
             if n_out > 0:
-                so_pgms, so_zones = _specout_extra(it, lo, hi)
+                (so_pgms, so_zones, so_positions, so_pattern,
+                 so_pattern_stats, so_commonality) = _specout_extra(it, lo, hi)
         # agg 판정 항목은 raw metrics 폴백을 쓰지 않는다(집계값 기준 유지)
         if n_out == 0 and it not in _agg_item_set:
             n_out = int(metrics_dict.get(it, {}).get('spec_out_count', 0) or 0)
@@ -952,9 +1360,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         _bits = []
         if specout_txt:
             _bits.append(specout_txt)
-        if so_zones:
-            _bits.append('위치: ' + ', '.join(
-                f"{z} {so_zones[z]}" for z in ('Center', 'Middle', 'Edge') if z in so_zones))
+        # wafer간 반복성(동일 shot/유사 위치) 코멘트 — 3개 wafer 이상 발생 시(요청사항)
+        if so_commonality:
+            _bits.append(so_commonality)
+        # radius zone 분포(위치: Center N ...)는 표시하지 않음(요청). so_zones는 basis에만 기록.
         # median 이탈(dev_txt)은 판정 기준에서 제외됨 → 상세에도 표시하지 않음. 산포(disp_txt)만.
         if disp_txt:
             _bits.append(disp_txt)
@@ -965,9 +1374,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         #   주의(WARNING) : spec 이내지만 '해당 wafer의 내부 산포'가 다른 wafer(보통 wafer) 대비 큰 경우.
         #   그 외         : 참고(INFO).
         if n_out > 0:
-            _sev = 'CRITICAL'
+            # 제외 키워드 PCHK는 이상(CRITICAL) 판정 대신 '측정이상 추정(NOTICE)' 신호만
+            _sev = 'NOTICE' if it in _meas_only else 'CRITICAL'
         elif worst_disp_ratio > disp_ratio:
-            _sev = 'WARNING'
+            _sev = 'INFO' if it in _meas_only else 'WARNING'
         else:
             _sev = 'INFO'
 
@@ -978,10 +1388,40 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 _tmed = float(pd.to_numeric(tgt_it[it], errors='coerce').median())
             except Exception:
                 _tmed = None
+        # target median의 모집단 내 백분위(%) — median_pctile() 규칙 원자·AI 통계 요약용
+        _tmed_pct = None
+        if _tmed is not None and it in pop.columns:
+            try:
+                _pv = pd.to_numeric(pop[it], errors='coerce').dropna()
+                if len(_pv) > 0:
+                    _tmed_pct = float((_pv < _tmed).mean() * 100.0)
+            except Exception:
+                _tmed_pct = None
         _item_ctx[it] = {
             'level': 2 if _sev == 'CRITICAL' else (1 if _sev == 'WARNING' else 0),
             'disp': float(worst_disp_ratio) if worst_disp_ratio else 0.0,
             'tmed': _tmed, 'pmed': pop_med, 'pspread': pop_spread,
+            'tmed_pctile': _tmed_pct,
+        }
+
+        # ── AI 해석용 항목별 통계 요약(전 항목 — finding 유무 무관) ──
+        #   "target lot의 wafer 기준 통계가 전체 분포에서 어디쯤인지"를 간단히 요약.
+        def _sig4(v):
+            try:
+                return float(f'{float(v):.4g}')
+            except (TypeError, ValueError):
+                return None
+        _item_stats[it] = {
+            'display_name': _disp(it),
+            'cat2': cat2_map.get(it, ''),
+            'severity': _SEV_LABEL.get(_sev, _sev),
+            'spec_out_pt': int(n_out),
+            'target_median': _sig4(_tmed),
+            'pop_median': _sig4(pop_med),
+            'median_pctile': round(_tmed_pct, 1) if _tmed_pct is not None else None,
+            'worst_wafer_median_sigma': round(worst_med_dev, 1) if worst_med_dev else 0.0,
+            'worst_wafer_dispersion_ratio': round(worst_disp_ratio, 1) if worst_disp_ratio else 0.0,
+            'pattern': so_pattern,
         }
 
         # ── 근거 데이터 축적 (전 Index 통합 스키마) ──
@@ -996,6 +1436,12 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'spec_out_wafer_count': int(so_n_wafers),             # 순위 2순위
             'spec_out_pgm': so_pgms,
             'spec_out_zone': so_zones,              # {Center/Middle/Edge: 개수}
+            'spec_out_positions': so_positions,     # 이상 pt 위치 [{wafer,x,y,pgm}, ...] (상한 적용)
+            'spec_out_pattern': so_pattern,         # 특이맵 라벨(Edge ring/줄성/k시 방향 등)
+            'spec_out_pattern_stats': so_pattern_stats,   # 패턴 판정 수치/게이트 사유
+            'spec_out_commonality': so_commonality, # wafer간 반복성(동일 shot/유사 위치) 코멘트
+            'target_median': _tmed,
+            'target_median_pctile': round(_tmed_pct, 1) if _tmed_pct is not None else None,
             'pop_median': pop_med, 'pop_robust_spread_MAD': pop_spread,   # 전체(chip) 참고
             'wafer_median_center': w_center,        # 제품 wafer median 중심
             'wafer_median_scatter': w_scatter,      # 제품 wafer median 산포(wafer간, median σ 분모)
@@ -1016,17 +1462,52 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         })
 
         # ── finding 산출 — 이상=spec-out only / 주의=wafer 산포 확대 only (median 판정 제거) ──
+        #   display_name/cat2/위치/PGM(pt)/PCHK겹침은 AI 해석 입력용 부가정보(렌더러는 미사용).
         if n_out > 0:
+            _extra = {
+                'display_name': _disp(it),
+                'cat2': cat2_map.get(it, ''),
+                'spec_out_pgm': so_pgms,
+                'spec_out_zone': so_zones,
+                'spec_out_pattern': so_pattern,
+                'spec_out_commonality': so_commonality,
+                'spec_out_positions': so_positions,
+            }
+            if is_pchk:
+                _extra.update({
+                    'is_pchk': True,
+                    'meas_overlap_shot_count': int(ov_shots),
+                    'meas_overlap_items': ov_items,
+                    'meas_overlap_examples': [
+                        {'wafer': w, 'x': x, 'y': y, 'pgm': pgm, 'items': c}
+                        for (w, x, y, pgm, c) in ov_examples],
+                })
+            if it in _meas_only:
+                # 판정 제외 PCHK → 측정이상 추정(NOTICE) 신호. HTML 요약 건수(이상/주의) 미집계,
+                # 우선순위 최하(참고) — AI가 겹침 wafer·좌표·PGM(pt)로 측정이상을 추정하는 입력.
+                _ov_txt = (f"동일 shot 겹침 {ov_shots}건: "
+                           + ', '.join(f"{_disp(k)}({c})" for k, c in
+                                       sorted(ov_items.items(), key=lambda z: -z[1]))
+                           if ov_shots else "동일 shot 겹침 없음")
+                findings.append(_finding(
+                    "NOTICE", "MEAS_SUSPECT", it,
+                    f"측정이상 추정 신호: {_disp(it)}",
+                    (detail.strip() + '. ' if detail.strip() else '') + _ov_txt, **_extra))
+                continue
             findings.append(_finding(
                 "CRITICAL", "SPEC_OUT", it,
-                f"Spec-out: {_disp(it)}", detail.strip()))
+                f"Spec-out: {_disp(it)}", detail.strip(), **_extra))
+            continue
+
+        if it in _meas_only:   # spec-out 없는 판정 제외 PCHK → finding 없음
             continue
 
         if worst_disp_ratio > disp_ratio:
             # 형식: "산포 확대 : ITEM - #W 산포 X배" (제목에 다 담고 상세는 비움 → 깔끔)
             findings.append(_finding(
                 "WARNING", "DISPERSION", it,
-                f"산포 확대 : {_disp(it)} - #{worst_disp_w} 산포 {worst_disp_ratio:.1f}배", ""))
+                f"산포 확대 : {_disp(it)} - #{worst_disp_w} 산포 {worst_disp_ratio:.1f}배", "",
+                display_name=_disp(it), cat2=cat2_map.get(it, '')))
 
     # ── 판단 근거 중간 데이터를 RUN/TEMP에 저장 (csv + json) ──
     try:
@@ -1043,6 +1524,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             _row = dict(_b)
             _row['spec_out_by_wafer'] = '; '.join(
                 f"{k}pt:{','.join('#' + str(w) for w in v)}" for k, v in sorted(_b['spec_out_by_wafer'].items()))
+            _row['spec_out_positions'] = '; '.join(
+                (f"#{p['wafer']}({p['x']},{p['y']})@{p.get('pgm', '')}" if 'wafer' in p
+                 else str(p.get('note', '')))
+                for p in _b.get('spec_out_positions', []))
             _row['meas_target_items'] = ', '.join(_b.get('meas_target_items') or [])
             _row['meas_target_resolved'] = ', '.join(_b.get('meas_target_resolved') or [])
             _row['meas_overlap_items'] = ', '.join(
@@ -1122,6 +1607,16 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                     if not c or c['tmed'] is None or c['pmed'] is None or not c['pspread']:
                         return False
                     return (c['pmed'] - c['tmed']) / c['pspread'] >= _mlow_sigma
+                # median_pctile(ITEM) <= 5 : target median이 모집단 분포의 하위 5% 이내
+                #   (>=95면 상위 5% 이내. 연산자 >= <= < > 지원)
+                m = re.match(r'median_pctile\(([^)]+)\)\s*(>=|<=|<|>)\s*([\d.]+)$', atom)
+                if m:
+                    c = _find_ctx(m.group(1).strip())
+                    v = c.get('tmed_pctile') if c else None
+                    if v is None:
+                        return False
+                    t = float(m.group(3))
+                    return {'>=': v >= t, '<=': v <= t, '<': v < t, '>': v > t}[m.group(2)]
                 return False
 
             def _eval_when(expr):
@@ -1199,6 +1694,9 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
 
     findings.sort(key=lambda f: (-_priority(f),
                                  _rankinfo.get(f.get('item', ''), {}).get('report_order', 1e9)))
+    # 항목별 통계 요약을 호출자(→ interpret_with_ai의 [항목 통계])로 반환
+    if isinstance(item_stats_out, dict):
+        item_stats_out.update(_item_stats)
     return findings
 
 
@@ -1237,14 +1735,17 @@ def render_findings_html(findings, top_n=5, detail_ref="PPT의 Score Board 다�
 
 
 def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
-                      config=None, target_lot_id=""):
+                      config=None, target_lot_id="", item_stats=None):
     """AI 다단계 해석: 각 단계의 판단을 다음 단계 입력으로 넘겨 최종 판단 생성.
 
     단계
     ----
-    1) Triage   : 코드 Finding을 현상(phenomenon) 단위로 묶고 중요도 정렬(파생항목 중복 통합)
+    1) Triage   : 코드 Finding을 CAT2/현상(phenomenon) 단위로 묶고 중요도 정렬
     2) RootCause: 지식베이스(knowledge_text)를 참고해 각 현상의 추정 원인 도출
-    3) Final    : 1·2를 종합해 최종 판단/권고를 HTML로 산출
+    3) Final    : 1·2를 종합해 최종 판단을 **구조화 JSON**으로 산출 → 코드가
+                  '불량 모드 판정표'(DEFECT_MODE_TABLE)와 대조 **검증** 후 HTML 조립.
+                  defect_mode가 표에 없으면 '미매칭(수동 검토)' 처리, LINK/COMMENT는
+                  표의 값만 첨부(LLM이 만든 링크는 무시 — 할루시네이션 차단. LINK는 선택).
 
     Parameters
     ----------
@@ -1253,6 +1754,11 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
     knowledge_text : str     ANOMALY_KNOWLEDGE.md 내용(통계 패턴→원인)
     llm_fn : callable        llm_fn(system: str, user: str) -> str. 없으면 None 반환(코드만 사용)
     config, target_lot_id : 메타
+    item_stats : dict|None   analyze_commonality(item_stats_out=)가 채운 항목별 통계 요약
+                             — [항목 통계] 블록으로 Triage/Final에 전달
+
+    참고: RUN/EXAMPLE/*.md 가 있으면 '판정 예시(few-shot)'로 Final 프롬프트에 포함
+    (없어도 동작. 파일명 '_' 시작은 템플릿으로 간주하고 스킵. 작성법은 README 참조).
 
     Returns
     -------
@@ -1263,10 +1769,65 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
     import json
 
     def _slim(f):
-        return {k: f.get(k) for k in ("severity", "type", "item", "title", "detail")}
+        """AI에 전달할 finding 필드. 기본(severity~detail) 외에
+        display_name(후처리 표시명)·cat2(Triage 그룹핑 기준)·
+        spec_out_pgm/zone/positions(이상 pt의 PGM(pt)·위치)·
+        meas_overlap_*(PCHK 동일 shot 겹침 — 측정이상 추정 근거)를 있으면 포함."""
+        keys = ("severity", "type", "item", "display_name", "cat2", "title", "detail",
+                "spec_out_pgm", "spec_out_zone", "spec_out_pattern", "spec_out_commonality",
+                "spec_out_positions", "is_pchk", "meas_overlap_shot_count",
+                "meas_overlap_items", "meas_overlap_examples")
+        return {k: f.get(k) for k in keys if f.get(k) not in (None, '', [], {})}
     fjson = json.dumps([_slim(f) for f in findings], ensure_ascii=False)
-    # spec-out으로 분류된 Index 조합 (불량 모드 판정 입력)
-    spec_items = [f.get('item') for f in findings if f.get('type') == 'SPEC_OUT']
+    # spec-out으로 분류된 Index 조합 (불량 모드 판정 입력) — "원이름(표시명)" 표기
+    def _iname(f):
+        _i, _d = f.get('item'), f.get('display_name')
+        return f"{_i}({_d})" if _d and _d != _i else str(_i)
+    spec_items = [_iname(f) for f in findings if f.get('type') == 'SPEC_OUT']
+
+    # 항목별 통계 요약([항목 통계] 블록) — 전 분석 항목의 wafer 기준 위치/산포 요약
+    _stats_block = ''
+    if item_stats:
+        try:
+            _stats_block = ("\n\n[항목 통계] (전 항목 — severity, target median과 모집단 내 "
+                            "백분위 median_pctile(%), worst wafer median σ·산포배수, 특이맵 패턴)\n"
+                            + json.dumps(item_stats, ensure_ascii=False, default=str))
+        except Exception:
+            _stats_block = ''
+
+    # few-shot 판정 예시(RUN/EXAMPLE/*.md, 선택) — 과거 '입력→확정 판정' 사례
+    def _load_examples():
+        try:
+            import os, glob
+            _dir = (getattr(config, 'ai_examples_dir', None) if config else None) \
+                or os.path.join('RUN', 'EXAMPLE')
+            if not os.path.isdir(_dir):
+                return ''
+            _maxn = int(getattr(config, 'ai_examples_max', 5) or 5) if config else 5
+            _maxc = int(getattr(config, 'ai_examples_max_chars', 6000) or 6000) if config else 6000
+            parts, total = [], 0
+            for fp in sorted(glob.glob(os.path.join(_dir, '*.md'))):
+                if os.path.basename(fp).startswith('_'):   # _TEMPLATE 등 스킵
+                    continue
+                if len(parts) >= _maxn:
+                    break
+                try:
+                    with open(fp, encoding='utf-8') as _ef:
+                        txt = _ef.read().strip()
+                except Exception:
+                    continue
+                if not txt or total + len(txt) > _maxc:
+                    continue
+                parts.append(f"--- 예시: {os.path.basename(fp)} ---\n{txt}")
+                total += len(txt)
+            return '\n\n'.join(parts)
+        except Exception:
+            return ''
+    _examples = _load_examples()
+    _examples_block = (
+        "\n\n[판정 예시] 과거 실제 사례(관찰 입력 → 후행 확인된 판정)입니다. 입력이 유사하면 "
+        "같은 판정을 우선 적용하세요. 예시가 판정표와 충돌하면 예시(실사례)가 우선합니다.\n"
+        + _examples) if _examples else ''
 
     # ── AI 입력/출력 덤프 ──
     #   LLM에 실제로 보낸 system/user 프롬프트와 응답을 RUN/AI에 남긴다(삭제하지 않음 — 감사/재현용).
@@ -1304,55 +1865,96 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
         except Exception as _de:
             print(f"[WARN] AI 입력 덤프 저장 실패: {_de}")
 
+    # ── 호출 모드: 'multi'(기본, Triage→Root-cause→Final 3회) / 'single'(Final 1회) ──
+    #   single은 비용/지연 1/3, 단계간 오류 전파 없음. 모델이 약해 그룹핑 품질이 떨어지면 multi.
+    _mode = (str(getattr(config, 'ai_stage_mode', 'multi') or 'multi').lower()
+             if config else 'multi')
     try:
-        # ── 1단계: Triage / 현상 그룹핑 ──
-        triage = _stage(
-            "① Triage",
-            "당신은 반도체 TEG 데이터 분석가입니다. 코드가 산출한 이상 finding 목록을 "
-            "현상(phenomenon) 단위로 묶고 중요도 순으로 3~6개로 정리하세요. "
-            "파생항목(예: IDSAT_N/RATIO/SUM)이 같은 현상이면 하나로 통합하고, "
-            "PCHK(측정 의심)가 있으면 최상단에 별도 표기하세요. 간결한 불릿으로. "
-            "**주어진 finding에 적힌 사실(항목·spec-out·이탈 수치)만 사용**하고, 원인·해석·"
-            "반도체 공정 지식을 추가하지 마세요(요약/그룹핑만).",
-            f"대상 lot: {target_lot_id}\n[findings]\n{fjson}")
+        triage = rootcause = ''
+        if _mode != 'single':
+            # ── 1단계: Triage / 현상 그룹핑 ──
+            triage = _stage(
+                "① Triage",
+                "당신은 반도체 TEG 데이터 분석가입니다. 코드가 산출한 이상 finding 목록을 "
+                "현상(phenomenon) 단위로 묶고 중요도 순으로 3~6개로 정리하세요. "
+                "각 finding에는 item(원 이름)·display_name(후처리 표시명)·cat2(항목 카테고리)가 있습니다. "
+                "**그룹핑 기준: cat2가 같은 항목은 하나의 현상으로 묶고**, 현상 머리에 `[CAT2]`를 표기하세요 "
+                "(cat2가 없는 항목은 항목명 유사성으로 묶음). 항목명은 display_name(표시명)으로 적되 "
+                "원 이름이 다르면 괄호로 병기하세요. "
+                "PCHK(is_pchk=true, 측정 의심)가 있으면 최상단에 별도 표기하고, "
+                "meas_overlap_examples·spec_out_positions의 wafer·좌표·PGM(pt)를 근거로 "
+                "**어느 wafer/PGM(pt)에서 어떤 항목과 동일 shot으로 겹치는지** 명시하세요. "
+                "각 현상에는 wafer별 이상 pt 수(detail)와 함께 위치 요약(특이맵 패턴 spec_out_pattern, "
+                "spec_out_zone: Center/Middle/Edge 분포, PGM(pt) 목록)을 덧붙이고, "
+                "wafer간 반복 코멘트(spec_out_commonality — 동일 shot 반복/유사 위치 반복)가 있으면 "
+                "**그대로 인용**하세요(반복 위치는 systematic 가능성 신호). "
+                "[항목 통계]가 주어지면 target median의 모집단 내 백분위(median_pctile)·산포배수 등 "
+                "특기할 수치를 현상 서술에 활용하세요. 간결한 불릿으로. "
+                "**주어진 finding·[항목 통계]에 적힌 사실(항목·spec-out·이탈 수치·위치·패턴·PGM(pt))만 사용**하고, "
+                "원인·해석·반도체 공정 지식을 추가하지 마세요(요약/그룹핑만).",
+                f"대상 lot: {target_lot_id}\n[findings]\n{fjson}{_stats_block}")
 
-        # ── 2단계: Root-cause (지식베이스 참고) ──
-        rootcause = _stage(
-            "② Root-cause",
-            "당신은 수율/공정 엔지니어입니다. 아래 [지식베이스]에 **명시적으로 적힌 내용만** "
-            "근거로 각 현상을 연결하세요. **[지식베이스]에 적혀있지 않은 원인·반도체 공정 지식"
-            "(예: '산화막 두께', '식각 균일성' 등)은 절대 추측하거나 지어내지 마세요.** "
-            "[지식베이스]에 해당 근거가 없으면 그 현상은 반드시 '지식베이스 미기재 — 추가 분석 필요'"
-            "라고만 적고, 임의의 원인을 붙이지 마세요. 데이터(finding)에서 관찰된 사실과 "
-            "지식베이스에 적힌 문장 외에는 기술하지 마세요.\n"
-            f"[지식베이스]\n{knowledge_text or '(지식베이스 없음)'}",
-            f"[현상 정리]\n{triage}")
+            # ── 2단계: Root-cause (지식베이스 참고) ──
+            rootcause = _stage(
+                "② Root-cause",
+                "당신은 수율/공정 엔지니어입니다. 아래 [지식베이스]에 **명시적으로 적힌 내용만** "
+                "근거로 각 현상을 연결하세요. **[지식베이스]에 적혀있지 않은 원인·반도체 공정 지식"
+                "(예: '산화막 두께', '식각 균일성' 등)은 절대 추측하거나 지어내지 마세요.** "
+                "[지식베이스]에 해당 근거가 없으면 그 현상은 반드시 '지식베이스 미기재 — 추가 분석 필요'"
+                "라고만 적고, 임의의 원인을 붙이지 마세요. 데이터(finding)에서 관찰된 사실과 "
+                "지식베이스에 적힌 문장 외에는 기술하지 마세요.\n"
+                f"[지식베이스]\n{knowledge_text or '(지식베이스 없음)'}",
+                f"[현상 정리]\n{triage}")
 
-        # ── 3단계: 최종 판단 + 불량 모드 판정 ──
+        # ── 최종 판단 + 불량 모드 판정 — 구조화 JSON 출력 → 코드 검증·HTML 조립 ──
         #   spec-out Index 조합을 [지식베이스]의 '불량 모드 판정표'와 대조하여 판정.
         #   여러 모드가 동시 매칭되면 표에서 더 위(번호 작은) 모드를 택한다.
-        final = _stage(
-            "③ Final",
+        #   LINK/COMMENT는 LLM이 아니라 코드가 판정표에서 첨부(할루시네이션 차단, LINK는 선택).
+        _final_sys = (
             "당신은 책임 엔지니어입니다. 아래 현상/근거를 종합해 최종 판단을 내리되, "
-            "**[지식베이스]와 관찰된 데이터(finding)에 있는 내용만** 사용하세요. "
+            "**[지식베이스]와 관찰된 데이터(finding·항목 통계)에 있는 내용만** 사용하세요. "
             "**[지식베이스]에 적혀있지 않은 반도체 공정 지식·원인·조치(예: '산화막 두께', "
             "'식각 균일성' 등 md에 없는 도메인 지식)를 임의로 판단하거나 추가하지 마세요.** "
-            "[지식베이스]의 '불량 모드 판정표'를 이용해 spec-out Index 조합으로부터 불량 모드를 "
-            "판정하되, 표는 위에서부터 우선순위가 높고 여러 모드가 동시 매칭되면 **번호가 가장 작은"
-            "(가장 위)** 모드 하나로 판정합니다(1-1, 1-2 세부도 위가 우선). "
-            "매칭이 없으면 '특정 불량 모드 미매칭(수동 검토)'으로 적으세요. "
+            "[지식베이스]의 '불량 모드 판정표'(DEFECT_MODE_TABLE 마커 사이)를 이용해 "
+            "spec-out Index 조합으로부터 불량 모드를 판정하세요. Index명은 원 이름과 표시명 "
+            "어느 쪽으로 적혀 있어도 같은 항목으로 인식하고, 판정표의 CAT2 조건은 finding의 "
+            "cat2와 대조합니다. 표는 위에서부터 우선순위가 높고 여러 모드가 동시 매칭되면 "
+            "**번호가 가장 작은(가장 위)** 모드 하나로 판정합니다(1-1, 1-2 세부도 위가 우선). "
             "측정 의심(PCHK 동일 shot 겹침)이 있으면 [지식베이스]의 '측정이상 추정 규칙'을 적용해 "
-            "불량 단정 전 재측정 권고를 우선하세요. "
-            "반드시 HTML <ul>로만 출력: "
-            "<li><b>[불량 모드 판정]</b> (판정표에 있는 모드명) — (근거가 된 Index 조합)</li>"
-            "<li><b>[종합 판단]</b> (finding·지식베이스에 근거한 판단만)</li>"
-            "<li><b>[핵심 현상]</b> (데이터에서 **관찰된 사실만** — 어느 Index가 어떻게 spec-out/이탈했는지. 원인 추측 금지)</li>"
-            "<li><b>[권고 조치]</b> ([지식베이스]에 명시된 조치만. 없으면 '지식베이스 미기재')</li>.\n"
-            f"[지식베이스]\n{knowledge_text or '(지식베이스 없음)'}",
-            f"[spec-out Index 조합]\n{', '.join(spec_items) if spec_items else '(없음)'}\n\n"
-            f"[현상]\n{triage}\n\n[근거]\n{rootcause}")
+            "겹친 wafer·좌표·PGM(pt)를 명시하고 불량 단정 전 재측정 권고를 우선하며, "
+            "해당 site를 제외한 나머지 spec-out만으로 불량 모드를 판정하세요. "
+            "항목명은 표시명(display_name) 기준으로 서술합니다. "
+            "**출력은 아래 형식의 JSON 객체 하나만**(코드펜스·설명문·HTML 금지): "
+            '{"defect_mode": "<판정표의 MODE명 그대로. 매칭 없으면 null>", '
+            '"basis_items": ["<근거가 된 Index 표시명>", ...], '
+            '"summary": "<종합 판단 1~2문장 — finding·지식베이스에 근거한 판단만>", '
+            '"phenomenon": "<핵심 현상 — 관찰된 사실만. 어느 Index가 어느 wafer/특이맵 패턴·PGM(pt)에서 어떻게 spec-out/이탈했는지. 원인 추측 금지>", '
+            '"actions": "<권고 조치 — 지식베이스·판정표 COMMENT에 명시된 것만. 없으면 \'지식베이스 미기재\'>", '
+            '"meas_suspect": "<측정이상 추정 서술(겹친 wafer·좌표·PGM(pt) 명시) 또는 null>"} '
+            "URL/링크는 출력하지 마세요 — 코드가 판정표의 LINK를 자동 첨부합니다(LINK 없는 모드도 있음)."
+            f"{_examples_block}\n"
+            f"[지식베이스]\n{knowledge_text or '(지식베이스 없음)'}")
+        _spec_line = f"[spec-out Index 조합]\n{', '.join(spec_items) if spec_items else '(없음)'}"
+        if _mode == 'single':
+            _final_sys += ("\n(단일 호출 모드: [현상]/[근거] 대신 [findings] JSON이 직접 주어집니다. "
+                           "cat2가 같은 finding을 스스로 현상 단위로 묶어 판단하고, PCHK(is_pchk)가 "
+                           "있으면 meas_overlap_*로 측정이상 추정을 먼저 검토하세요.)")
+            _final_user = (f"대상 lot: {target_lot_id}\n[findings]\n{fjson}\n\n"
+                           f"{_spec_line}{_stats_block}")
+            final = _stage("① Final(단일 호출)", _final_sys, _final_user)
+        else:
+            _final_user = f"{_spec_line}\n\n[현상]\n{triage}\n\n[근거]\n{rootcause}{_stats_block}"
+            final = _stage("③ Final", _final_sys, _final_user)
 
-        body = final if "<" in str(final) else f"<ul><li>{final}</li></ul>"
+        # 응답이 JSON 객체가 아니면 같은 입력으로 1회 재시도(형식 지시 강화) — 그래도
+        # 실패하면 _assemble_final_html이 텍스트/HTML 폴백으로 처리(하위호환).
+        if _extract_json_obj(final) is None:
+            final = _stage(
+                "Final(JSON 재시도)",
+                "직전 응답이 JSON 객체 형식이 아니었습니다. 다른 텍스트/코드펜스 없이 "
+                "반드시 JSON 객체 하나만 출력하세요.\n" + _final_sys, _final_user)
+
+        body = _assemble_final_html(final, _parse_defect_modes(knowledge_text))
         note = ('<div style="font-size:11px; color:#9aa0a6; font-style:italic; margin:2px 0 4px;">'
                 '※ 아래 내용은 AI가 자동 생성한 참고용 요약입니다. 보조 자료로만 활용하세요.</div>')
         # 본문은 검정 글씨 + 글머리 점 제거(list-style:none)

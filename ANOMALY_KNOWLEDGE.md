@@ -7,7 +7,8 @@
 > ⚠️ 단, **통계 임계값(σ·배수 등 숫자)** 은 여기 두지 말고 `My_config.py`에서 관리하세요.
 > 무거운 통계 계산 로직은 코드(`anomaly_engine.analyze_commonality`)가 담당합니다.
 > 이 파일에는 코드가 산출한 **신호(사실)를 사람이 어떻게 해석·판정할지**의 규칙만 서술합니다.
-> (불량 모드 판정표 등 더 넓은 참고 지식은 `README.md` 참조)
+> **불량 모드 판정표는 이 파일의 'DEFECT_MODE_TABLE' 섹션에서 관리**합니다(AI가 직접 참조 —
+> README의 표는 참고 사본). 새 불량 모드 추가 = 표에 블록 하나 추가(코드 수정 불필요).
 
 ---
 
@@ -74,6 +75,58 @@
 
 - 코드가 실제 사용한 대상/겹침 결과는 `RUN/TEMP/anomaly_basis_<lot>.json`의
   `meas_target_items`(매핑 원문)·`meas_target_resolved`(매칭된 alias)·`meas_overlap_*`에서 확인할 수 있습니다.
+- AI에 전달되는 finding에도 이상 pt의 **위치(`spec_out_positions`: wafer·CHIP_X/Y·PGM(pt))와
+  PCHK 겹침(`meas_overlap_*`)** 이 포함되므로, AI는 어느 wafer/PGM(pt)에서 겹쳤는지 명시해 서술합니다.
+
+## 특이맵(공간 패턴) 라벨 해석 — 코드가 판정, AI는 서술만
+
+> spec-out 좌표의 공간 패턴은 **코드(`classify_specout_pattern`)가 판정**해 finding의
+> `spec_out_pattern`에 라벨로 담습니다(판정식·임계값은 README '특이맵 판정 기준' 참조 —
+> 제품 좌표계와 무관하게 정규화 radius·방향으로 동작). AI는 이 라벨을 그대로 인용해
+> 서술하고, **라벨과 다른 공간 해석을 임의로 만들지 않습니다.**
+>
+> 라벨 종류: `전면성` · `세로/가로 줄성(x=... / y=...)` · `Center 집중` · `Edge ring` ·
+> `Middle 환형` · `k시 방향 클러스터` · `우상/좌상/좌하/우하 사분면` · `상/하반구`,
+> `좌/우측 반면` · `산발(특정 패턴 없음)` · `소수 pt`(판정 보류).
+> 참고 해석(일반론): 줄성→스캐너/프로브카드 열, Edge ring→엣지 공정(베벨/링), Center→중심
+> 균일도, k시 방향→노치 기준 국소 클러스터(설비 국소 이슈). 단정하지 말고 확인 포인트로만.
+
+## 불량 모드 판정표 (Defect Mode Table) — AI가 spec-out 조합으로 판정
+
+> AI 최종 단계(③ Final)가 **spec-out Index 조합**을 아래 표와 대조해 불량 모드를 판정합니다.
+> **표는 위에서부터 우선순위** — 여러 모드가 동시 매칭되면 번호가 가장 작은(가장 위) 모드
+> 하나로 판정합니다(1-1, 1-2 세부도 위가 우선). 매칭이 없으면 '특정 불량 모드 미매칭(수동 검토)'.
+>
+> **새 불량 모드 추가 = 아래 마커 사이에 블록 하나 추가**(코드 수정 불필요). 블록 문법:
+> - `MODE:` 모드명 — 판정 결과 `[불량 모드 판정]`에 그대로 표기됩니다. 번호(`1.`/`2-1.`)로 우선순위 표현.
+> - `WHEN:` 매칭 조건 — spec-out Index 조합을 AND/OR/정상 조건으로 서술.
+>   **Index명은 원 이름(ALIAS)·표시명 둘 다 인식**되며, `CAT2=...` 형태로 카테고리 조건도 가능합니다.
+> - `COMMENT:` 매칭 시 권고 조치/확인 포인트 — AI가 `[권고 조치]`에 **그대로 인용**합니다
+>   (여기 적힌 범위 내에서만 코멘트 제공 → 예상 밖 조치 생성 방지).
+> - `LINK:` 관련 대시보드/문서 URL — **선택 사항(없어도 됨)**. AI가 아니라 **코드가**
+>   매칭된 모드의 LINK를 `<a href>`로 첨부합니다(AI 출력의 URL은 무시 — 할루시네이션 차단).
+>
+> 사내 이식 시 실제 Index명/대시보드 URL로 교체하세요. (아래는 예시)
+
+<!-- DEFECT_MODE_TABLE:start -->
+1. MODE: Contact 미오픈 불량
+   WHEN: RCNT_N 또는 RCNT_P spec-out
+   COMMENT: Contact 저항 초과 — 식각 미오픈/폴리머 잔류 여부를 인라인 SEM/CD로 확인.
+   LINK: https://example.com/contact_open
+
+2-1. MODE: Gate 모듈 불량 (VTH N·P 연동)
+   WHEN: VTH_N AND VTH_P 동시 spec-out
+   COMMENT: Gate CD 미달/Gate Oxide 산포 후보 — Gate CD·Oxide 인라인 계측과 대조.
+   LINK: https://example.com/gate_module
+
+2-2. MODE: N-MOS 단독 VTH 불량
+   WHEN: VTH_N spec-out AND VTH_P 정상
+   COMMENT: N-Well 이온주입/채널 도핑 산포 후보 — 해당 Implant SPC 확인.
+
+3. MODE: 구동전류(IDSAT) 불량
+   WHEN: IDSAT_N, IDSAT_P, IDSAT_RATIO, IDSAT_SUM 중 하나 이상 spec-out
+   COMMENT: 이동도·CD·접합/콘택 저항 후보. VTH 동반 여부로 Gate vs 구동 구분, RATIO 이동 시 N/P 비대칭 확인.
+<!-- DEFECT_MODE_TABLE:end -->
 
 ## 판정 로직 규칙 (Knowledge Rules) — 코드가 파싱하여 통계 결과와 매칭
 
@@ -96,6 +149,11 @@
 > - `all_sev(A,B,C,...)>=주의` — 나열 항목 **모두** 해당 등급 이상
 > - `disp_desc(A,B,C,...)` — 나열 순서대로 산포배수가 **감소**(즉 A가 최대) / `disp_asc(...)` — 증가
 > - `median_low(ITEM)` — 해당 항목 target median이 제품 대비 매우 낮음(임계 σ, My_config)
+> - `median_pctile(ITEM) <연산자> <숫자>` — target median의 **모집단 분포 내 백분위(%)** 비교.
+>   숫자는 0~100 임의 값, 연산자 `>= <= < >`. **하위 N% = `<=N`, 상위 N% = `>=100-N`.**
+>   예1(하위 5%): `WHEN: sev(A)>=주의 AND median_pctile(B)<=5`
+>   예2(상위 10%): `WHEN: sev(A)>=주의 AND median_pctile(B)>=90`
+>   예3(중앙 근처 확인): `WHEN: median_pctile(C)>=40 AND median_pctile(C)<=60`
 > - 조건은 ` AND ` / ` OR ` 로 연결(‘OR로 묶인 AND 그룹’). 항목명은 ALIAS/표시명 모두 가능.
 > **액션(RULE 종류)**:
 > - (기본) `WHEN` 참이면 `RULE:` 문구를 '지식 판정'으로 출력(`LINK`/`NOTE` 첨부).

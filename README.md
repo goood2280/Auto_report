@@ -367,19 +367,29 @@ if GLOBAL_CONFIG.use_gpt_summary and GLOBAL_CONFIG.use_gpt_multistep \
 - `code_findings` = `analyze_commonality()`가 **AI와 무관하게 이미 산출**한 통계 Finding 리스트.
 - 하나라도 조건 불충족(토글 off / Finding 없음 / LLM 없음)이면 AI 호출 자체를 건너뜁니다.
 
-### 3) `interpret_with_ai` — 3단계 순차 호출 (`anomaly_engine.py`)
+### 3) `interpret_with_ai` — 다단계/단일 호출 (`anomaly_engine.py`)
 
-각 단계가 `_LLM_FN(system, user)`를 **한 번씩 호출**하고, 앞 단계 출력이 다음 단계 입력이 됩니다(총 **LLM 3회 호출**).
+**호출 모드 = `My_config.ai_stage_mode`**:
+- `'multi'`(기본): Triage → Root-cause → Final **3회 호출**. 앞 단계 출력이 다음 단계 입력.
+  단계별로 일을 쪼개 **약한 모델에서 품질이 안정적**이지만 비용/지연 3배 + 단계간 오류 전파 위험.
+- `'single'`: **Final 1회 호출** — findings JSON·[항목 통계]·지식베이스·판정 예시를 한 번에 주고
+  바로 구조화 JSON 판정. 비용/지연 1/3, 오류 전파 없음(충분히 강한 모델 권장).
+- 어느 모드든 Final 응답이 JSON이 아니면 **같은 입력으로 1회 자동 재시도**(형식 지시 강화),
+  그래도 실패하면 텍스트/HTML 폴백. 모든 호출은 `RUN/AI/ai_input_<lot>.md`에 그대로 남습니다.
 
 | 단계 | system 프롬프트 | user 입력 | 출력 | 비고 |
 |---|---|---|---|---|
-| ① **Triage** | "현상(phenomenon) 단위로 3~6개로 묶어라" | `target_lot` + **findings JSON**(severity/type/item/title/detail) | 현상 정리 텍스트 | 파생항목 통합, 측정 의심 최상단 |
+| ① **Triage** | "CAT2가 같은 항목은 한 현상으로 묶어 3~6개로 정리" | `target_lot` + **findings JSON**(severity/type/item/**display_name/cat2**/title/detail/**spec_out_pgm/zone/pattern/positions/meas_overlap_\***) + **[항목 통계]** | 현상 정리 텍스트 | PCHK(측정 의심) 최상단 + 겹친 wafer·좌표·PGM(pt) 명시 |
 | ② **Root-cause** | "**[지식베이스]** 근거로 추정 원인·확인 포인트" + `ANOMALY_KNOWLEDGE.md` 텍스트 | ① 결과 | 추정 원인 텍스트 | 지식 텍스트가 여기서 주입됨 |
-| ③ **Final** | "종합 판단 + 불량 모드 판정, HTML `<ul>`로만 출력" + 지식 텍스트 | spec-out Index 조합 + ① + ② | **HTML `<ul>`** | 최종 [0] 블록 |
+| ③ **Final** | "종합 판단 + 불량 모드 판정, **JSON 객체로만 출력**" + 지식 텍스트 + (있으면) **[판정 예시]**(RUN/EXAMPLE) | spec-out Index 조합 + ① + ② + [항목 통계] | **구조화 JSON** | 코드가 검증 후 HTML 조립(아래) |
 
-- **AI에 전달되는 것**: (a) findings JSON(코드 산출), (b) `ANOMALY_KNOWLEDGE.md` 텍스트(②③ system), (c) target_lot_id.
+- **③ Final은 구조화 JSON**: `{"defect_mode", "basis_items", "summary", "phenomenon", "actions", "meas_suspect"}`.
+  코드(`_assemble_final_html`)가 **판정표(DEFECT_MODE_TABLE)를 파싱해 검증** 후 HTML `<ul>`을 조립합니다:
+  - `defect_mode`가 표의 MODE명과 매칭되지 않으면 → `특정 불량 모드 미매칭(수동 검토) — AI 제안: ...`으로 강등.
+  - **LINK는 AI 출력이 아니라 매칭된 표 항목의 LINK만** `<a>`로 첨부(LINK 없는 모드는 미첨부 — 선택 사항). COMMENT도 표의 값을 권고 조치에 덧붙임. → **판정표 밖의 링크/조치가 리포트에 나올 수 없음.**
+  - JSON 파싱 실패 시(비-JSON 응답) 종전처럼 텍스트/HTML 그대로 사용(하위호환).
+- **AI에 전달되는 것**: (a) findings JSON(코드 산출 — 표시명·CAT2·위치·특이맵 패턴·PGM(pt)·PCHK 겹침 포함), (b) [항목 통계](전 항목 wafer 기준 요약 — median 백분위·산포배수·패턴), (c) `ANOMALY_KNOWLEDGE.md` 텍스트(②③ system), (d) RUN/EXAMPLE 판정 예시(③, 있으면), (e) target_lot_id.
   → **측정 raw/피벗 데이터, reformatter, 이미지는 전달하지 않습니다.** 토큰·보안 관점에서 "코드가 요약한 Finding"만 넘깁니다.
-- `metrics_dict`는 인자로 받지만 현재 프롬프트 구성에는 직접 넣지 않습니다(향후 확장 여지).
 - **어느 단계든 예외/`llm_fn is None`이면 즉시 `None` 반환** → [0]엔 코드 분석만.
 
 ### 4) 결과 반영
@@ -578,12 +588,110 @@ self.anomaly_exclude_items = [
 - **동일 site spec-out 재발** — 같은 chip(X,Y)가 여러 lot에서 반복 이탈 → systematic(레티클/척/프로브핀). (위치별 재발 카운트로 detector화 가능)
 - **Trend drift** — baseline(타 lot) 일별 median의 기간 기울기 → 타겟 이동/소모품 수명. (일별 회귀 기울기로 detector화 가능)
 - **가속 DOE 추세** — 가속도순 TEG 묶음의 이상도 단조 증가 여부로 불량모드 working 판정.
-- **PCHK 측정 신뢰성** *(구현됨, basis 신호만)* — PCHK도 spec-out이면 **일반 Index와 동일하게 이상(CRITICAL)** 으로 판정합니다(별도 finding 타입 없음). 다만 PCHK spec-out site에서 **동일 shot(wafer·PGM(pt)·CHIP_X/Y)에 다른 항목도 함께 spec-out**인 겹침 신호를 `anomaly_basis_<lot>.json`의 `meas_overlap_*`에 기록하고, **"측정이상으로 볼지"의 판정은 `ANOMALY_KNOWLEDGE.md`의 '측정이상 추정 규칙'을 근거로 AI가** 수행합니다(엔지니어가 MD 편집 → AI 적용). PCHK별 검증 대상 ITEM 매핑은 `ANOMALY_KNOWLEDGE.md`의 `PCHK_ITEM_MAP` 마커로 관리(ALIAS/표시명 둘 다 인식).
+- **PCHK 측정 신뢰성** *(구현됨)* — PCHK spec-out site에서 **동일 shot(wafer·PGM(pt)·CHIP_X/Y)에 다른 항목도 함께 spec-out**인 겹침 신호를 `anomaly_basis_<lot>.json`의 `meas_overlap_*`에 기록하고, **finding에도 함께 실어 AI에 전달**합니다. PCHK가 `wfmap_exclude_keywords`에 걸리면 이상/주의 '판정'에서는 제외하되 **`MEAS_SUSPECT`(NOTICE, 🟡 측정이상 추정) finding으로 신호만 산출**하고, 제외되지 않으면 일반 Index와 동일하게 CRITICAL로 판정하며 겹침 정보를 부가합니다. **"측정이상으로 볼지"의 판정은 `ANOMALY_KNOWLEDGE.md`의 '측정이상 추정 규칙'을 근거로 AI가** 수행합니다(엔지니어가 MD 편집 → AI 적용). PCHK별 검증 대상 ITEM 매핑은 `ANOMALY_KNOWLEDGE.md`의 `PCHK_ITEM_MAP` 마커로 관리(ALIAS/표시명 둘 다 인식).
+
+### 특이맵(공간 패턴) 판정 기준 — `classify_specout_pattern`
+
+spec-out chip **좌표 집합**(target lot, wafer간 중복 좌표 제거)의 공간 패턴을 코드가 분류해
+finding `spec_out_pattern`·basis `spec_out_pattern_stats`에 담습니다. AI는 라벨을 인용만 합니다.
+
+**제품 무관 동작 원리** — 제품마다 chip 좌표 범위가 달라도 전 판정을 정규화 좌표로 수행:
+- 중심 `(cx,cy)` = 제품 전체 chip 좌표의 centroid. 전체 좌표는 **설정파일 기반 Chip_Radius 매핑**
+  (Data Extractor 좌표·radius)이 있으면 그것, 없으면 모집단 측정 좌표(unique)로 대체.
+- `r_norm` = 좌표별 radius / 제품 최대 radius (radius는 Chip_Radius 우선, 없으면 centroid 거리).
+- 방향 = centroid 기준 **시계 각도**(12시=위). 좌표 y+가 아래 방향인 제품은
+  `anomaly_pattern_thresholds={'y_positive_up': False}`로 상/하 반전.
+
+**판정 = 규칙 목록(위에서부터 평가, '먼저 통과'한 라벨 채택)** — 기본 목록은
+`anomaly_engine._PATTERN_RULES_DEFAULT`, **`My_config.anomaly_pattern_rules`(list)로 통째 교체**하면
+규칙의 **추가/삭제/순서변경/임계조정이 코드 수정 없이** 됩니다. 규칙 type과 판정식:
+
+| type | 파라미터 (기본 규칙의 값) | 판정식 | 라벨 예 |
+|---|---|---|---|
+| `global` | `min_share`(0.5) | unique out 좌표 / 제품 전체 좌표 ≥ min_share | `전면성(전 좌표의 100%)` |
+| `line` | `axis`('x'/'y'), `max_lanes`(2), `min_pts`(4) | 서로 다른 축값 개수 ≤ max_lanes | `세로 줄성(x=4, 5)` |
+| `radius_band` | `r_min`, `r_max`, `cover`(0.7) | r_norm∈[r_min, r_max) 좌표 비율 ≥ cover | `Edge ring(84%)` (기본: Center≤0.45 / Edge≥0.85 / Middle 그 사이) |
+| `clock` | `min_rnorm`(0.4), `resultant`(0.92), `min_frac`(0.75) | 방향 단위벡터 평균 길이 R ≥ resultant → 평균각을 시각으로. 0.92 = 사분면(90°, R≈0.90)보다 좁은 ≲75° 클러스터만 | `10시 방향 클러스터(집중도 0.96)` |
+| `quadrant` | `cover`(0.7) | 한 사분면(우상/좌상/좌하/우하) 비율 ≥ cover | `우상 사분면(80%)` |
+| `half` | `cover`(0.75) | 한 반면(상/하/좌/우) 비율 ≥ cover | `상반구(78%)`, `좌측 반면(76%)` |
+
+- 전 규칙 불통과 → `산발(특정 패턴 없음)`. unique 좌표 < `min_pts`(3, 전역 옵션
+  `anomaly_pattern_thresholds`) → `소수 pt`(판정 보류). `y_positive_up`(전역 옵션)으로 상/하 방향 반전.
+
+**wafer 수 기반 게이트 + wafer간 반복 코멘트** (전역 옵션 키, `anomaly_pattern_thresholds`로 조정):
+
+- **이상 wafer 1~2개**(`gate_few_wafer_max`=2): spec-out **총 `gate_few_wafer_min_pts`(4)pt 이상**일
+  때만 특이맵을 판정합니다(미만이면 판정 보류 — 소수 pt 노이즈 오분류 방지. basis
+  `spec_out_pattern_stats.gated`에 사유 기록).
+- **이상 wafer 3개 이상**(`repeat_min_wafers`=3): pt 수가 적어도 wafer간 반복성을 검사해
+  **코멘트를 finding detail에 남깁니다**(HTML/PPT/AI 모두 노출, finding `spec_out_commonality`):
+  - `동일 shot 반복` — 같은 좌표(CHIP_X/Y)가 3개 wafer 이상에서 spec-out (상위 3개 좌표 표기).
+  - `wafer간 유사 위치 반복` — 동일 shot 반복은 없지만 out 좌표의 `similar_overlap_frac`(50%) 이상이
+    2개 wafer 이상에서 겹침.
+  반복 위치는 레티클/프로브카드/척 등 systematic 원인 신호로, AI Triage가 그대로 인용합니다.
+  (채택 패턴이 `전면성`이면 전 좌표가 out이라 반복이 자명하므로 코멘트를 생략합니다.)
+- **"왜 이 특이맵인가" 추적**: `anomaly_basis_<lot>.json` → `spec_out_pattern_stats.rules`에
+  **모든 규칙의 평가값(metric)·통과여부(passed)가 순서대로** 남습니다. 예:
+  `{"name":"Edge ring","type":"radius_band","metric":0.84,"passed":true}` — 특정 제품맵이 이상하게
+  분류되면 이 trace를 보고 규칙/임계를 조정하세요.
+- **규칙 추가/삭제 예** (`My_config.anomaly_pattern_rules`):
+
+```python
+self.anomaly_pattern_rules = [
+    {'name': '전면성',      'type': 'global',      'min_share': 0.5},
+    {'name': '베벨 근접 링', 'type': 'radius_band', 'r_min': 0.93, 'r_max': 1.01, 'cover': 0.6},  # 신규
+    {'name': 'Edge ring',   'type': 'radius_band', 'r_min': 0.85, 'r_max': 1.01, 'cover': 0.7},
+    {'name': 'k시 방향 클러스터', 'type': 'clock', 'min_rnorm': 0.4, 'resultant': 0.92, 'min_frac': 0.75},
+    # '반구'를 빼고 싶으면 그 규칙을 목록에서 제외하면 끝
+]
+```
+
+- **수동 분류 테스트**(제품 좌표로 어떤 라벨이 나오는지 바로 확인):
+
+```python
+from anomaly_engine import classify_specout_pattern
+label, stats = classify_specout_pattern(out_xy, all_xy, radius_of=coord_radius_map)
+print(label); print(stats['rules'])   # 규칙별 평가 trace
+```
+
+### AI 판정 예시 (few-shot) — `RUN/EXAMPLE/*.md`
+
+후행적으로 불량 모드가 **확정된 사례**를 md 파일로 넣으면, AI Final(③) 판정 시 [판정 예시]로
+주입되어 유사 입력을 같은 판정으로 잡습니다. **없어도 정상 동작**(있을 때만 주입).
+
+- **운영 흐름**: 리포트 발행 → `RUN/AI/ai_input_<lot>.md`에 당시 AI 입력(findings)이 남음 →
+  이후 실물 분석으로 불량 모드/원인이 확정되면 → 그 입력 요약+확정 판정을 예시 파일로 저장 →
+  다음 리포트부터 유사 케이스가 자동으로 그 판정에 수렴.
+- **파일 규칙**: `RUN/EXAMPLE/` 아래 `.md` 파일. 파일명 정렬순으로 최대 `ai_examples_max`(5)개,
+  총 `ai_examples_max_chars`(6000자)까지 주입. **파일명이 `_`로 시작하면 스킵**(`_TEMPLATE.md` 등).
+  config: `ai_examples_dir/max/max_chars`.
+- **작성 형식** (자유 서식이지만 아래 3섹션 권장 — `RUN/EXAMPLE/_TEMPLATE.md` 참조):
+
+```markdown
+# 사례: <짧은 사례명> (lot Txxxx.x, 2026-07 확정)
+
+## 입력(관찰 요약) — 당시 ai_input_<lot>.md의 findings 요약
+- spec-out: VTH_N, VTH_P (CAT2=VTH), 특이맵: Edge ring(84%)
+- PCHK 겹침: 없음 / [항목 통계] 특기: IDSAT_N median_pctile=3.2(하위 5% 이내)
+
+## 확정 판정(후행 확인된 결과)
+- 불량 모드: Gate 모듈 불량 (VTH N·P 연동)   ← DEFECT_MODE_TABLE의 MODE명 그대로
+- 판정 로직: VTH N·P 동시 spec-out + Edge ring → OOO 설비 엣지 링 이슈로 확정됨
+
+## 비고(선택)
+- 재발 시 확인 포인트: OOO 챔버 이력, 엣지 계측
+```
+
+- **주의**: `불량 모드`는 `ANOMALY_KNOWLEDGE.md` 판정표의 MODE명과 **정확히 일치**해야
+  코드 검증을 통과합니다(새 불량이면 판정표에 MODE 블록을 먼저 추가한 뒤 예시를 넣으세요 —
+  예시는 "언제 그 모드로 판정할지"의 사례, 판정표는 "그 모드가 존재함"의 정의).
 
 ### 불량 모드 판정표 (참고 지식)
 
-> **코드는 단일 이상만 산출**하고, 여러 Index 조합→불량 모드 판정은 **AI 연결 시** 아래 표를 근거로 수행합니다(위가 우선).
-> 사내 이식 시 실제 Index명/대시보드 URL로 교체하세요. (예시)
+> **코드는 단일 이상만 산출**하고, 여러 Index 조합→불량 모드 판정은 **AI 연결 시** 수행합니다(위가 우선).
+> ⚠️ **AI가 실제 참조하는 판정표는 `ANOMALY_KNOWLEDGE.md`의 `DEFECT_MODE_TABLE` 마커 섹션**입니다
+> (AI에는 ANOMALY_KNOWLEDGE.md만 전달됨 — README는 전달되지 않음). 새 불량 모드 추가/링크·코멘트
+> 관리도 그쪽에서 하세요. 아래는 이해를 돕는 참고 사본(예시)입니다.
 
 1. **Contact 미오픈 불량** — 조건: `RCNT_N`/`RCNT_P` spec-out → Contact 저항 초과(식각 미오픈/폴리머 잔류).
 2. **Gate 모듈 불량 (VTH)**

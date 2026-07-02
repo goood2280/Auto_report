@@ -952,6 +952,29 @@ def _add_wafer_circle(ax, params, color='#9aa4b0', lw=0.7, zorder=0):
         pass
 
 
+def _wfmap_png_bytes(fig, dpi, colors=64):
+    """WF MAP figure를 팔레트(PNG-8) 양자화+최적화로 인코딩해 PNG bytes 반환.
+
+    WF MAP은 표시 크기가 작고(≈60~90px) 색 종류가 적어(칩 컬러맵 + 원 테두리 + 배경)
+    팔레트 양자화 시 화질 손실이 사실상 없으면서 파일 크기는 절반 이하로 줄어든다.
+    → score board 80 index·wafer map 30종 + anomaly 5종이 모두 full로 나와도 HTML<2MB.
+    Pillow 없거나 실패 시 원본 PNG bytes로 폴백한다.
+    """
+    import io as _io
+    buf = _io.BytesIO()
+    fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight', pad_inches=0.02, facecolor='white')
+    try:
+        from PIL import Image as _PILImage
+        buf.seek(0)
+        _im = _PILImage.open(buf).convert('RGB')
+        _pal = _im.quantize(colors=int(colors), dither=_PILImage.Dither.NONE)
+        _out = _io.BytesIO()
+        _pal.save(_out, format='PNG', optimize=True)
+        return _out.getvalue()
+    except Exception:
+        return buf.getvalue()
+
+
 def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
                             direction='BOTH', size_in=0.85, dpi=None,
                             spec_low=None, spec_high=None, by_lot=False):
@@ -999,7 +1022,7 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
     norm = _wfmap_norm(direction, spec_low, spec_high, d[item])
     gdim = max(int(d[cx].nunique()), int(d[cy].nunique()), 1)
     chip_pt = size_in / gdim * 72.0
-    s = max(1.0, (chip_pt * 0.9) ** 2)
+    s = max(1.0, (chip_pt * 1.15) ** 2)   # 셀을 꽉 채워 칩 사이 배경(흰 격자선)이 안 보이게
     cmap = _wfmap_cmap(direction)
     # 전체 wafer 격자가 잘리지 않도록 공통 축범위 + 반칩 여백 (가장자리 칩 보존)
     _gx0, _gx1 = float(d[cx].min()), float(d[cx].max())
@@ -1038,25 +1061,26 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
         fig, ax = plt.subplots(figsize=(size_in, size_in))
         ax.scatter(g[cx].astype(float), g[cy].astype(float), c=g[item].astype(float),
                    cmap=cmap, norm=norm, s=s, marker='s', linewidths=0)
-        _add_wafer_circle(ax, _circ)
-        ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal', adjustable='box'); ax.set_facecolor('#f8f9fa')
+        # 원 테두리: radius 기반 원점·150mm 원을 '진한 검정'으로. 내부 배경색 없음(흰색)
+        #  — 칩(shot) 컬러가 내부를 채우므로 별도 배경 fill 불필요.
+        _add_wafer_circle(ax, _circ, color='#000000', lw=1.0)
+        ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal', adjustable='box'); ax.set_facecolor('white')
         # chip x 정방향(chip #1=왼쪽, 큰 번호=오른쪽): invert_xaxis 대신 xlim을 역순으로 두어 방향 교정
         ax.set_xlim(_gx1 + _xpad, _gx0 - _xpad)
         ax.set_ylim(_gy0 - _ypad, _gy1 + _ypad)
         for sp in ax.spines.values():
             sp.set_visible(False)
         fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight', pad_inches=0.02, facecolor='white')
+        _png = _wfmap_png_bytes(fig, dpi)   # 팔레트 양자화(PNG-8)로 용량 최소화
         plt.close(fig)
         try:
             _wkey = str(int(wid))
         except (ValueError, TypeError):
             _wkey = str(wid)
         if by_lot and lot_val is not None:
-            out[f"{lot_val}|{_wkey}"] = base64.b64encode(buf.getvalue()).decode('utf-8')
+            out[f"{lot_val}|{_wkey}"] = base64.b64encode(_png).decode('utf-8')
         else:
-            out[_wkey] = base64.b64encode(buf.getvalue()).decode('utf-8')
+            out[_wkey] = base64.b64encode(_png).decode('utf-8')
     return out
 
 
@@ -1153,7 +1177,7 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
 
     gdim = max(int(d[cx].nunique()), int(d[cy].nunique()), 1)
     chip_pt = size_in / gdim * 72.0
-    s = max(1.0, (chip_pt * 0.9) ** 2)
+    s = max(1.0, (chip_pt * 1.15) ** 2)   # 셀을 꽉 채워 칩 사이 배경(흰 격자선)이 안 보이게
     # 전체 wafer 격자가 잘리지 않도록 공통 축범위 + 반칩 여백 (모든 소형맵 동일 범위)
     gx0, gx1 = float(d[cx].min()), float(d[cx].max())
     gy0, gy1 = float(d[cy].min()), float(d[cy].max())
@@ -1175,8 +1199,7 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
         for sp in ax.spines.values():
             sp.set_visible(False)
         fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight', pad_inches=0.02, facecolor='white')
+        _png = _wfmap_png_bytes(fig, dpi)   # 팔레트 양자화(PNG-8)로 용량 최소화
         plt.close(fig)
         _root = gd.get(croot, '') if croot else ''
         _wv = gd.get(cw, '')
@@ -1185,7 +1208,7 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
         except (ValueError, TypeError):
             pass
         # (label, base64, is_target_lot) — target lot WF MAP은 HTML에서 라벨을 진한 파란색 강조
-        res.append((f"{_root} #{_wv}", base64.b64encode(buf.getvalue()).decode('utf-8'), _is_tgt(gd)))
+        res.append((f"{_root} #{_wv}", base64.b64encode(_png).decode('utf-8'), _is_tgt(gd)))
     return res
 
 
@@ -1300,21 +1323,20 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
         vmax = vmin + 1e-9
     gdim = max(int(d[cx].nunique()), int(d[cy].nunique()), 1)
     chip_pt = size_in / gdim * 72.0
-    s = max(1.0, (chip_pt * 0.9) ** 2)
+    s = max(1.0, (chip_pt * 1.15) ** 2)   # 셀을 꽉 채워 칩 사이 배경(흰 격자선)이 안 보이게
 
     fig, ax = plt.subplots(figsize=(size_in, size_in))
     ax.scatter(g[cx].astype(float), g[cy].astype(float), c=g[item].astype(float),
                cmap=cmap or _wfmap_cmap(direction), vmin=vmin, vmax=vmax,
                s=s, marker='s', linewidths=0)
-    _add_wafer_circle(ax, _circ)
+    _add_wafer_circle(ax, _circ, color='#000000', lw=1.0)
     ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal')
-    ax.set_facecolor('#f8f9fa')
+    ax.set_facecolor('white')
     for sp in ax.spines.values():
         sp.set_visible(False)
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight', facecolor='white')
+    _png = _wfmap_png_bytes(fig, dpi)   # 팔레트 양자화(PNG-8)로 용량 최소화
     plt.close(fig)
-    return base64.b64encode(buf.getvalue()).decode('utf-8')
+    return base64.b64encode(_png).decode('utf-8')
 
 
 def calcaulate_description_image_info_dict(description_ppt_path, img_quality=20):
@@ -1686,7 +1708,7 @@ def _render_wafer_legend_bytes(cfg):
     ax_leg.set_xlim(0, 25)
     ax_leg.set_ylim(-1, 1)
     buf = _io.BytesIO()
-    fig_leg.savefig(buf, format='jpg', dpi=cfg['dpi'], facecolor='#f8fafc', pil_kwargs={'quality': cfg['jpg_q']})
+    fig_leg.savefig(buf, format='jpg', dpi=cfg['dpi'], facecolor='white', pil_kwargs={'quality': cfg['jpg_q']})
     plt.close(fig_leg)
     return buf.getvalue()
 
@@ -2219,7 +2241,13 @@ def _render_item_charts(task):
             ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=6))
             _label_axes(ax, xlabel="DC tkout_time", ylabel=y_label, ylabel_size=5.5)  # y축명 잘림 방지 위해 축소
             if log_scale: ax.set_yscale('log')
-            ax.legend(fontsize=6, loc='upper left', frameon=False)   # Trend 범례 좌상단 고정
+            # Trend 범례 좌상단 고정 — 흰 배경 + 옅은 테두리, 글자·항목 간격 축소(컴팩트)
+            _leg = ax.legend(fontsize=6, loc='upper left', frameon=True, facecolor='white',
+                             edgecolor='#b0b0b0', framealpha=0.95, labelspacing=0.18,
+                             handletextpad=0.3, borderpad=0.3, borderaxespad=0.3)
+            if _leg is not None:
+                _leg.set_zorder(20)
+                _leg.get_frame().set_linewidth(0.6)
             _remove_spines(ax)
             ax.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
             ax.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
@@ -2462,7 +2490,8 @@ def render_wafer_wfmaps_batch(df, item_specs, min_pts=50, lot_prefix=None,
 
     meta_cols = [c for c in ['CHIP_X_ADJ', 'CHIP_Y_ADJ', 'CHIP_X_POS', 'CHIP_Y_POS',
                              'chip_x_pos', 'chip_y_pos', 'WAFER_ID', 'wafer_id',
-                             'TKOUT_TIME', 'tkout_time', 'FAB_LOT_ID', 'fab_lot_id']
+                             'TKOUT_TIME', 'tkout_time', 'FAB_LOT_ID', 'fab_lot_id',
+                             'Chip_Radius', 'chip_radius']   # 원(150mm) radius fit용 — 빠지면 fallback 원
                  if c in df.columns]
     chunks = [item_specs[i::workers] for i in range(workers)]
     try:
@@ -2990,10 +3019,11 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                     for _w in sorted([w for (l, w) in _slw if l == _lot]):
                         order_lw.append((_lot, _w))
                 n_waf = max(len(order_lw), 1)
-                # wafer 열폭: 기본 0.31" 고정(적게 찍히면 표가 줄어듦). 단 wafer가 많아
-                # 슬라이드 폭(13")을 넘으면 넘지 않게 균일 축소(표 내 모든 wafer 동일 폭 유지).
-                STAT_W = 0.65
-                WAFER_W = min(0.36, (13.0 - STAT_W) / n_waf)
+                # wafer 열폭: 기본 0.36" 고정(적게 찍히면 표가 줄어듦). 단 wafer가 많아도
+                # 표가 우측 열(Trend/Radius/CDF)을 침범하지 않도록 좌측 열 폭(LW) 안으로
+                # 균일 축소(표 내 모든 wafer 동일 폭 유지). 25매도 좌열에 다 들어가게 함.
+                STAT_W = 0.62
+                WAFER_W = min(0.36, (LW - STAT_W) / n_waf)
                 ncol = 1 + n_waf
                 nrow = 2 + len(_stat_rows)      # lot 헤더행 + wafer# 헤더행 + stat 행들
                 tbl_w = STAT_W + n_waf * WAFER_W
@@ -3003,9 +3033,9 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 table_shape.columns[0].width = Inches(STAT_W)
                 for _j in range(1, ncol):
                     table_shape.columns[_j].width = Inches(WAFER_W)
-                # (0,0)+(1,0) 병합 → 'Stat'
+                # (0,0)+(1,0) 병합 → 라벨 없이 빈 칸(요청: 'Stat' 표기 제거)
                 table_shape.cell(0, 0).merge(table_shape.cell(1, 0))
-                _stat_style(table_shape.cell(0, 0), "Stat", _NAVY, _WH, True, 9)
+                _stat_style(table_shape.cell(0, 0), "", _NAVY, _WH, True, 9)
                 # 헤더행0: lot_id 가로 병합
                 _k = 0
                 while _k < len(order_lw):

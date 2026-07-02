@@ -567,17 +567,56 @@ class Config:
         #   - 불량 모드 우선순위 판정표는 ANOMALY_KNOWLEDGE.md('불량 모드 판정표')에서 관리하며,
         #     AI(use_gpt_summary)가 연결된 경우에만 상단 요약에 불량 모드를 해석/표기한다.
 
+        # ── 특이맵(spec-out 공간 패턴) 판정 — 규칙 목록 기반 ──
+        #   판정 규칙(패턴)의 **추가/삭제/순서변경/임계조정**은 anomaly_pattern_rules(list)로
+        #   기본 목록(anomaly_engine._PATTERN_RULES_DEFAULT)을 통째로 교체하면 된다(코드 수정 불필요).
+        #   None이면 기본 목록 사용. 각 규칙 = {'name','type',<type별 파라미터>} — 위에서부터
+        #   '먼저 통과'한 규칙의 라벨이 채택된다. type/파라미터·판정식은 README '특이맵' 절 참조.
+        #   예) 기본에서 반구 제거 + '베벨 근접 링' 추가:
+        #   self.anomaly_pattern_rules = [
+        #       {'name': '전면성', 'type': 'global', 'min_share': 0.5},
+        #       {'name': '베벨 근접 링', 'type': 'radius_band', 'r_min': 0.93, 'r_max': 1.01, 'cover': 0.6},
+        #       ... (원하는 규칙만 원하는 순서로) ...
+        #   ]
+        #   각 규칙의 평가값·통과여부는 anomaly_basis_<lot>.json의
+        #   spec_out_pattern_stats['rules']에 trace로 남아 "왜 이 특이맵인지" 확인 가능.
+        self.anomaly_pattern_rules = None
+        #   전역 옵션(규칙 공통) — dict로 부분 override:
+        #     min_pts(3)                : 패턴 판정 최소 unique 좌표 수
+        #     y_positive_up(True)       : 좌표 y+가 웨이퍼 위(12시) 방향인지
+        #     gate_few_wafer_max(2)     : 이상 wafer가 이 수 이하면 '소수 wafer'로 간주
+        #     gate_few_wafer_min_pts(4) : 소수 wafer일 때 특이맵 판정에 필요한 최소 spec-out pt
+        #                                 (1~2 wafer & <4pt → 판정 보류, basis에 gated 사유 기록)
+        #     repeat_min_wafers(3)      : 이 수 이상 wafer 발생 시 wafer간 반복성 코멘트 검사 —
+        #                                 같은 좌표가 이 수 이상 wafer에서 out → '동일 shot 반복'
+        #     similar_overlap_frac(0.5) : 동일 shot 반복이 없어도 out 좌표의 이 비율 이상이
+        #                                 2개 wafer 이상 겹치면 '유사 위치 반복' 코멘트
+        self.anomaly_pattern_thresholds = {}
+
+        # ── AI 판정 예시(few-shot) — RUN/EXAMPLE/*.md (없어도 동작) ──
+        #   후행적으로 불량 모드가 확정된 사례를 md 파일로 넣으면 AI Final 판정에 예시로 주입된다.
+        #   파일명이 '_'로 시작하면(_TEMPLATE.md 등) 스킵. 작성법은 README 'AI 판정 예시' 참조.
+        self.ai_examples_dir = os.path.join('RUN', 'EXAMPLE')
+        self.ai_examples_max = 5           # 주입할 예시 파일 최대 개수(파일명 정렬순)
+        self.ai_examples_max_chars = 6000  # 예시 총 길이 상한(프롬프트 크기 보호)
+
+        # ── AI 호출 모드 ──
+        #   'multi'(기본) : Triage → Root-cause → Final 3회 호출(단계별 정제, 약한 모델에 유리)
+        #   'single'      : Final 1회 호출(비용/지연 1/3, 단계간 오류 전파 없음 — 강한 모델 권장)
+        #   Final 응답이 JSON 형식이 아니면 어느 모드든 1회 자동 재시도 후 폴백.
+        self.ai_stage_mode = 'multi'
+
         # ──────────────────────────────────────────────────────
         # PPT 차트 렌더링 설정 (Chart rendering settings for PPT)
         # 엔지니어가 PPT에 삽입되는 차트의 해상도/압축 품질을 직접 조정합니다.
         # 화질↑ 시 용량도 함께 증가하므로 PPT 10MB 한도(목표 5~7MB)를 고려해 조정하세요.
         # ──────────────────────────────────────────────────────
-        # 용량 가드: 최종 PPT가 10MB를 넘으면 아래 순서로 낮추세요
-        #   1) ppt_chart_jpg_quality(라인 차트 = 용량의 대부분)  2) ppt_map_jpg_quality  3) ppt_chart_dpi
-        # 측정 기준(합성 25웨이퍼·2서브아이템): 슬라이드당 약 150KB → 항목 수에 비례해 증가.
-        self.ppt_chart_dpi = 150           # PPT 삽입 차트 해상도 (DPI). 높이면 선명+용량↑
-        self.ppt_chart_jpg_quality = 70    # 라인/박스/트렌드/CDF/레전드 JPEG 품질 (1~95, 용량의 주 레버)
-        self.ppt_map_jpg_quality = 60      # WF MAP(연속색 산점) JPEG 품질
+        # 용량 목표: index 80개(각 WF MAP 50pt+ 포함) 기준 PPT ≈ 7MB가 되도록 튜닝.
+        #   index당 이미지 6종 = box/trend/radius/cum(chart 품질) + WF MAP(map 품질, 최대 용량) + colorbar.
+        #   더 줄이려면 순서: 1) ppt_map_jpg_quality  2) ppt_chart_jpg_quality  3) ppt_chart_dpi
+        self.ppt_chart_dpi = 125           # PPT 삽입 차트 해상도 (DPI). 높이면 선명+용량↑
+        self.ppt_chart_jpg_quality = 55    # 라인/박스/트렌드/CDF/레전드 JPEG 품질 (1~95, 용량의 주 레버)
+        self.ppt_map_jpg_quality = 38      # WF MAP(연속색 산점) JPEG 품질 (index당 최대 용량 항목)
 
         # ── HTML 리포트용 이미지 해상도(DPI) — PPT와 독립적으로 조정 ──
         # HTML [0] Anomaly Trend chart(RUN/TEMP png)와 Score Board/anomaly WF MAP의 DPI.

@@ -857,11 +857,13 @@ def main():
 
                         # 1-3b. 코드 통계 분석(findings) — HTML [0]와 PPT 상세 페이지에 공용 사용
                         code_findings = []
+                        anomaly_item_stats = {}   # 항목별 통계 요약 — AI 해석 [항목 통계] 입력
                         try:
                             code_findings = analyze_commonality(
                                 merged_df, target_lot_id, metrics_dict, spec_data,
                                 main_vehicle=vehicle, config=GLOBAL_CONFIG, reformatter=reformatter,
-                                knowledge_text=_ANOMALY_KNOWLEDGE_TEXT)
+                                knowledge_text=_ANOMALY_KNOWLEDGE_TEXT,
+                                item_stats_out=anomaly_item_stats)
                             print(f"[INFO] commonality 분석: {len(code_findings)}건 finding")
                         except Exception as ce:
                             print(f"[WARN] commonality 분석 스킵 (오류): {ce}")
@@ -1409,16 +1411,23 @@ def main():
                                                             f'<img src="data:image/png;base64,{_b}" width="58" height="58" '
                                                             'style="width:58px; height:58px; display:block; margin:0 auto; border:1px solid #1f4e79;"/>'
                                                             f'<div style="{_lab_style}">{_lab}</div>')
-                                                    # flex/grid 대신 table 배치(포워딩 유지) — 6열/행
-                                                    _wf_block = _html_table(_wf_cells, 6, cellpad=2,
+                                                    # flex/grid 대신 table 배치(포워딩 유지) — 2행으로 붙게
+                                                    #  (WF MAP을 Trend 오른쪽에 2행만 차지하도록 열 수를 산정)
+                                                    _ncol2 = max(1, -(-len(_wf_cells) // 2))
+                                                    _wf_block = _html_table(_wf_cells, _ncol2, cellpad=2,
                                                                             cellstyle='vertical-align:top; text-align:center;')
                                             except Exception as _we:
                                                 print(f"[WARN] spec-out WF MAP 스킵 ({item}): {_we}")
-                                        # trend + WF MAP을 table 한 행(2열)로 배치(포워딩에서 flex 대체)
+                                        # 이상 항목명(헤더) → 그 밑에 Trend(좌) + WF MAP(우, 2행)
+                                        _item_hdr = (
+                                            '<div style="font-size:13px; font-weight:bold; color:#1f4e79; '
+                                            'margin:2px 0 3px 2px; border-left:4px solid #d32f2f; padding-left:7px;">'
+                                            f'{display_name(item)}</div>')
                                         _spec_rows.append(
-                                            '<table cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-bottom:8px;">'
+                                            '<div style="margin-bottom:14px;">' + _item_hdr +
+                                            '<table cellpadding="0" cellspacing="0" style="border-collapse:collapse;">'
                                             f'<tr><td style="vertical-align:top; padding-right:12px;">{_trend_block(item, True, img_b64, _tw, _th)}</td>'
-                                            f'<td style="vertical-align:top;">{_wf_block}</td></tr></table>')
+                                            f'<td style="vertical-align:top;">{_wf_block}</td></tr></table></div>')
 
                                     # '이상'/'주의' 탭 라벨은 표시하지 않는다. 각 차트 좌상단의
                                     # SPEC OUT / WARNING 스티커가 상태 식별 역할을 대신한다.
@@ -1444,7 +1453,8 @@ def main():
                             try:
                                 ai_html = interpret_with_ai(
                                     code_findings, metrics_dict, _ANOMALY_KNOWLEDGE_TEXT,
-                                    _LLM_FN, config=GLOBAL_CONFIG, target_lot_id=target_lot_id)
+                                    _LLM_FN, config=GLOBAL_CONFIG, target_lot_id=target_lot_id,
+                                    item_stats=anomaly_item_stats)
                                 print("[INFO] AI 다단계 해석 적용" if ai_html else "[INFO] AI 다단계 해석 결과 없음")
                             except Exception as ae:
                                 print(f"[WARN] AI 다단계 해석 스킵 (오류): {ae}")
