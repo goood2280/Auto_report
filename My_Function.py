@@ -1875,9 +1875,9 @@ def _render_item_charts(task):
         ax_box.set_xlim(0.5, 25.5)
         ax_box.tick_params(axis='x', rotation=45, labelsize=7)
         if _tgt_wafnums:
-            # box plot 우측 하단(축 내부 좌표)에 '*: lot_id' 범례 배치
-            ax_box.text(0.99, 0.03, f"*: {target_lot_id}", transform=ax_box.transAxes,
-                        ha='right', va='bottom', fontsize=6, color=C_NEUTRAL, fontstyle='italic')
+            # box plot '바깥' 우하단(figure 좌표)에 '*: lot_id' 범례 배치 (축 내부가 아니라 그림 하단)
+            fig_box.text(0.995, 0.005, f"*: {target_lot_id}",
+                         ha='right', va='bottom', fontsize=6, color=C_NEUTRAL, fontstyle='italic')
         _label_axes(ax_box, xlabel="Wafer #", ylabel=y_label)
         _remove_spines(ax_box)
         ax_box.set_axisbelow(True)
@@ -2772,7 +2772,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             TITLE_GAP = 0.22             # 타이틀과 바로 아래 그림 사이 간격
             SLIDE_BOTTOM = 7.40          # 차트가 채울 슬라이드 하단 경계 (7.5" - 하단여백)
             # 그림 top Y 좌표 (좌열: 통계표/레전드/Box/WFMAP, 우열: Trend/Radius/CDF)
-            Y_TABLE, Y_LEG, Y_BOX, Y_MAP = 0.68, 2.00, 2.58, 4.92
+            # 통계표를 키운 만큼 레전드/Box/WFMAP을 아래로 이동
+            Y_TABLE, Y_LEG, Y_BOX, Y_MAP = 0.68, 2.34, 2.94, 5.14
             Y_TREND, Y_RAD, Y_CUM = 0.92, 3.08, 5.24
 
             # 타이틀 카드 타이틀 생성 헬퍼 함수 (그림 top - TITLE_GAP 위치에 배치)
@@ -2845,7 +2846,32 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             _NAVY = RGBColor(*NAVY_RGB); _WH = RGBColor(255, 255, 255); _BK = RGBColor(0, 0, 0)
             _LOTBG = RGBColor(0xD9, 0xE1, 0xF2)
 
-            def _stat_style(cell, text, bg, fg, bold, sz=7, align=PP_ALIGN.CENTER):
+            def _set_cell_border(cell, color="808080", w=6350):
+                """PPT 표 셀 4변 테두리(구분선) 설정 — python-pptx 기본 API에 없어 XML로 직접 추가.
+                tcPr 자식 순서상 ln* 은 fill 앞에 와야 하므로 fill/기타 요소 앞에 삽입."""
+                from pptx.oxml import parse_xml
+                from pptx.oxml.ns import qn, nsdecls
+                tcPr = cell._tc.get_or_add_tcPr()
+                _ref = None
+                for _ch in list(tcPr):
+                    if _ch.tag in (qn('a:noFill'), qn('a:solidFill'), qn('a:gradFill'),
+                                   qn('a:blipFill'), qn('a:pattFill'), qn('a:grpFill'),
+                                   qn('a:headers'), qn('a:extLst')):
+                        _ref = _ch; break
+                for _tag in ('a:lnL', 'a:lnR', 'a:lnT', 'a:lnB'):
+                    _old = tcPr.find(qn(_tag))
+                    if _old is not None:
+                        tcPr.remove(_old)
+                    _ln = parse_xml(
+                        f'<{_tag} {nsdecls("a")} w="{w}" cap="flat" cmpd="sng" algn="ctr">'
+                        f'<a:solidFill><a:srgbClr val="{color}"/></a:solidFill>'
+                        f'<a:prstDash val="solid"/></{_tag}>')
+                    if _ref is not None:
+                        _ref.addprevious(_ln)
+                    else:
+                        tcPr.append(_ln)
+
+            def _stat_style(cell, text, bg, fg, bold, sz=8, align=PP_ALIGN.CENTER):
                 cell.text = str(text)
                 cell.fill.solid(); cell.fill.fore_color.rgb = bg
                 cell.margin_left = Inches(0.0); cell.margin_right = Inches(0.0)
@@ -2856,6 +2882,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                     par.font.size = Pt(sz); par.font.bold = bold
                     par.font.color.rgb = fg; par.font.name = FONT
                     par.alignment = align
+                _set_cell_border(cell)   # 셀 구분선(테두리) 표시
 
             if _slw:
                 # 컬럼 순서: target lot 먼저, lot 내 wafer 오름차순 (HTML score board와 동일)
@@ -2868,20 +2895,20 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 n_waf = max(len(order_lw), 1)
                 # wafer 열폭: 기본 0.31" 고정(적게 찍히면 표가 줄어듦). 단 wafer가 많아
                 # 슬라이드 폭(13")을 넘으면 넘지 않게 균일 축소(표 내 모든 wafer 동일 폭 유지).
-                STAT_W = 0.55
-                WAFER_W = min(0.31, (13.0 - STAT_W) / n_waf)
+                STAT_W = 0.65
+                WAFER_W = min(0.36, (13.0 - STAT_W) / n_waf)
                 ncol = 1 + n_waf
                 nrow = 2 + len(_stat_rows)      # lot 헤더행 + wafer# 헤더행 + stat 행들
                 tbl_w = STAT_W + n_waf * WAFER_W
                 table_shape = slide.shapes.add_table(
                     nrow, ncol, Inches(LX), Inches(Y_TABLE),
-                    Inches(tbl_w), Inches(min(1.4, 0.22 * nrow))).table
+                    Inches(tbl_w), Inches(min(1.75, 0.26 * nrow))).table
                 table_shape.columns[0].width = Inches(STAT_W)
                 for _j in range(1, ncol):
                     table_shape.columns[_j].width = Inches(WAFER_W)
                 # (0,0)+(1,0) 병합 → 'Stat'
                 table_shape.cell(0, 0).merge(table_shape.cell(1, 0))
-                _stat_style(table_shape.cell(0, 0), "Stat", _NAVY, _WH, True, 8)
+                _stat_style(table_shape.cell(0, 0), "Stat", _NAVY, _WH, True, 9)
                 # 헤더행0: lot_id 가로 병합
                 _k = 0
                 while _k < len(order_lw):
@@ -2891,20 +2918,20 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                     _c0, _c1 = 1 + _k, 1 + _k2
                     if _c1 > _c0:
                         table_shape.cell(0, _c0).merge(table_shape.cell(0, _c1))
-                    _stat_style(table_shape.cell(0, _c0), str(_lot), _LOTBG, _BK, True, 7)
+                    _stat_style(table_shape.cell(0, _c0), str(_lot), _LOTBG, _BK, True, 8)
                     _k = _k2 + 1
                 # 헤더행1: wafer #
                 for _j, (_lot, _w) in enumerate(order_lw):
-                    _stat_style(table_shape.cell(1, 1 + _j), f"#{_w}", _NAVY, _WH, True, 7)
+                    _stat_style(table_shape.cell(1, 1 + _j), f"#{_w}", _NAVY, _WH, True, 8)
                 # 데이터행: stat 라벨 + (lot,wafer)별 값
                 for _r, _lbl in enumerate(_stat_rows):
                     _rr = 2 + _r
                     _bg = RGBColor(245, 247, 250) if _r % 2 == 0 else _WH
-                    _stat_style(table_shape.cell(_rr, 0), _lbl, _bg, _BK, False, 7, PP_ALIGN.LEFT)
+                    _stat_style(table_shape.cell(_rr, 0), _lbl, _bg, _BK, False, 8, PP_ALIGN.LEFT)
                     for _j, (_lot, _w) in enumerate(order_lw):
                         _vals = _slw.get((_lot, _w))
                         _txt = _vals[_r] if (_vals and _r < len(_vals)) else "-"
-                        _stat_style(table_shape.cell(_rr, 1 + _j), _txt, _bg, _BK, False, 7)
+                        _stat_style(table_shape.cell(_rr, 1 + _j), _txt, _bg, _BK, False, 8)
             else:
                 # (fallback) fab_lot_id 없을 때: 기존 wafer #1~25 고정 26칸 표
                 cols = 26
@@ -2932,7 +2959,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             # Wafer Color Legend (전 슬라이드 공통 1회 렌더 재사용)
             slide.shapes.add_picture(_io.BytesIO(leg_bytes), Inches(LX), Inches(Y_LEG), width=Inches(LW))
             # BOX Plot
-            slide.shapes.add_picture(_io.BytesIO(imgs['box']), Inches(LX), Inches(Y_BOX), Inches(LW), Inches(2.05))
+            slide.shapes.add_picture(_io.BytesIO(imgs['box']), Inches(LX), Inches(Y_BOX), Inches(LW), Inches(1.95))
             # WF MAP(grid) — 우측 컬러바 슬롯(_CBAR_SLOT)만큼 뺀 폭에 배치, 세로가 넘칠 때만 축소
             _CBAR_SLOT = 0.55
             map_avail = SLIDE_BOTTOM - Y_MAP
