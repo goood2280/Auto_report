@@ -1873,8 +1873,9 @@ def _render_item_charts(task):
         ax_box.set_xlim(0.5, 25.5)
         ax_box.tick_params(axis='x', rotation=45, labelsize=7)
         if _tgt_wafnums:
-            fig_box.text(0.995, 0.01, f"*: {target_lot_id}", ha='right', va='bottom',
-                         fontsize=6, color=C_NEUTRAL, fontstyle='italic')
+            # box plot 우측 하단(축 내부 좌표)에 '*: lot_id' 범례 배치
+            ax_box.text(0.99, 0.03, f"*: {target_lot_id}", transform=ax_box.transAxes,
+                        ha='right', va='bottom', fontsize=6, color=C_NEUTRAL, fontstyle='italic')
         _label_axes(ax_box, xlabel="Wafer #", ylabel=y_label)
         _remove_spines(ax_box)
         ax_box.set_axisbelow(True)
@@ -2128,7 +2129,7 @@ def _render_item_charts(task):
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
             ax.tick_params(axis='x', rotation=0, labelsize=7)
             ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=6))
-            _label_axes(ax, xlabel="Date", ylabel=y_label, ylabel_size=5.5)  # y축명 잘림 방지 위해 축소
+            _label_axes(ax, xlabel="DC tkout_time", ylabel=y_label, ylabel_size=5.5)  # y축명 잘림 방지 위해 축소
             if log_scale: ax.set_yscale('log')
             ax.legend(fontsize=6, loc='upper left', frameon=False)   # Trend 범례 좌상단 고정
             _remove_spines(ax)
@@ -2220,14 +2221,22 @@ def _render_item_charts(task):
                                    marker=lot_marker[_lot], edgecolors='black', linewidths=0.2)
             else:
                 ax_rad.scatter(w_df[col_rad], w_df[item_name], s=12, alpha=0.85, color=p_color)
-            if len(w_df) >= 4:
-                try:
-                    z = np.polyfit(w_df[col_rad], w_df[item_name], 3)
-                    p = np.poly1d(z)
-                    ax_rad.plot(np.linspace(w_df[col_rad].min(), w_df[col_rad].max(), 50),
-                               p(np.linspace(w_df[col_rad].min(), w_df[col_rad].max(), 50)),
-                               color=p_color, alpha=0.6, linewidth=1.5)
-                except: pass
+        # 피팅선: wafer별 개별 곡선(겹쳐서 고차처럼 보임) 대신 전체 데이터에 대한 '단일 3차(cubic)' 1개 라인
+        try:
+            _fit = item_df.dropna(subset=[col_rad, item_name])
+            if len(_fit) >= 4:
+                _rx = pd.to_numeric(_fit[col_rad], errors='coerce').astype(float).values
+                _ry = pd.to_numeric(_fit[item_name], errors='coerce').astype(float).values
+                _m = np.isfinite(_rx) & np.isfinite(_ry)
+                _rx, _ry = _rx[_m], _ry[_m]
+                if len(_rx) >= 4 and _rx.min() < _rx.max():
+                    _z = np.polyfit(_rx, _ry, 3)               # 3차 다항식(cubic)
+                    _pp = np.poly1d(_z)
+                    _xs = np.linspace(_rx.min(), _rx.max(), 100)
+                    ax_rad.plot(_xs, _pp(_xs), color='#333333', alpha=0.85, linewidth=1.6,
+                                label='cubic fit')
+        except Exception:
+            pass
         # lot_id marker 범례 (multi_lot)
         if multi_lot:
             from matplotlib.lines import Line2D
