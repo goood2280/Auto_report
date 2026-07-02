@@ -309,6 +309,23 @@ def convert_target_data(x, suffixes_remove, replace_map, prefixes_remove=None):
     return x
 
 
+def display_name(x):
+    """사용자에게 '보여지는' 항목명 = convert_target_data(alias, ...) 후처리 결과.
+
+    My_config의 prefixes_remove/suffixes_remove/replace_map를 적용해 표시용 이름을 만든다.
+    데이터 키(merged_df 컬럼·metrics_dict 키·score_color 스케일 등)에는 절대 쓰지 말고
+    '표시 문자열'에만 사용한다(내부 키는 원래 alias 유지).
+    """
+    try:
+        return convert_target_data(
+            x,
+            getattr(GLOBAL_CONFIG, 'suffixes_remove', []) or [],
+            getattr(GLOBAL_CONFIG, 'replace_map', {}) or {},
+            getattr(GLOBAL_CONFIG, 'prefixes_remove', []) or [])
+    except Exception:
+        return x
+
+
 def apply_style_by_index(row):
     """Pass Rate 값에 따라 셀 배경 색상 스타일을 반환 (pandas Styler용).
 
@@ -729,7 +746,7 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
         for i, (idx, row) in enumerate(chunk_df.iterrows()):
             r = i + 2
             base = RGBColor(245, 247, 250) if i % 2 == 1 else WHITE
-            _style(tbl.cell(r, 0), str(idx), base, BLACK, False, 7)   # 45자 한 줄 수용 위해 폰트 7pt
+            _style(tbl.cell(r, 0), display_name(str(idx)), base, BLACK, False, 7)   # 표시명 후처리, 45자 한 줄 수용 위해 폰트 7pt
             tbl.cell(r, 0).text_frame.paragraphs[0].alignment = PP_ALIGN.LEFT
             tbl.cell(r, 0).text_frame.word_wrap = False   # ITEM명 한 줄(줄바꿈 방지)
             for jj, (_oc, _lot, _waf) in enumerate(order):
@@ -2292,22 +2309,25 @@ def _render_item_charts(task):
                                    marker=lot_marker[_lot], edgecolors='black', linewidths=0.2)
             else:
                 ax_rad.scatter(w_df[col_rad], w_df[item_name], s=12, alpha=0.85, color=p_color)
-        # 피팅선: wafer별 개별 곡선(겹쳐서 고차처럼 보임) 대신 전체 데이터에 대한 '단일 3차(cubic)' 1개 라인
-        try:
-            _fit = item_df.dropna(subset=[col_rad, item_name])
-            if len(_fit) >= 4:
-                _rx = pd.to_numeric(_fit[col_rad], errors='coerce').astype(float).values
-                _ry = pd.to_numeric(_fit[item_name], errors='coerce').astype(float).values
+        # 피팅선: wafer별 '3차(cubic)' 근사선을 각각 그리고, 선 색은 해당 wafer 색과 동일하게 맞춘다.
+        for w in measured_wafers:
+            try:
+                _wf = item_df[item_df[w_col] == w].dropna(subset=[col_rad, item_name])
+                if len(_wf) < 4:
+                    continue   # cubic(3차) fit 최소 4점 필요
+                _rx = pd.to_numeric(_wf[col_rad], errors='coerce').astype(float).values
+                _ry = pd.to_numeric(_wf[item_name], errors='coerce').astype(float).values
                 _m = np.isfinite(_rx) & np.isfinite(_ry)
                 _rx, _ry = _rx[_m], _ry[_m]
-                if len(_rx) >= 4 and _rx.min() < _rx.max():
-                    _z = np.polyfit(_rx, _ry, 3)               # 3차 다항식(cubic)
-                    _pp = np.poly1d(_z)
-                    _xs = np.linspace(_rx.min(), _rx.max(), 100)
-                    ax_rad.plot(_xs, _pp(_xs), color='#333333', alpha=0.85, linewidth=1.6,
-                                label='cubic fit')
-        except Exception:
-            pass
+                if len(_rx) < 4 or _rx.min() >= _rx.max():
+                    continue
+                _z = np.polyfit(_rx, _ry, 3)               # wafer별 3차 다항식(cubic)
+                _pp = np.poly1d(_z)
+                _xs = np.linspace(_rx.min(), _rx.max(), 100)
+                ax_rad.plot(_xs, _pp(_xs), color=w_colors.get(str(w), 'blue'),
+                            alpha=0.9, linewidth=1.3)
+            except Exception:
+                continue
         # lot_id marker 범례 (multi_lot)
         if multi_lot:
             from matplotlib.lines import Line2D
@@ -2695,7 +2715,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             _u = str(spec_data.loc[spec_name, 'UNIT']).strip()
             if _u and _u.lower() != 'nan':
                 unit = _u
-        y_label = f"{item_name} [{unit}]" if unit else item_name
+        _disp_item = display_name(item_name)   # 축 라벨은 후처리된 표시명 사용
+        y_label = f"{_disp_item} [{unit}]" if unit else _disp_item
 
         return {
             'item_name': item_name, 'spec_name': spec_name,
@@ -2888,7 +2909,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             txBox = slide.shapes.add_textbox(Inches(0.2), Inches(0.06), Inches(12.9), Inches(0.45))
             tf = txBox.text_frame
             p = tf.paragraphs[0]
-            p.text = f" {item_name}"
+            p.text = f" {display_name(item_name)}"
             p.font.size = Pt(22)
             p.font.bold = True
             p.font.color.rgb = RGBColor(255, 255, 255)
@@ -3170,7 +3191,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
 
                 # 본문: Index | Stat | (lot,wafer)별 값
                 for _ri, _r in enumerate(_chunk, start=2):
-                    _style(table.cell(_ri, 0), str(_r['index']), white, black, True, 7, wrap=False)  # Index명 45자 한 줄(줄바꿈 방지)
+                    _style(table.cell(_ri, 0), display_name(str(_r['index'])), white, black, True, 7, wrap=False)  # 표시명 후처리, Index명 45자 한 줄(줄바꿈 방지)
                     _style(table.cell(_ri, 1), str(_r.get('stat', '')), white, black, False, 8)
                     _wv = _r.get('wafer_vals', {})
                     for _cj, _key in enumerate(_ordered, start=2):

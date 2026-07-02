@@ -1132,7 +1132,7 @@ def main():
                             if kind == 'score':
                                 row = payload
                                 sb_html += (f'      <td class="sb-item row_heading" style="{_SB_ITEM} font-weight:bold; '
-                                            f'background-color:#ebf4ff;">{item}</td>\n')
+                                            f'background-color:#ebf4ff;">{display_name(item)}</td>\n')
                                 for col in _wcols:
                                     val = row[col]
                                     if pd.isna(val) or val == "":
@@ -1218,6 +1218,10 @@ def main():
                                         formatted_val = f"{val:.2f}"
                                 else:
                                     formatted_val = str(val)
+
+                                # Item명은 표시용 후처리(접두/접미 제거·치환) 적용
+                                if col == 'Item' and formatted_val:
+                                    formatted_val = display_name(formatted_val)
 
                                 if col in ['UCL', 'CL', 'LCL']:
                                     style = f'{_IT_BD} {_IT_CTR} background-color:#e0f7fa;'

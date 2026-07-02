@@ -716,6 +716,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             return {nm}
         return {nm, _convert_name(nm, _pre, _suf, _repl)}
 
+    def _disp(nm):
+        """사용자에게 보여지는 표시명(접두/접미 제거·치환 후처리). 내부 키는 원 이름 유지."""
+        return _convert_name(nm, _pre, _suf, _repl)
+
     def _resolve_allowed(pchk_alias, device_items):
         """PCHK의 검증 대상 ITEM(실제 alias) 집합. 매핑 없으면 None(전체 대조)."""
         toks = None
@@ -991,14 +995,14 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         if n_out > 0:
             findings.append(_finding(
                 "CRITICAL", "SPEC_OUT", it,
-                f"Spec-out: {it}", detail.strip()))
+                f"Spec-out: {_disp(it)}", detail.strip()))
             continue
 
         if worst_disp_ratio > disp_ratio:
             # 형식: "산포 확대 : ITEM - #W 산포 X배" (제목에 다 담고 상세는 비움 → 깔끔)
             findings.append(_finding(
                 "WARNING", "DISPERSION", it,
-                f"산포 확대 : {it} - #{worst_disp_w} 산포 {worst_disp_ratio:.1f}배", ""))
+                f"산포 확대 : {_disp(it)} - #{worst_disp_w} 산포 {worst_disp_ratio:.1f}배", ""))
 
     # ── 판단 근거 중간 데이터를 RUN/TEMP에 저장 (csv + json) ──
     try:
