@@ -490,6 +490,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     col_x = _pick_col(merged_df, 'CHIP_X_ADJ', 'CHIP_X_POS', 'chip_x_pos')
     col_y = _pick_col(merged_df, 'CHIP_Y_ADJ', 'CHIP_Y_POS', 'chip_y_pos')
     col_pgm = _pick_col(merged_df, 'PGM(pt)')
+    col_rad = _pick_col(merged_df, 'Chip_Radius', 'chip_radius')   # Data Extractor radius(mm)
 
     items = [it for it in metrics_dict.keys() if it in merged_df.columns]
 
@@ -500,6 +501,26 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         if len(_m) > 0:
             pop = _m
     tgt = pop[pop[col_lot] == target_lot_id] if col_lot else pop
+
+    # ── Data Extractor radius 매핑: MASK==main_vehicle 행의 (좌표)->Chip_Radius(mm) ──
+    #   spec-out chip의 zone(Center/Middle/Edge)은 이 실제 radius로 판정한다
+    #   (sqrt(x^2+y^2) 좌표거리 대신 Data Extractor의 Chip_Radius 사용).
+    _coord_radius = {}
+    if col_rad and col_x and col_y and col_rad in merged_df.columns:
+        try:
+            _rref = merged_df
+            if col_mask and main_vehicle is not None:
+                _mv = merged_df[merged_df[col_mask] == main_vehicle]
+                if len(_mv) > 0:
+                    _rref = _mv
+            _rref = _rref[[col_x, col_y, col_rad]].dropna()
+            if len(_rref) > 0:
+                _g = _rref.groupby([col_x, col_y])[col_rad].mean()
+                _coord_radius = {(float(_k[0]), float(_k[1])): float(_v)
+                                 for _k, _v in _g.items()}
+        except Exception as _re:
+            print(f"[anomaly] Chip_Radius 좌표 매핑 실패: {_re}")
+            _coord_radius = {}
 
     # spec dict {alias: (low, high)} — 차트 항목은 spec_data, PCHK 등 비차트 항목은 reformatter에서 보강
     spec = {}
@@ -656,12 +677,17 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         # PGM(pt) 뒤 Duplicate_Count 기본값('_1.0'/'_1') 접미사는 불필요 → 제거(중복>1은 유지)
         pgms = ([re.sub(r'_1(?:\.0+)?$', '', str(p)) for p in _so[col_pgm].dropna().unique()]
                 if col_pgm and col_pgm in _so.columns else [])
+        # zone: Data Extractor Chip_Radius(mm)를 좌표로 조회해 Center/Middle/Edge 판정
         zones = {}
-        if col_x and col_y and col_x in _so.columns and col_y in _so.columns:
-            _r = np.sqrt(pd.to_numeric(_so[col_x], errors='coerce') ** 2 +
-                         pd.to_numeric(_so[col_y], errors='coerce') ** 2)
-            for z in _r.dropna().map(_zone_of):
-                zones[z] = zones.get(z, 0) + 1
+        if _coord_radius and col_x and col_y and col_x in _so.columns and col_y in _so.columns:
+            for _xx, _yy in zip(_so[col_x], _so[col_y]):
+                try:
+                    _rr = _coord_radius.get((float(_xx), float(_yy)))
+                except (ValueError, TypeError):
+                    _rr = None
+                if _rr is not None:
+                    _z = _zone_of(_rr)
+                    zones[_z] = zones.get(_z, 0) + 1
         return pgms, zones
 
     # PCHK 계열도 '동일한 index 항목'으로 같은 루프에서 함께 분석하고, 판정도 동일하게 적용한다.
@@ -929,8 +955,6 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         if so_zones:
             _bits.append('위치: ' + ', '.join(
                 f"{z} {so_zones[z]}" for z in ('Center', 'Middle', 'Edge') if z in so_zones))
-        if so_pgms:
-            _bits.append('PGM(pt): ' + ', '.join(so_pgms))
         # median 이탈(dev_txt)은 판정 기준에서 제외됨 → 상세에도 표시하지 않음. 산포(disp_txt)만.
         if disp_txt:
             _bits.append(disp_txt)

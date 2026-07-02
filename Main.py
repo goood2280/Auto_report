@@ -1176,19 +1176,20 @@ def main():
                             _mod_span[_mj] = _mk - _mj + 1
                             _mj = _mk + 1
 
-                        # 메일 클라이언트용 inline style (셀 구분선 + 가운데 정렬)
+                        # 메일 클라이언트용 inline style (셀 구분선 + 가운데 정렬 + 줄바꿈 방지)
                         _IT_BD = 'border:1px solid #2c2c2c;'
-                        _IT_CTR = 'text-align:center !important;'   # 헤더 CSS(left) override
+                        _IT_CTR = 'text-align:center !important; white-space:nowrap;'   # 헤더 CSS(left) override + nowrap
                         _IT_WAF = 'width:56px; min-width:56px; max-width:56px;'
+                        _IT_PAD = 'padding-left:10px; padding-right:10px;'   # Module~LCL 열 좌우 여백(약 1.5자)
 
                         it_html = '<table class="inline-table" style="border-collapse:collapse;">\n'
                         it_html += '  <thead>\n'
                         it_html += '    <tr>\n'
                         for col in inlinedata_filtered_pivot.columns:
                             if col in _head_cols:
-                                it_html += f'      <th class="row_heading" style="{_IT_BD} {_IT_CTR} background-color:#e2efda !important;">{col}</th>\n'
+                                it_html += f'      <th class="row_heading" style="{_IT_BD} {_IT_CTR} {_IT_PAD} background-color:#e2efda !important;">{col}</th>\n'
                             elif col in ['UCL', 'CL', 'LCL']:
-                                it_html += f'      <th style="{_IT_BD} {_IT_CTR} background-color:#f0f0f0 !important;">{col}</th>\n'
+                                it_html += f'      <th style="{_IT_BD} {_IT_CTR} {_IT_PAD} background-color:#f0f0f0 !important;">{col}</th>\n'
                             else:
                                 col_str = str(col) if str(col).startswith('#') else '#' + str(col)
                                 it_html += f'      <th style="{_IT_BD} {_IT_CTR} {_IT_WAF} background-color:#f0f0f0 !important;">{col_str}</th>\n'
@@ -1224,9 +1225,9 @@ def main():
                                     formatted_val = display_name(formatted_val)
 
                                 if col in ['UCL', 'CL', 'LCL']:
-                                    style = f'{_IT_BD} {_IT_CTR} background-color:#e0f7fa;'
+                                    style = f'{_IT_BD} {_IT_CTR} {_IT_PAD} background-color:#e0f7fa;'
                                 elif col in _head_cols:
-                                    style = f'{_IT_BD} {_IT_CTR} vertical-align:middle; background-color:#f0fff4;'
+                                    style = f'{_IT_BD} {_IT_CTR} {_IT_PAD} vertical-align:middle; background-color:#f0fff4;'
                                 else:
                                     # wafer 값 셀: LCL/UCL 벗어나면 셀 배경 빨강 강조
                                     _cellbg = ''
@@ -1324,7 +1325,17 @@ def main():
                                     _wf_on = getattr(GLOBAL_CONFIG, 'anomaly_wfmap_specout', True)
                                     _wf_max = getattr(GLOBAL_CONFIG, 'anomaly_wfmap_max_count', 25)
 
-                                    def _trend_block(item, is_spec, img_b64):
+                                    def _html_table(cells, ncol, cellpad=2, cellstyle='vertical-align:top;'):
+                                        """cell HTML 리스트를 ncol개씩 table 행으로 배치(포워딩에서 flex/grid 대체)."""
+                                        _rows = ''
+                                        for _i in range(0, len(cells), ncol):
+                                            _tds = ''.join(f'<td style="{cellstyle}">{_c}</td>'
+                                                           for _c in cells[_i:_i + ncol])
+                                            _rows += f'<tr>{_tds}</tr>'
+                                        return (f'<table cellpadding="{cellpad}" cellspacing="0" '
+                                                f'style="border-collapse:collapse;">{_rows}</table>')
+
+                                    def _trend_block(item, is_spec, img_b64, w, h):
                                         if is_spec:
                                             _stat, _bg, _fg = 'SPEC OUT', '#d32f2f', '#ffffff'
                                         else:
@@ -1332,10 +1343,12 @@ def main():
                                         _bstyle = ('font-size:10px; font-weight:bold; padding:2px 7px; '
                                                    'border-radius:3px; box-shadow:0 1px 2px rgba(0,0,0,.35);')
                                         _sticker = f'<span style="background:{_bg}; color:{_fg}; {_bstyle}">{_stat}</span>'
+                                        # 포워딩 호환: img width/height를 px로 inline + attribute 둘 다 명시(%/max-width 미사용)
                                         return (
-                                            '<div style="position:relative; flex:0 0 380px;">'
+                                            f'<div style="position:relative; width:{w}px;">'
                                             f'<div style="position:absolute; top:6px; left:6px; z-index:2;">{_sticker}</div>'
-                                            f'<img src="data:image/png;base64,{img_b64}" style="display:block; width:100%; border:1px solid #ddd;"/>'
+                                            f'<img src="data:image/png;base64,{img_b64}" width="{w}" height="{h}" '
+                                            f'style="display:block; width:{w}px; height:{h}px; border:1px solid #ddd;"/>'
                                             '</div>')
 
                                     def _spec_bounds(item):
@@ -1351,6 +1364,16 @@ def main():
                                                 elif _dv == 'LOWER': _shigh = None
                                         return _slow, _shigh
 
+                                    def _img_px(img_path, target_w):
+                                        """원본 비율 유지하며 target_w(px)에 맞는 (w,h) 반환(포워딩용 고정 px)."""
+                                        try:
+                                            from PIL import Image as _PILImg
+                                            with _PILImg.open(img_path) as _im:
+                                                _iw, _ih = _im.size
+                                            return target_w, max(1, round(target_w * _ih / _iw))
+                                        except Exception:
+                                            return target_w, round(target_w * 0.44)
+
                                     _spec_rows, _warn_blocks = [], []
                                     for item in top_item_names:
                                         safe_item = re.sub(r'[\\/:*?"<>|]', '_', str(item))
@@ -1359,9 +1382,10 @@ def main():
                                             continue
                                         with open(img_path, "rb") as f:
                                             img_b64 = base64.b64encode(f.read()).decode('utf-8')
+                                        _tw, _th = _img_px(img_path, 380)   # 포워딩용 고정 px(가로 380)
                                         _is_spec = metrics_dict.get(item, {}).get('spec_out_count', 0) > 0
                                         if not _is_spec:
-                                            _warn_blocks.append(_trend_block(item, False, img_b64))
+                                            _warn_blocks.append(_trend_block(item, False, img_b64, _tw, _th))
                                             continue
                                         # 이상(SPEC OUT) — 우측에 spec-out WF MAP 최대한 많이
                                         _wf_block = ''
@@ -1372,7 +1396,7 @@ def main():
                                                     merged_df, item, spec_low=_slow, spec_high=_shigh,
                                                     target_lot=target_lot_id, max_maps=_wf_max)
                                                 if _wfmaps:
-                                                    _cells = ''
+                                                    _wf_cells = []
                                                     for _wf in _wfmaps:
                                                         # (label, b64, is_target) — 하위호환: 2-튜플이면 target 아님
                                                         _lab, _b = _wf[0], _wf[1]
@@ -1380,20 +1404,21 @@ def main():
                                                         # target lot WF MAP 라벨은 진한 파란색 + 볼드로 강조
                                                         _lab_style = ('font-size:8px; white-space:nowrap; '
                                                                       + ('color:#0033cc; font-weight:bold;' if _is_tgt else 'color:#555;'))
-                                                        _cells += (
-                                                            '<div style="text-align:center;">'
-                                                            f'<img src="data:image/png;base64,{_b}" '
+                                                        # WF MAP img: 고정 58px width/height inline + attribute(포워딩 호환)
+                                                        _wf_cells.append(
+                                                            f'<img src="data:image/png;base64,{_b}" width="58" height="58" '
                                                             'style="width:58px; height:58px; display:block; margin:0 auto; border:1px solid #1f4e79;"/>'
-                                                            f'<div style="{_lab_style}">{_lab}</div>'
-                                                            '</div>')
-                                                    _wf_block = (
-                                                        '<div style="flex:1; display:grid; grid-template-columns: repeat(auto-fill, 64px); '
-                                                        f'gap:4px; align-content:start;">{_cells}</div>')
+                                                            f'<div style="{_lab_style}">{_lab}</div>')
+                                                    # flex/grid 대신 table 배치(포워딩 유지) — 6열/행
+                                                    _wf_block = _html_table(_wf_cells, 6, cellpad=2,
+                                                                            cellstyle='vertical-align:top; text-align:center;')
                                             except Exception as _we:
                                                 print(f"[WARN] spec-out WF MAP 스킵 ({item}): {_we}")
+                                        # trend + WF MAP을 table 한 행(2열)로 배치(포워딩에서 flex 대체)
                                         _spec_rows.append(
-                                            '<div style="display:flex; align-items:flex-start; gap:12px; margin-bottom:8px;">'
-                                            f'{_trend_block(item, True, img_b64)}{_wf_block}</div>')
+                                            '<table cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-bottom:8px;">'
+                                            f'<tr><td style="vertical-align:top; padding-right:12px;">{_trend_block(item, True, img_b64, _tw, _th)}</td>'
+                                            f'<td style="vertical-align:top;">{_wf_block}</td></tr></table>')
 
                                     # '이상'/'주의' 탭 라벨은 표시하지 않는다. 각 차트 좌상단의
                                     # SPEC OUT / WARNING 스티커가 상태 식별 역할을 대신한다.
@@ -1401,9 +1426,9 @@ def main():
                                     if _spec_rows:
                                         _parts.extend(_spec_rows)
                                     if _warn_blocks:
-                                        _parts.append(
-                                            '<div style="display:flex; flex-wrap:wrap; align-items:flex-start; gap:8px;">'
-                                            f'{"".join(_warn_blocks)}</div>')
+                                        # 주의 차트들도 flex-wrap 대신 table(2열)로 배치
+                                        _parts.append(_html_table(_warn_blocks, 2, cellpad=4,
+                                                                  cellstyle='vertical-align:top;'))
                                     anomaly_html = ''.join(_parts) if _parts else '<p>이상항목 없음</p>'
                                 else:
                                     anomaly_html = '<p>이상항목 없음</p>'
