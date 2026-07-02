@@ -52,6 +52,16 @@ def log_to_file(message, log_path):
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+        # 통합 로그 30MB 초과 시 오래된(앞) 내용 제거하고 최신 ~24MB만 유지
+        if os.path.getsize(log_path) > 30 * 1024 * 1024:
+            with open(log_path, "rb") as f:
+                f.seek(-(24 * 1024 * 1024), os.SEEK_END)
+                data = f.read()
+            _nl = data.find(b'\n')
+            if _nl != -1:
+                data = data[_nl + 1:]
+            with open(log_path, "wb") as f:
+                f.write(data)
     except Exception as e:
         print(f"[WARN] log_to_file 실패: {e}")
 
@@ -497,17 +507,26 @@ def clear_anomaly_inside_run():
             pass
 
 
-def clear_run_temp_files():
-    """RUN/TEMP 폴더 '내부 파일'을 모두 삭제(폴더/하위폴더 구조는 유지).
+#  랏 완료 후 삭제하지 않고 남겨둘 '진단/근거' 파일 접두어.
+#  Trend PNG 등 대용량 임시 이미지는 지우되, AI 입력 덤프·판단 근거 같은
+#  가벼운 검증용 산출물은 RUN/TEMP에 남겨 엔지니어가 확인할 수 있게 한다.
+_RUN_TEMP_KEEP_PREFIXES = ('ai_input_', 'anomaly_basis_')
 
-    랏 리포트 1건 생성이 끝난 뒤 호출 — Trend PNG({alias}.png)·anomaly_basis(json/csv) 등
-    임시 산출물을 비운다. HTML은 이미지가 base64로 내장돼 있어 파일 삭제 후에도 정상 표시된다.
+
+def clear_run_temp_files():
+    """RUN/TEMP 폴더 '내부 파일'을 삭제(폴더/하위폴더 구조는 유지).
+
+    랏 리포트 1건 생성이 끝난 뒤 호출 — Trend PNG({alias}.png) 등 임시 산출물을 비운다.
+    단, `_RUN_TEMP_KEEP_PREFIXES`(AI 입력 덤프·판단 근거)로 시작하는 파일은 **남긴다**
+    (검증/감사용). HTML은 이미지가 base64로 내장돼 있어 파일 삭제 후에도 정상 표시된다.
     """
     _tdir = os.path.join('RUN', 'TEMP')
     if not os.path.isdir(_tdir):
         return
     for _root, _dirs, _files in os.walk(_tdir):
         for _f in _files:
+            if _f.startswith(_RUN_TEMP_KEEP_PREFIXES):
+                continue  # 진단/근거 파일은 보존
             try:
                 os.remove(os.path.join(_root, _f))
             except OSError:
@@ -650,12 +669,14 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
     _present = {}
     for c, lw in zip(_cols, _lw):
         _present[(lw[0], lw[1])] = c
-    # 각 lot마다 wafer #1~25를 항상 표시 (미측정 wafer는 빈 칸) → 측정 wafer 수와
-    # 무관하게 테이블 열 구성/크기 고정, 모든 wafer 열 너비 동일.
-    order = []   # (orig_col_or_None, lot, wafer)
+    # HTML Score Board와 동일하게 '실제 데이터가 있는 wafer'만 표시(#1~25 고정 배열 폐기).
+    # lot은 target 먼저(_lots 정렬), lot 내 wafer 오름차순.
+    order = []   # (orig_col, lot, wafer)
     for _lot in _lots:
-        for w in range(1, 26):
-            order.append((_present.get((_lot, w)), _lot, w))
+        _wafs = sorted([w for (l, w) in _present if l == _lot],
+                       key=lambda w: (0, w) if isinstance(w, int) else (1, str(w)))
+        for w in _wafs:
+            order.append((_present[(_lot, w)], _lot, w))
 
     chunk_size = 30
     total_pages = (len(VIP_group) - 1) // chunk_size + 1
@@ -763,7 +784,6 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
     hp = htf.paragraphs[0]
     n_crit = sum(1 for f in findings if f.get("severity") == "CRITICAL")
     n_warn = sum(1 for f in findings if f.get("severity") == "WARNING")
-    n_note = sum(1 for f in findings if f.get("severity") == "NOTICE")
     # 헤더: 제목 + 신호등(●) 색 점 + 건수, 항목 사이 | 구분 (HTML head와 동일 구성)
     hp.text = ""
     _WHITE = RGBColor(255, 255, 255); _DIV = RGBColor(0xC9, 0xD2, 0xE0)
@@ -773,7 +793,7 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         rr.font.size = Pt(sz); rr.font.bold = bold; rr.font.name = FONT; rr.font.color.rgb = color
 
     _hrun(f"{title}   —   ", _WHITE)
-    _hcnt = [("CRITICAL", "이상", n_crit), ("WARNING", "주의", n_warn), ("NOTICE", "측정이상 추정", n_note)]
+    _hcnt = [("CRITICAL", "이상", n_crit), ("WARNING", "주의", n_warn)]
     for _k, (_sev, _lbl, _cnt) in enumerate(_hcnt):
         _hrun("● ", sev_dot.get(_sev, _WHITE))
         _hrun(f"{_lbl} {_cnt}", _WHITE)
@@ -795,14 +815,17 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
     _sig = getattr(GLOBAL_CONFIG, 'anomaly_lot_median_sigma', 2.0)
     _dsp = getattr(GLOBAL_CONFIG, 'anomaly_lot_dispersion_ratio', 1.5)
     _note_lines = [
-        f"※ 참고: 모든 비교 기준은 제품({_veh}) 내입니다.",
-        "· 제품 전체 산포 = 제품 전체 chip 값의 robust 산포(1.4826×MAD, 0이면 IQR/1.349, 그래도 0이면 std).",
-        "· 랏내 산포 = 랏 내부 chip 값의 robust 산포이며, '보통의 랏 산포'는 제품 내 각 랏 산포의 중앙값입니다.",
-        "· 'Nσ' = (lot median − 제품 median) / 제품 전체 산포,   'N배' = 랏내 산포 / 보통의 랏 산포.",
+        f"※ 참고: 모든 판정은 대상 lot의 'wafer 단위'로 보며, 비교 기준은 제품({_veh}) 전체의 'wafer별' 통계입니다.",
+        "· robust 산포 = 값들의 1.4826×MAD(0이면 IQR/1.349, 그래도 0이면 std).",
+        "· 제품 wafer 기준 = 제품 전 lot의 각 wafer를 단위로 산출 — ①wafer median들의 중심·산포(wafer간 변동), "
+        "②'보통 wafer 산포'(각 wafer 내부 산포의 중앙값).",
+        "· 'Nσ' = (대상 wafer median − 제품 wafer median 중심) / 제품 wafer median 산포,   "
+        "'N배' = 대상 wafer 내부 산포 / 보통 wafer 산포.",
         f"· 위치(radius zone): Center ≤ {_rc:g}, Middle {_rc:g}~{_rm:g}, Edge > {_rm:g}.",
-        f"· 판정 기준 — 이상: spec(LCL/UCL) 이탈. 주의: spec 이내라도 (lot median이 {_sig:g}σ 초과 이탈) "
-        f"또는 (랏내 산포가 보통의 랏 산포의 {_dsp:g}배 초과). 둘 다 아니면 참고.",
-        "· 우선순위: 이상 > 주의 > 참고 순, 같은 등급 내에서는 spec-out 개수·이탈 크기(deviation)가 큰 순.",
+        f"· 판정 기준 — 이상: spec(LCL/UCL) 이탈. 주의: spec 이내라도 (대상 wafer median이 {_sig:g}σ 초과 이탈) "
+        f"또는 (대상 wafer 산포가 보통 wafer 산포의 {_dsp:g}배 초과). 둘 다 아니면 참고.",
+        "· 우선순위: 이상 > 주의 순. 이상은 ①wafer 최고 spec-out 비율(out pt/측정 pt) ②spec-out wafer 수 "
+        "③REPORT ORDER 순, 주의는 이탈 크기(σ·배수) 큰 순.",
     ]
     for _k, _ln in enumerate(_note_lines):
         _np = tf.paragraphs[0] if _k == 0 else tf.add_paragraph()
@@ -1327,10 +1350,11 @@ def _copy_slide_into(dest_prs, src_slide, src_w=None, src_h=None):
 def _fmt_stat_value(v):
     """PPT 통계표 셀 숫자 표기 규칙.
 
-    - |v| < 1        → 소수점 셋째자리(0.123)
-    - 1 ≤ |v| < 1000 → 소수점 첫째자리(12.3)
-    - 그 외          → 유효숫자 2개 scientific(1.1e5 / -2.3e-6)
-    - NaN/None       → '-'
+    - |v| ≤ 0.001         → 유효숫자 2개 scientific (예: 5.0e-4)
+    - 0.001 < |v| < 1     → 소수점 셋째자리(0.123)
+    - 1 ≤ |v| < 1000      → 소수점 첫째자리(12.3)
+    - |v| ≥ 1000          → 유효숫자 2개 scientific(1.1e5)
+    - NaN/None            → '-'
     """
     try:
         if v is None or pd.isna(v):
@@ -1341,14 +1365,17 @@ def _fmt_stat_value(v):
     av = abs(v)
     if av == 0:
         return "0"
+
+    def _sci(x):
+        _s = f"{x:.1e}"                    # 예: '1.1e+05' / '5.0e-04'
+        _mant, _exp = _s.split('e')
+        return f"{_mant}e{int(_exp)}"      # '1.1e5' / '5.0e-4'
+
+    if av <= 1e-3 or av >= 1000:
+        return _sci(v)
     if av < 1:
         return f"{v:.3f}"
-    if av < 1000:
-        return f"{v:.1f}"
-    # scientific: 유효숫자 2개(가수 소수 1자리) + 'e' 지수(1.1e5 형태, +/선행0 제거)
-    _s = f"{v:.1e}"          # 예: '1.1e+05'
-    _mant, _exp = _s.split('e')
-    return f"{_mant}e{int(_exp)}"
+    return f"{v:.1f}"
 
 
 # ===================================================================
@@ -1586,11 +1613,11 @@ def _render_item_charts(task):
         ax.spines['left'].set_linewidth(0.6)
         ax.spines['bottom'].set_linewidth(0.6)
 
-    def _label_axes(ax, xlabel=None, ylabel=None):
+    def _label_axes(ax, xlabel=None, ylabel=None, ylabel_size=7, xlabel_size=7):
         if xlabel is not None:
-            ax.set_xlabel(xlabel, fontsize=7, color=C_NAVY, fontname=FONT)
+            ax.set_xlabel(xlabel, fontsize=xlabel_size, color=C_NAVY, fontname=FONT)
         if ylabel is not None:
-            ax.set_ylabel(ylabel, fontsize=7, color=C_NAVY, fontname=FONT)
+            ax.set_ylabel(ylabel, fontsize=ylabel_size, color=C_NAVY, fontname=FONT)
 
     try:
         cols = task['cols']
@@ -1716,6 +1743,24 @@ def _render_item_charts(task):
             else:
                 out['stat_cells'][w_idx] = None
 
+        # 통계표 (lot_id 포함) — HTML score board처럼 (lot, wafer)별 값. 측정된 것만.
+        out['stat_cells_lw'] = {}   # {(lot_str, wafer_int): [v1..v4]}
+        _lc_s = 'fab_lot_id' if 'fab_lot_id' in item_df.columns else None
+        if _lc_s:
+            for (_lot, _waf), _g in item_df.groupby([_lc_s, w_col]):
+                try:
+                    _wi = int(str(_waf).replace('#', ''))
+                except (ValueError, TypeError):
+                    continue
+                _d = pd.to_numeric(_g[item_name], errors='coerce').dropna()
+                _vals = []
+                for _lbl, _fn in stat_defs:
+                    try:
+                        _vals.append(_fmt_stat_value(_fn(_d)))
+                    except Exception:
+                        _vals.append("-")
+                out['stat_cells_lw'][(str(_lot), _wi)] = _vals
+
         # ---- 차트 임시 버퍼 (디스크 파일 없이 메모리에서 처리) ----
         tmp_box = _io.BytesIO()
         tmp_map = _io.BytesIO()
@@ -1764,10 +1809,22 @@ def _render_item_charts(task):
             ax_box.axhline(y=float(spec_low), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
         if spec_high is not None:
             ax_box.axhline(y=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
+        # 대상 lot_id(리포트 subject)에 속한 wafer 번호 → x축 라벨에 '*' 표기 + 우하단 범례
+        _tgt_wafnums = set()
+        if 'fab_lot_id' in item_df.columns:
+            _tl_box = item_df[item_df['fab_lot_id'].astype(str) == str(target_lot_id)]
+            for _w in _tl_box[w_col].unique():
+                try:
+                    _tgt_wafnums.add(int(_w))
+                except (ValueError, TypeError):
+                    pass
         ax_box.set_xticks(range(1, 26))
-        ax_box.set_xticklabels([f"#{i}" for i in range(1, 26)])
+        ax_box.set_xticklabels([f"#{i}" + ("*" if i in _tgt_wafnums else "") for i in range(1, 26)])
         ax_box.set_xlim(0.5, 25.5)
         ax_box.tick_params(axis='x', rotation=45, labelsize=7)
+        if _tgt_wafnums:
+            fig_box.text(0.995, 0.01, f"*: {target_lot_id}", ha='right', va='bottom',
+                         fontsize=6, color=C_NEUTRAL, fontstyle='italic')
         _label_axes(ax_box, xlabel="Wafer #", ylabel=y_label)
         _remove_spines(ax_box)
         ax_box.set_axisbelow(True)
@@ -1834,15 +1891,15 @@ def _render_item_charts(task):
                     for i, (sub_name, sub_grp) in enumerate(sub_groups)
                     for c in range(FIXED_N_WAF)}
 
-        _cbar_w = 0.45                                 # 우측 컬러바 폭(인치)
         render_cell = 0.55                             # 셀(=wafer 1칸) 크기(인치) — 25칸 고정
         chip_pt = render_cell / gdim * 72.0            # 칩 1개 한 변(pt)
         marker_s = max(0.5, (chip_pt * 0.9) ** 2)      # 격자가 커도(13x13) 겹치지 않게 자동 축소
-        fig_disp_w = grid_cols * render_cell           # 서브플롯 영역 폭(컬러바 제외, 항상 25*cell)
+        fig_disp_w = grid_cols * render_cell           # 서브플롯 영역 폭(항상 25*cell)
         fig_h = grid_rows * render_cell + 0.15         # 하단 wafer 번호 라벨 여백
 
+        # 컬러바는 별도 이미지로 분리(슬라이드에서 항상 같은 크기로 우측에 길게 배치) → 맵은 grid만
         fig_map, axes_map = plt.subplots(grid_rows, grid_cols,
-                                         figsize=(fig_disp_w + _cbar_w, fig_h), squeeze=False,
+                                         figsize=(fig_disp_w, fig_h), squeeze=False,
                                          gridspec_kw={'wspace': 0.06, 'hspace': 0.18})
         sc = None
         for r in range(grid_rows):
@@ -1873,20 +1930,29 @@ def _render_item_charts(task):
                 ax.set_xlim(global_x_max, global_x_min)
                 ax.set_ylim(global_y_min, global_y_max)
 
-        if sc is not None:
-            # 모든 wafer가 공유하는 단일 컬러바를 오른쪽에 배치
-            _cb_frac = fig_disp_w / (fig_disp_w + _cbar_w)
-            fig_map.subplots_adjust(left=0.02, right=_cb_frac, top=0.97, bottom=0.06)
-            cbar_ax = fig_map.add_axes([_cb_frac + 0.015, 0.12, 0.012, 0.76])
-            cbar = fig_map.colorbar(sc, cax=cbar_ax)
-            cbar.ax.tick_params(labelsize=6)
+        fig_map.subplots_adjust(left=0.02, right=0.99, top=0.97, bottom=0.06)
         # 칩 격자가 선명하도록 해상도 상향
         fig_map.savefig(tmp_map, format='jpg', dpi=max(int(dpi), 200), bbox_inches="tight",
                         facecolor='white', pil_kwargs={'quality': map_q})
         plt.close(fig_map)
         out['imgs']['map'] = tmp_map.getvalue()
         # 고정 크기 배치용 비율(25칸 고정 → wafer 수와 무관하게 동일). 조립부에서 사용.
-        out['map_ratio'] = fig_h / (fig_disp_w + _cbar_w)
+        out['map_ratio'] = fig_h / fig_disp_w
+
+        # ---- WF MAP 컬러바(별도 이미지) : 슬라이드에서 항상 같은 크기로 우측에 세로로 길게 배치 ----
+        if sc is not None:
+            import matplotlib.cm as _cm
+            tmp_cbar = _io.BytesIO()
+            _sm = _cm.ScalarMappable(norm=wfmap_norm, cmap=_wfmap_cmap(direction))
+            _sm.set_array([])
+            fig_cb = plt.figure(figsize=(0.62, 3.2))
+            _cax = fig_cb.add_axes([0.04, 0.04, 0.30, 0.92])
+            _cb = fig_cb.colorbar(_sm, cax=_cax)
+            _cb.ax.tick_params(labelsize=7)
+            fig_cb.savefig(tmp_cbar, format='png', dpi=max(int(dpi), 150),
+                           bbox_inches='tight', facecolor='white')
+            plt.close(fig_cb)
+            out['imgs']['cbar'] = tmp_cbar.getvalue()
 
         # ---- 5. Trend Chart (vehicle/with_vehicle/target 비교 + vehicle 1~99% 구름대) ----
         tdf = item_df_full.copy()
@@ -1981,7 +2047,10 @@ def _render_item_charts(task):
             if spec_high is not None:
                 ax.axhline(y=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
 
-            # ── y축 범위 자동 조정: target lot 데이터 + spec line이 모두 보이도록 ──
+            # ── y축 범위 자동 조정: 해당 lot + spec line 중심 ──
+            #   이전(모집단) high flier로 y축이 과도하게 커져 대상 lot이 안 보이는 문제 →
+            #   target lot·모집단 모두 'robust 범위(1~99%)'만 반영하고 spec line은 반드시 포함.
+            #   범위를 벗어난 high flier는 잘려도 무방(대상 lot과 spec을 명확히 보이게 함).
             if not log_scale:
                 try:
                     _tgt_y = _select_target_lot_frame(tdf, target_lot_id, target_root_lot_id, target_DC_step_id)
@@ -1990,7 +2059,9 @@ def _render_item_charts(task):
                 _yv = []
                 for _d in (_tgt_y, veh_df):
                     if len(_d):
-                        _yv += pd.to_numeric(_d[item_name], errors='coerce').dropna().tolist()
+                        _s = pd.to_numeric(_d[item_name], errors='coerce').dropna()
+                        if len(_s):
+                            _yv += [float(_s.quantile(0.01)), float(_s.quantile(0.99))]
                 if spec_low is not None:
                     _yv.append(float(spec_low))
                 if spec_high is not None:
@@ -2004,7 +2075,7 @@ def _render_item_charts(task):
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
             ax.tick_params(axis='x', rotation=0, labelsize=7)
             ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=6))
-            _label_axes(ax, xlabel="Date", ylabel=y_label)
+            _label_axes(ax, xlabel="Date", ylabel=y_label, ylabel_size=5.5)  # y축명 잘림 방지 위해 축소
             if log_scale: ax.set_yscale('log')
             ax.legend(fontsize=6, loc='upper left', frameon=False)   # Trend 범례 좌상단 고정
             _remove_spines(ax)
@@ -2117,7 +2188,7 @@ def _render_item_charts(task):
         if spec_high is not None:
             ax_rad.axhline(y=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
         ax_rad.set_title("")
-        _label_axes(ax_rad, xlabel="Chip Radius", ylabel=y_label)
+        _label_axes(ax_rad, xlabel="Chip Radius", ylabel=y_label, ylabel_size=5.5)  # y축명 잘림 방지 위해 축소
         if log_scale: ax_rad.set_yscale('log')
         _remove_spines(ax_rad)
         ax_rad.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
@@ -2366,8 +2437,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
         _lot_present_cols = {c for c in _tl_df.columns if _tl_df[c].notna().any()}
     except Exception:
         _lot_present_cols = set(merged_df.columns)
-    # (2) reformatter ALIAS → (CATEGORY, ADDP FORM) 맵 (ADDP 재귀 해소용)
-    _ref_cat, _ref_formula = {}, {}
+    # (2) reformatter ALIAS → (CATEGORY, ADDP FORM, ITEMID) 맵 (ADDP 재귀 해소·real item 표시용)
+    _ref_cat, _ref_formula, _ref_itemid = {}, {}, {}
     if reformatter is not None and 'ALIAS' in getattr(reformatter, 'columns', []):
         for _, _rr in reformatter.iterrows():
             _a = _rr.get('ALIAS')
@@ -2375,6 +2446,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 continue
             _ref_cat[str(_a)] = str(_rr.get('CATEGORY', '')).strip().upper()
             _ref_formula[str(_a)] = str(_rr.get('ADDP FORM', '') or '')
+            _iid = _rr.get('ITEMID')
+            _ref_itemid[str(_a)] = '' if pd.isna(_iid) else str(_iid).strip()
 
     # 다중출력 ADDP(예: MA_Window)는 {alias}_new / {alias}_ovl_index 등 파생 컬럼을 만든다.
     # 다른 ADDP(rmax 등)가 이 파생 컬럼을 {MAWIN_new} 처럼 참조하면 그 자체는 ALIAS가
@@ -2651,9 +2724,17 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 p.font.name = FONT
 
             # INDEX 옆에 관련 REAL ITEM 이름 파싱해서 기입
-            # ADDP 파생(예: WINDOW_new)은 base ALIAS(spec_name=WINDOW)의 ADDP FORM에서
-            # {ALIAS} 참조만 재귀 전개(함수명 rmax/ABS 등 제외) → 그 중 '해당 lot에 실제
-            # 데이터가 있는' real 항목만 표시한다.
+            # ADDP는 ADDP FORM의 {ALIAS} 참조를 재귀 전개(ADDP 안의 ADDP도 풀어) 최종 leaf
+            # alias를 얻고, 각 leaf alias의 reformatter ITEMID(=실제 real item)를 모두 표시한다.
+            # (함수명 rmax/ABS 등은 {} 밖이라 제외, 다중출력 파생 {WINDOW_new}는 base ADDP로 재귀)
+            def _leaf_to_itemids(leaf_aliases):
+                _out = []
+                for _r in leaf_aliases:
+                    _r2 = re.sub(r'_new$', '', _r)                 # 다중출력 파생 접미사 제거
+                    _iid = _ref_itemid.get(_r2) or _ref_itemid.get(_r)
+                    _out.append(_iid if _iid else _r2)             # ITEMID 없으면 alias명 표시
+                return sorted(set(_out))
+
             real_items_str = ""
             if reformatter is not None and spec_name in reformatter['ALIAS'].values:
                 row = reformatter[reformatter['ALIAS'] == spec_name].iloc[0]
@@ -2661,10 +2742,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 if cat == 'REAL':
                     real_items_str = str(row.get('ITEMID', ''))
                 elif cat == 'ADDP':
-                    _leaf = _addp_leaf_refs(spec_name)
-                    # MA_Window 파생 참조({WINDOW_new} 등)는 '_new' 접미사를 떼고 base 세부항목명으로 표시
-                    _shown = sorted({re.sub(r'_new$', '', r) for r in _leaf if r in _lot_present_cols})
-                    real_items_str = ", ".join(_shown)
+                    _leaf = _addp_leaf_refs(spec_name)             # 최종 leaf alias(재귀 해소)
+                    real_items_str = ", ".join(_leaf_to_itemids(_leaf))
 
             # ---- 1. HEADER & INDEX NAME (Title) ----
             header_shape = slide.shapes.add_shape(1, Inches(0), Inches(0), prs.slide_width, Inches(0.58))
@@ -2696,67 +2775,93 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             add_card_title("■ Radius plot", RX, Y_RAD)
             add_card_title("■ Cumulative plot", RX, Y_CUM)
 
-            # ---- 2. Statistical Table (통계 테이블: #1~25 고정 컬럼, Total 열 없음) ----
-            cols = 26 # Stat + #1 ~ #25 고정 (Total 열 제거)
-            table_shape = slide.shapes.add_table(5, cols, Inches(LX), Inches(Y_TABLE), Inches(LW), Inches(1.2)).table
+            # ---- 2. Statistical Table (lot_id 포함, 측정 wafer만, wafer 열폭 일정) ----
+            _stat_rows = res['stat_rows']
+            _slw = res.get('stat_cells_lw') or {}
+            _NAVY = RGBColor(*NAVY_RGB); _WH = RGBColor(255, 255, 255); _BK = RGBColor(0, 0, 0)
+            _LOTBG = RGBColor(0xD9, 0xE1, 0xF2)
 
-            # 헤더
-            headers = ["Stat"] + [f"#{w}" for w in range(1, 26)]
-            for c_idx, h in enumerate(headers):
-                cell = table_shape.cell(0, c_idx)
-                cell.text = h
-                cell.fill.solid()
-                cell.fill.fore_color.rgb = RGBColor(*NAVY_RGB) # 네이비 헤더 (통일)
-                cell.margin_left = Inches(0.0)
-                cell.margin_right = Inches(0.0)
-                cell.margin_top = Inches(0.0)
-                cell.margin_bottom = Inches(0.0)
+            def _stat_style(cell, text, bg, fg, bold, sz=7, align=PP_ALIGN.CENTER):
+                cell.text = str(text)
+                cell.fill.solid(); cell.fill.fore_color.rgb = bg
+                cell.margin_left = Inches(0.0); cell.margin_right = Inches(0.0)
+                cell.margin_top = Inches(0.0); cell.margin_bottom = Inches(0.0)
                 cell.vertical_anchor = MSO_ANCHOR.MIDDLE
                 cell.text_frame.word_wrap = False
                 for par in cell.text_frame.paragraphs:
-                    par.font.color.rgb = RGBColor(255, 255, 255)
-                    par.font.bold = True
-                    par.font.size = Pt(7)
-                    par.font.name = FONT
-                    par.alignment = PP_ALIGN.CENTER
+                    par.font.size = Pt(sz); par.font.bold = bold
+                    par.font.color.rgb = fg; par.font.name = FONT
+                    par.alignment = align
 
-            # REPORT DIRECTION별 통계 행/값은 워커(_render_item_charts)가 계산 완료
-            stat_cells = res['stat_cells']
-            for r_idx, label in enumerate(res['stat_rows']):
-                table_shape.cell(r_idx + 1, 0).text = label
-
-            # Wafer별 통계 (1~25 고정 루프, Stat 라벨이 0열이므로 wafer #w → c_idx=w)
-            for w_idx in range(1, 26):
-                vals = stat_cells.get(w_idx)
-                if vals:
-                    for r_idx, _v in enumerate(vals, start=1):
-                        table_shape.cell(r_idx, w_idx).text = _v
-                else:
+            if _slw:
+                # 컬럼 순서: target lot 먼저, lot 내 wafer 오름차순 (HTML score board와 동일)
+                _lots_s = sorted({k[0] for k in _slw},
+                                 key=lambda l: (0 if str(l) == str(target_lot_id) else 1, str(l)))
+                order_lw = []
+                for _lot in _lots_s:
+                    for _w in sorted([w for (l, w) in _slw if l == _lot]):
+                        order_lw.append((_lot, _w))
+                n_waf = max(len(order_lw), 1)
+                # wafer 열폭: 기본 0.31" 고정(적게 찍히면 표가 줄어듦). 단 wafer가 많아
+                # 슬라이드 폭(13")을 넘으면 넘지 않게 균일 축소(표 내 모든 wafer 동일 폭 유지).
+                STAT_W = 0.55
+                WAFER_W = min(0.31, (13.0 - STAT_W) / n_waf)
+                ncol = 1 + n_waf
+                nrow = 2 + len(_stat_rows)      # lot 헤더행 + wafer# 헤더행 + stat 행들
+                tbl_w = STAT_W + n_waf * WAFER_W
+                table_shape = slide.shapes.add_table(
+                    nrow, ncol, Inches(LX), Inches(Y_TABLE),
+                    Inches(tbl_w), Inches(min(1.4, 0.22 * nrow))).table
+                table_shape.columns[0].width = Inches(STAT_W)
+                for _j in range(1, ncol):
+                    table_shape.columns[_j].width = Inches(WAFER_W)
+                # (0,0)+(1,0) 병합 → 'Stat'
+                table_shape.cell(0, 0).merge(table_shape.cell(1, 0))
+                _stat_style(table_shape.cell(0, 0), "Stat", _NAVY, _WH, True, 8)
+                # 헤더행0: lot_id 가로 병합
+                _k = 0
+                while _k < len(order_lw):
+                    _lot = order_lw[_k][0]; _k2 = _k
+                    while _k2 + 1 < len(order_lw) and order_lw[_k2 + 1][0] == _lot:
+                        _k2 += 1
+                    _c0, _c1 = 1 + _k, 1 + _k2
+                    if _c1 > _c0:
+                        table_shape.cell(0, _c0).merge(table_shape.cell(0, _c1))
+                    _stat_style(table_shape.cell(0, _c0), str(_lot), _LOTBG, _BK, True, 7)
+                    _k = _k2 + 1
+                # 헤더행1: wafer #
+                for _j, (_lot, _w) in enumerate(order_lw):
+                    _stat_style(table_shape.cell(1, 1 + _j), f"#{_w}", _NAVY, _WH, True, 7)
+                # 데이터행: stat 라벨 + (lot,wafer)별 값
+                for _r, _lbl in enumerate(_stat_rows):
+                    _rr = 2 + _r
+                    _bg = RGBColor(245, 247, 250) if _r % 2 == 0 else _WH
+                    _stat_style(table_shape.cell(_rr, 0), _lbl, _bg, _BK, False, 7, PP_ALIGN.LEFT)
+                    for _j, (_lot, _w) in enumerate(order_lw):
+                        _vals = _slw.get((_lot, _w))
+                        _txt = _vals[_r] if (_vals and _r < len(_vals)) else "-"
+                        _stat_style(table_shape.cell(_rr, 1 + _j), _txt, _bg, _BK, False, 7)
+            else:
+                # (fallback) fab_lot_id 없을 때: 기존 wafer #1~25 고정 26칸 표
+                cols = 26
+                table_shape = slide.shapes.add_table(5, cols, Inches(LX), Inches(Y_TABLE), Inches(LW), Inches(1.2)).table
+                headers = ["Stat"] + [f"#{w}" for w in range(1, 26)]
+                for c_idx, h in enumerate(headers):
+                    _stat_style(table_shape.cell(0, c_idx), h, _NAVY, _WH, True, 7)
+                stat_cells = res['stat_cells']
+                for r_idx, label in enumerate(_stat_rows):
+                    table_shape.cell(r_idx + 1, 0).text = label
+                for w_idx in range(1, 26):
+                    vals = stat_cells.get(w_idx)
                     for r_idx in range(1, 5):
-                        table_shape.cell(r_idx, w_idx).text = "-"
-
-            for r_idx, row in enumerate(table_shape.rows):
-                if r_idx == 0: continue
-                bg_color = RGBColor(245, 247, 250) if r_idx % 2 == 1 else RGBColor(255, 255, 255)
-                for c_idx, cell in enumerate(row.cells):
-                    if c_idx >= 1 and stat_cells.get(c_idx) is None:
-                        # 빈 데이터 웨이퍼는 연한 그레이 채우기
-                        cell.fill.solid()
-                        cell.fill.fore_color.rgb = RGBColor(240, 240, 240)
-                    else:
-                        cell.fill.solid()
-                        cell.fill.fore_color.rgb = bg_color
-                    cell.margin_left = Inches(0.0)
-                    cell.margin_right = Inches(0.0)
-                    cell.margin_top = Inches(0.0)
-                    cell.margin_bottom = Inches(0.0)
-                    cell.vertical_anchor = MSO_ANCHOR.MIDDLE
-                    cell.text_frame.word_wrap = False
-                    for par in cell.text_frame.paragraphs:
-                        par.font.size = Pt(7)
-                        par.font.color.rgb = RGBColor(0, 0, 0)
-                        par.font.name = FONT
-                        par.alignment = PP_ALIGN.CENTER
+                        _v = vals[r_idx - 1] if (vals and r_idx - 1 < len(vals)) else "-"
+                        _bg = RGBColor(240, 240, 240) if vals is None else (
+                            RGBColor(245, 247, 250) if r_idx % 2 == 1 else _WH)
+                        _stat_style(table_shape.cell(r_idx, w_idx), _v, _bg, _BK, False, 7)
+                for r_idx in range(1, 5):
+                    _bg = RGBColor(245, 247, 250) if r_idx % 2 == 1 else _WH
+                    _stat_style(table_shape.cell(r_idx, 0), _stat_rows[r_idx - 1] if r_idx - 1 < len(_stat_rows) else "",
+                                _bg, _BK, False, 7, PP_ALIGN.LEFT)
 
             # ---- 3. 렌더링된 차트 이미지 삽입 (워커가 만든 jpg bytes) ----
             imgs = res['imgs']
@@ -2764,14 +2869,21 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             slide.shapes.add_picture(_io.BytesIO(leg_bytes), Inches(LX), Inches(Y_LEG), width=Inches(LW))
             # BOX Plot
             slide.shapes.add_picture(_io.BytesIO(imgs['box']), Inches(LX), Inches(Y_BOX), Inches(LW), Inches(2.05))
-            # WF MAP — 고정 25칸 비율(map_ratio) 유지, 세로가 넘칠 때만 축소
+            # WF MAP(grid) — 우측 컬러바 슬롯(_CBAR_SLOT)만큼 뺀 폭에 배치, 세로가 넘칠 때만 축소
+            _CBAR_SLOT = 0.55
             map_avail = SLIDE_BOTTOM - Y_MAP
+            map_area_w = LW - _CBAR_SLOT
             _ratio = res['map_ratio'] or 0.1
-            pic_w, pic_h = LW, LW * _ratio
+            pic_w, pic_h = map_area_w, map_area_w * _ratio
             if pic_h > map_avail:
                 pic_h = map_avail
                 pic_w = pic_h / _ratio
             slide.shapes.add_picture(_io.BytesIO(imgs['map']), Inches(LX), Inches(Y_MAP), Inches(pic_w), Inches(pic_h))
+            # Color bar — 항상 우측에 같은 크기로 세로로 길게: top=Y_MAP(현재 위치), bottom≈Cumulative x축
+            if imgs.get('cbar'):
+                _cb_h = SLIDE_BOTTOM - Y_MAP
+                _cb_x = LX + LW - _CBAR_SLOT + 0.02
+                slide.shapes.add_picture(_io.BytesIO(imgs['cbar']), Inches(_cb_x), Inches(Y_MAP), height=Inches(_cb_h))
             # Trend / Radius / Cumulative
             slide.shapes.add_picture(_io.BytesIO(imgs['trend']), Inches(RX), Inches(Y_TREND), Inches(RW), Inches(1.95))
             slide.shapes.add_picture(_io.BytesIO(imgs['rad']), Inches(RX), Inches(Y_RAD), Inches(RW), Inches(1.95))
@@ -2911,6 +3023,53 @@ def insert_plots(merged_df, prs, description_image_info_dict,
 
     return prs, metrics_dict
 
+
+def getData_with_retry(params, custom_columns=None, user_name=None,
+                       timeout_sec=1200, retry_wait_sec=300, max_retries=3, long_wait_sec=3600):
+    """bigdatalake `getData`를 타임아웃 + 재시도로 감싼다(성공할 때까지 반환하지 않음).
+
+    - 쿼리 1회가 timeout_sec(기본 20분)를 넘으면 강제 중단(daemon thread 포기)하고 재시도.
+    - 에러/타임아웃 시: 처음 max_retries(3)회까지는 retry_wait_sec(5분) 간격으로 재시도.
+    - 3회 모두 실패하면 그 이후로는 long_wait_sec(1시간) 간격으로 계속 재시도(성공할 때까지).
+    → API 오류로 터미널이 멈추지 않고 자동 복구한다.
+    """
+    import threading
+    import time as _time
+
+    attempt = 0
+    while True:
+        attempt += 1
+        _res = {}
+
+        def _run():
+            try:
+                _res['data'] = getData(params, custom_columns=custom_columns, user_name=user_name)
+            except Exception as _e:
+                _res['err'] = _e
+
+        _t = threading.Thread(target=_run, daemon=True)
+        _t.start()
+        _t.join(timeout_sec)
+
+        if _t.is_alive():
+            print(f"[WARN] bigdatalake 쿼리 타임아웃({timeout_sec // 60}분 초과) — 강제 중단 후 재시도 (attempt {attempt})")
+        elif 'err' in _res:
+            print(f"[WARN] bigdatalake 쿼리 실패: {_res['err']} (attempt {attempt})")
+        else:
+            if attempt > 1:
+                print(f"[INFO] bigdatalake 쿼리 재시도 성공 (attempt {attempt})")
+            return _res['data']
+
+        # 실패/타임아웃 → 대기 후 재시도 (3회까지는 5분, 이후 1시간 간격)
+        if attempt < max_retries:
+            _w = retry_wait_sec
+            print(f"[WARN] {_w // 60}분 후 재시도합니다 ({attempt}/{max_retries})")
+        else:
+            _w = long_wait_sec
+            print(f"[ERROR] bigdatalake 쿼리 {max_retries}회 연속 실패 — 이후 {_w // 60}분 간격으로 계속 재시도합니다")
+        _time.sleep(_w)
+
+
 def etdata_query():
     """ET(Electrical Test) 측정 데이터를 빅데이터 서버에서 쿼리하여 일별 Hive-파티셔닝 parquet로 저장.
 
@@ -2997,7 +3156,7 @@ def etdata_query():
                         'like_conditions': {'step_seq' : GLOBAL_CONFIG.get("setting_stepseq")}
                         }
 
-            Query_Table_tmp = getData(params, custom_columns=GLOBAL_CONFIG.get("et_custom_columns"), user_name=GLOBAL_CONFIG.get("user_name"))
+            Query_Table_tmp = getData_with_retry(params, custom_columns=GLOBAL_CONFIG.get("et_custom_columns"), user_name=GLOBAL_CONFIG.get("user_name"))
 
             print(f"[Query Complete] {GLOBAL_CONFIG.get('vehicle')} {dateFrom} ~ {dateTo} 데이터 추출 완료")
 
@@ -3099,7 +3258,7 @@ def inlinedata_query(root_lot_id):
                     'not_like_conditions' : {'subitem_id' : ['SLOTID','MIN','MAX','Q2','RANGE','AVG','STD']}
                     }
 
-        Query_Table = getData(params, custom_columns=GLOBAL_CONFIG.get("inline_custom_columns"), user_name=GLOBAL_CONFIG.get("user_name"))
+        Query_Table = getData_with_retry(params, custom_columns=GLOBAL_CONFIG.get("inline_custom_columns"), user_name=GLOBAL_CONFIG.get("user_name"))
 
         Query_Table['fab_value'] = pd.to_numeric(Query_Table['fab_value'], errors='coerce')
         rows_to_multiply = Query_Table[Query_Table['item_id'].str.match(r'^CD\d+$')].index
@@ -3141,7 +3300,7 @@ def wipdata_query():
                     'line_id': GLOBAL_CONFIG.get("line_id"),
                     }
 
-        Query_Table_tmp = getData(params, custom_columns=GLOBAL_CONFIG.get("wip_custom_columns"), user_name=GLOBAL_CONFIG.get("user_name"))
+        Query_Table_tmp = getData_with_retry(params, custom_columns=GLOBAL_CONFIG.get("wip_custom_columns"), user_name=GLOBAL_CONFIG.get("user_name"))
         Query_Table_tmp['lot_id6'] = Query_Table_tmp['lot_id'].str.split('.').str[0]
         Query_Table_tmp.rename(columns={'step_seq': 'step_id'}, inplace=True)
 

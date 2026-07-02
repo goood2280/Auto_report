@@ -25,7 +25,7 @@ import requests
 from bigdataquery import *
 from My_Function import *
 from My_config import GLOBAL_CONFIG
-from anomaly_engine import run_anomaly_pipeline, analyze_commonality, render_findings_html, interpret_with_ai
+from anomaly_engine import run_anomaly_pipeline, analyze_commonality, render_findings_html, interpret_with_ai, item_excluded
 
 # ==================================================================================================================================
 # GPT OSS 120B API 연결 설정
@@ -39,57 +39,94 @@ from openai import OpenAI
 warnings.filterwarnings("ignore", message="DataFrame is highly fragmented")
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
+# openpyxl "Conditional Formatting extension is not supported" 등 UserWarning 억제
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
+warnings.filterwarnings("ignore", message=".*Conditional Formatting extension is not supported.*")
+warnings.filterwarnings("ignore", message=".*extension is not supported and will be removed.*")
 
 
 # ==================================================================================================================================
 
 
 # ==================================================================================================================================
-# 실행 로그 print 후킹 — print를 가로채 loop_log 파일 '상단'에 누적 기록.
-# (모듈 레벨 정의. main()에서 _LOOP_LOG_PATH 설정 + builtins.print 교체로 활성화된다.)
+# 실행 로그/터미널 출력 인프라
+#  - 모든 print를 가로채 통합 로그(제품명_log.txt)에 시간순 append + 30MB 초과 시 오래된(앞) 내용 자동 삭제.
+#  - 터미널: [ERROR]/[WARN]은 자동 색 강조, 중요 마일스톤은 print_status()로 초록/파랑/빨강 강조.
+#  - 로그 파일에는 ANSI 색코드를 제거하고 기록.
 # ==================================================================================================================================
 _original_print = builtins.print
-_run_log_buffer = []
-_LOOP_LOG_PATH = None
+_LOG_PATH = None
+_LOG_MAX_BYTES = 30 * 1024 * 1024
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 
-def _run_log_print(*args, **kwargs):
-    _original_print(*args, **kwargs)
+# Windows 콘솔에서 ANSI 색상(VT) 활성화 (미지원 환경이면 무해하게 skip)
+if os.name == 'nt':
     try:
-        if _LOOP_LOG_PATH:
-            msg = " ".join(str(a) for a in args)
-            _run_log_buffer.append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+        import ctypes as _ctypes
+        _k = _ctypes.windll.kernel32
+        _k.SetConsoleMode(_k.GetStdHandle(-11), 7)   # ENABLE_VIRTUAL_TERMINAL_PROCESSING 포함
     except Exception:
         pass
 
-def _flush_logs_to_top():
-    if not _LOOP_LOG_PATH or not _run_log_buffer:
-        return
+# ANSI 색상 (터미널 강조용)
+_COL = {'reset': '\x1b[0m', 'green': '\x1b[92m', 'blue': '\x1b[94m', 'red': '\x1b[91m',
+        'yellow': '\x1b[93m', 'cyan': '\x1b[96m', 'bold': '\x1b[1m'}
 
-    new_logs = "".join(_run_log_buffer)
-    existing_logs = ""
+def _c(text, color):
+    return f"{_COL.get(color, '')}{text}{_COL['reset']}"
 
-    if os.path.exists(_LOOP_LOG_PATH):
+def _safe_console_print(text, **kwargs):
+    """콘솔 인코딩(cp949 등)이 표현 못하는 문자가 있어도 죽지 않게 출력."""
+    try:
+        _original_print(text, **kwargs)
+    except UnicodeEncodeError:
+        _enc = getattr(sys.stdout, 'encoding', None) or 'utf-8'
+        _original_print(text.encode(_enc, errors='replace').decode(_enc, errors='replace'), **kwargs)
+
+def _rotate_unified_log():
+    """통합 로그가 30MB를 넘으면 오래된(앞) 내용을 버리고 최신 ~24MB만 유지."""
+    keep = 24 * 1024 * 1024
+    try:
+        with open(_LOG_PATH, 'rb') as f:
+            f.seek(0, os.SEEK_END); size = f.tell()
+            if size <= _LOG_MAX_BYTES:
+                return
+            f.seek(size - keep); data = f.read()
+        nl = data.find(b'\n')
+        if nl != -1:
+            data = data[nl + 1:]
+        with open(_LOG_PATH, 'wb') as f:
+            f.write(data)
+    except Exception:
+        pass
+
+def _run_log_print(*args, **kwargs):
+    msg = " ".join(str(a) for a in args)
+    # 터미널: 색이 없고 [ERROR]/[FAIL]/[WARN]이면 자동 강조
+    term = msg
+    if '\x1b[' not in msg:
+        _s = msg.lstrip()
+        if _s.startswith('[ERROR]') or _s.startswith('[FAIL]'):
+            term = _c(msg, 'red')
+        elif _s.startswith('[WARN]'):
+            term = _c(msg, 'yellow')
+    _safe_console_print(term, **kwargs)
+    # 통합 로그 파일: ANSI 제거 후 시간순 append + rotation
+    if _LOG_PATH:
         try:
-            with open(_LOOP_LOG_PATH, "r", encoding="utf-8") as f:
-                existing_logs = f.read()
+            with open(_LOG_PATH, 'a', encoding='utf-8') as f:
+                f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {_ANSI_RE.sub('', msg)}\n")
+            _rotate_unified_log()
         except Exception:
             pass
 
-    combined_logs = new_logs + existing_logs
-
-    # 50MB Limit (Approx 50,000,000 chars)
-    max_chars = 50 * 1024 * 1024
-    if len(combined_logs) > max_chars:
-        combined_logs = combined_logs[:max_chars]
-        last_nl = combined_logs.rfind('\n')
-        if last_nl != -1:
-            combined_logs = combined_logs[:last_nl+1]
-
-    try:
-        with open(_LOOP_LOG_PATH, "w", encoding="utf-8") as f:
-            f.write(combined_logs)
-    except Exception:
-        pass
+def print_status(category, state, detail=''):
+    """중요 상태를 색으로 강조 출력. 마커는 cp949 콘솔 호환 위해 ASCII 사용.
+    state: ok(초록)/fail(빨강)/info(파랑)/skip(노랑)/on(초록)/off(노랑)."""
+    tag, color = {'ok': ('[ OK ]', 'green'), 'fail': ('[FAIL]', 'red'), 'info': ('[ >> ]', 'blue'),
+                  'skip': ('[SKIP]', 'yellow'), 'on': ('[ ON ]', 'green'), 'off': ('[ OFF]', 'yellow')
+                  }.get(state, ('[ -- ]', 'cyan'))
+    print(_c(f"{tag} {category}" + (f": {detail}" if detail else ""), color))
 
 
 # ==================================================================================================================================
@@ -99,7 +136,7 @@ def _flush_logs_to_top():
 #   있어야 한다. (가드가 없으면 워커가 뜰 때마다 쿼리/리포트 발행이 재실행된다.)
 # ==================================================================================================================================
 def main():
-    global _LOOP_LOG_PATH
+    global _LOG_PATH
 
     # API 설정 (.env 에서 로드, 없으면 None)
     GPT_API_BASE_URL = os.getenv("GPT_API_BASE_URL")
@@ -130,12 +167,12 @@ def main():
                 temperature=0.5,
             )
             GPT_CONNECT = True
-            print("[INFO] GPT OSS 120B API 연결 성공")
+            print_status("GPT 연결", "ok", "성공 (gpt-oss-120b)")
         except Exception as e:
-            print(f"[WARN] GPT OSS 120B API 연결 실패: {e}")
+            print_status("GPT 연결", "fail", f"실패: {e}")
             gpt_client = None
     else:
-        print("[WARN] GPT_API_BASE_URL 또는 GPT_CREDENTIAL_KEY 가 .env 에 설정되지 않았습니다.")
+        print_status("GPT 연결", "skip", "미설정(.env GPT_API_BASE_URL/GPT_CREDENTIAL_KEY) → AI 해석 비활성")
 
     if len(sys.argv) != 2:
         print("Usage: python main.py <ItemName>")
@@ -206,26 +243,32 @@ def main():
         if not os.path.exists(target_path):
             os.makedirs(target_path)
 
-    # 실행 로그 print 후킹 초기화 (함수 본체는 모듈 상단 — main() 가드 밖에서도 재사용 가능)
-    _LOOP_LOG_PATH = loop_log if loop_log else None
-    atexit.register(_flush_logs_to_top)
+    # 통합 로그 print 후킹 초기화 — 모든 로그를 제품명_log.txt 하나로(시간순 append, 30MB rotation)
+    _LOG_PATH = GLOBAL_CONFIG.get("unified_log") or loop_log
     builtins.print = _run_log_print
 
     # =============================================== Main Loop 실행 ====================================================================
     bucket_dx = GLOBAL_CONFIG.get("bucket_dx") 
 
     # S3 client (사내 환경 전용 - 로컬에서는 graceful skip)
+    _use_s3 = getattr(GLOBAL_CONFIG, 'use_s3_upload', True)
     S3_CONNECT = False
     client = None
-    try:
-        client = boto3.client(
-                    service_name='s3', region_name='DS',
-                    aws_access_key_id=GLOBAL_CONFIG.get("s3_aws_access_key_id"),  
-                    aws_secret_access_key=GLOBAL_CONFIG.get("s3_aws_secret_access_key"),
-                    endpoint_url=GLOBAL_CONFIG.get("endpoint_url"))
-        S3_CONNECT = True
-    except Exception as s3_init_err:
-        print(f"[WARN] S3 client 초기화 실패 (로컬 테스트 모드): {s3_init_err}")
+    if not _use_s3:
+        print_status("S3 드라이브", "off", "use_s3_upload=False → 업로드 비활성")
+    elif boto3 is None:
+        print_status("S3 드라이브", "off", "boto3 미설치(로컬) → 업로드 비활성")
+    else:
+        try:
+            client = boto3.client(
+                        service_name='s3', region_name='DS',
+                        aws_access_key_id=GLOBAL_CONFIG.get("s3_aws_access_key_id"),
+                        aws_secret_access_key=GLOBAL_CONFIG.get("s3_aws_secret_access_key"),
+                        endpoint_url=GLOBAL_CONFIG.get("endpoint_url"))
+            S3_CONNECT = True
+            print_status("S3 드라이브", "on", "client 연결 성공")
+        except Exception as s3_init_err:
+            print_status("S3 드라이브", "fail", f"client 초기화 실패: {s3_init_err}")
 
     datetime_now = datetime.now()
     formatted_datetime = datetime_now.strftime('%y-%m-%d-%H-%M')
@@ -263,9 +306,12 @@ def main():
     reformatter = pd.read_csv(f'reformatter/{vehicle}_reformatter.csv')
 
     reformatter_check = reformatter_verify(reformatter)
-    # print("reformatter_check : ", reformatter_check)
+    if reformatter_check:
+        print_status("Reformatter 검증", "ok", f"{vehicle}_reformatter.csv 통과")
+    else:
+        print_status("Reformatter 검증", "fail", f"{vehicle}_reformatter.csv 실패 → 리포트 미발행")
 
-    if reformatter_check : 
+    if reformatter_check :
         conn = duckdb.connect()
 
         #test_mode True일 경우 etdata_query 진행하지않고 Report 생성만 진행
@@ -601,8 +647,8 @@ def main():
                 description_image_info_dict_low_qual = calcaulate_description_image_info_dict(description_ppt_path, img_quality = 20)
 
                 for search_key in search_strings : #search key = match key, fablot_id + dc_step_id
-                    try : 
-                        print(f'[INFO] *****{search_key}에 대한 AUTO LOT Report 발행 시작')
+                    try :
+                        print_status("Report 발행 시작", "info", f"{search_key}")
 
                         not_measured = False
 
@@ -757,7 +803,8 @@ def main():
                         try:
                             code_findings = analyze_commonality(
                                 merged_df, target_lot_id, metrics_dict, spec_data,
-                                main_vehicle=vehicle, config=GLOBAL_CONFIG, reformatter=reformatter)
+                                main_vehicle=vehicle, config=GLOBAL_CONFIG, reformatter=reformatter,
+                                knowledge_text=_ANOMALY_KNOWLEDGE_TEXT)
                             print(f"[INFO] commonality 분석: {len(code_findings)}건 finding")
                         except Exception as ce:
                             print(f"[WARN] commonality 분석 스킵 (오류): {ce}")
@@ -1138,12 +1185,14 @@ def main():
                             if len(top_item_names) >= _top_n: break
                         if len(top_item_names) < _top_n and metrics_dict:
                             _sigma = getattr(GLOBAL_CONFIG, 'anomaly_deviation_sigma', 1.5)
+                            _excl_items = getattr(GLOBAL_CONFIG, 'anomaly_exclude_items', []) or []
                             _anom = [m for m in metrics_dict.values()
                                      if m.get('spec_out_count', 0) > 0 or m.get('deviation', 0.0) > _sigma]
                             _anom.sort(key=lambda m: (m.get('spec_out_count', 0), m.get('deviation', 0.0)), reverse=True)
                             for m in _anom:
                                 _it = m['item']
-                                if (_it in _seen) or (_it not in merged_df.columns) or (not _has_png(_it)):
+                                if (_it in _seen) or (_it not in merged_df.columns) or (not _has_png(_it)) \
+                                        or item_excluded(_it, _excl_items):
                                     continue
                                 top_item_names.append(_it); _seen.add(_it)
                                 if len(top_item_names) >= _top_n: break
@@ -1280,9 +1329,9 @@ def main():
                             f'<div id="target1"><div class="section-title">■ [1] Score Board</div>'
                             f'<div style="font-size:12px; color:#555; margin:2px 0 6px 2px;">'
                             f'※ {_wf_min}pt 이상 측정된 이력이 있는 아이템은 각 wafer 아래에 WF MAP이 함께 표시됩니다.</div>'
-                            # Score Board는 기본 500px 대신 높이를 키워 한 화면에 약 25개 index가 보이도록 함
-                            # (index당 점수행+WF MAP행 ≈ 68px 기준 25개 → ~1750px; 초과 시에만 세로 스크롤)
-                            f'<div class="table-container" style="max-height:1750px;">{score_board_html}</div></div>'
+                            # Score Board: 컨테이너 스크롤 없이 전체 항목을 한번에 펼침(max-height 없음, overflow visible).
+                            # → thead(LOT_ID/wafer 헤더)가 페이지 스크롤 시 상단에 sticky 고정됨(score-board-open 클래스).
+                            f'<div class="table-container score-board-open">{score_board_html}</div></div>'
                         )
                         html_content = html_content.replace(
                             '<div id="target2"></div>',
@@ -1309,7 +1358,7 @@ def main():
                         # ==================== S3 업로드 (사내 환경 전용) ====================
                         # My_config.use_s3_upload 로 on/off.
                         if not getattr(GLOBAL_CONFIG, 'use_s3_upload', True):
-                            print('[INFO] use_s3_upload=False → S3 업로드 스킵')
+                            print_status("S3 업로드", "off", f"{search_key} → use_s3_upload=False 스킵")
                         elif S3_CONNECT and client:
                             # 개인 이름 경로 없이 bucket_dx 기준 clean key(vehicle/파일명) 사용
                             s3_key = f'{vehicle}/{final_ppt_file_name_DX}'
@@ -1318,13 +1367,14 @@ def main():
                                 # 동일 key가 이미 있으면 먼저 delete 후 업로드(put)
                                 try:
                                     client.delete_object(Bucket=bucket_dx, Key=s3_key)
-                                    print(f'[INFO] S3 기존 객체 삭제: {bucket_dx}/{s3_key}')
                                 except Exception as _de:
-                                    print(f'[INFO] S3 기존 객체 없음/삭제 스킵: {_de}')
+                                    pass
                                 client.upload_file(_s3_local, bucket_dx, s3_key)
-                                print(f'[INFO] S3 업로드 완료: {bucket_dx}/{s3_key}')
+                                print_status("S3 업로드", "ok", f"{bucket_dx}/{s3_key}")
                             except Exception as s3e:
-                                print(f'[WARN] S3 업로드 스킵: {s3e}')
+                                print_status("S3 업로드", "fail", f"{search_key}: {s3e}")
+                        else:
+                            print_status("S3 업로드", "off", f"{search_key} → S3 미연결 스킵")
 
                         # ==================== 사내 메일 API 발송 (PPT + HTML) ====================
                         # My_config.use_email_send 로 on/off. 생성된 HTML(html_content)은 본문으로,
@@ -1360,10 +1410,21 @@ def main():
                                 response = requests.request(
                                     "POST", GLOBAL_CONFIG.get("url"),
                                     headers=headers, data=payload, files=files)
-                                print(response)
-                                print(f'{target_lot_id}_{target_DC_step} LOT Report Mailing 완료')
+                                _sc = getattr(response, 'status_code', None)
+                                if _sc == 200:
+                                    print_status("메일 발송", "ok",
+                                                 f"{target_lot_id}_{target_DC_step} 완료 (수신 {len(email_list)}명, HTTP {_sc})")
+                                else:
+                                    # 200이 아니면 상세 에러 내용을 터미널에 출력
+                                    try:
+                                        _body = response.text
+                                    except Exception:
+                                        _body = '(응답 본문 읽기 실패)'
+                                    print_status("메일 발송", "fail",
+                                                 f"{target_lot_id}_{target_DC_step} — HTTP {_sc}")
+                                    print(f"[ERROR] 메일 발송 응답 오류 (HTTP {_sc}) 상세: {_body}")
                             except Exception as _me:
-                                print(f'[WARN] 메일 발송 실패: {_me}')
+                                print_status("메일 발송", "fail", f"{target_lot_id}_{target_DC_step}: {_me}")
                             finally:
                                 try:
                                     if _mail_fh is not None:
@@ -1371,13 +1432,13 @@ def main():
                                 except Exception:
                                     pass
                         else:
-                            print('[INFO] use_email_send=False → 메일 발송 스킵')
+                            print_status("메일 발송", "off", "use_email_send=False → 스킵")
 
                         log_to_file(f"{search_key} Report 발행 완료", query_log)
-                        print(f'[INFO] *****{search_key} AUTO LOT Report 발행 완료*****')
+                        print_status("Report 발행 완료", "ok", f"{search_key}")
 
                     except Exception as e:
-                        print(f'[ERROR] {search_key} Report 발행 실패: {e}')
+                        print_status("Report 발행 실패", "fail", f"{search_key}: {e}")
                         traceback.print_exc()
                         log_to_file(f"{search_key} Report 발행 실패: {e}", error_log)
                         continue

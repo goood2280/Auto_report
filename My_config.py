@@ -239,6 +239,18 @@ _REPORT_HTML_TEMPLATE = r"""<!DOCTYPE html>
         table.score-board td.row_heading {
             text-align: center !important;
         }
+        /* Score Board 컨테이너: 스크롤 없이 전체 항목을 한번에 펼침.
+           overflow:visible → thead(LOT_ID/wafer 헤더행)가 '페이지' 스크롤 시 상단에 sticky 고정된다. */
+        .table-container.score-board-open {
+            overflow: visible !important;
+            max-height: none !important;
+        }
+        /* sticky 헤더가 아래 셀 위로 확실히 올라오도록 헤더 배경/z-index 보강 */
+        .score-board thead th {
+            position: sticky;
+            background: #f0f0f0;
+            z-index: 10;
+        }
 
         /* ============================================================
            Inline 테이블 (Inline table)
@@ -536,8 +548,16 @@ class Config:
         # AI 없이도 코드로 동작하는 1차 자동 해석의 임계값들.
         # 모두 이 파일에서 조정 → README "Anomaly Trend Chart 우선순위" 참고
         # ──────────────────────────────────────────────────────
-        self.anomaly_lot_median_sigma = 2.0      # lot별 median 이상: 타랏 median 분포 대비 z 임계
-        self.anomaly_lot_dispersion_ratio = 1.5  # lot 산포 이상: 타랏 std 중앙값 대비 배수 임계
+        self.anomaly_lot_median_sigma = 2.0      # 주의(median): target wafer median이 '제품 wafer median 분포'에서 이 σ 초과 이탈 시 주의
+        self.anomaly_lot_dispersion_ratio = 1.5  # 주의(산포): target wafer 내부 산포가 '보통 wafer 산포'의 이 배수 초과 시 주의
+        # ── 통계 자동분석 제외 항목 ──
+        #   여기에 넣은 ITEM(ALIAS)은 통계 자동분석(이상/주의 finding·우선순위·Anomaly Trend Chart)에서
+        #   완전히 제외된다(Score Board/Trend 등 나머지 리포트에는 그대로 나옴).
+        #   - 대소문자 무시, fnmatch 와일드카드(*,?) 지원. 예: 'MAWIN_*'는 MAWIN 파생컬럼 전부 제외.
+        #   - 파생/마진 컬럼처럼 통계 이상으로 잡을 필요 없는 항목을 걸러 우선순위 노이즈를 줄이는 용도.
+        self.anomaly_exclude_items = [
+            'MAWIN_minus_margin', 'MAWIN_plus_margin', 'MAWIN_ovl_index', 'MAWIN_new',
+        ]
         self.anomaly_trend_slope_sigma = 1.0     # Trend drift: (기울기*기간)/std 임계
         self.anomaly_split_separation = 2.0      # lot내 집단 분리: |두 군 평균차|/pooled std 임계
         self.anomaly_site_recurrence_min_lots = 2  # 동일 site spec-out 재발 최소 lot 수
@@ -812,15 +832,13 @@ class Config:
         # 각종 로그 파일 경로를 vehicle별로 생성합니다.
         self.generated_vars["log"] = (
             os.path.join(self.base_path, 'RUN', 'log') + os.sep)
-        self.generated_vars["query_log"] = os.path.join(
-            self.base_path, 'RUN', 'log',
-            self.settings['vehicle'] + '_query_log.txt')
-        self.generated_vars["loop_log"] = os.path.join(
-            self.base_path, 'RUN', 'log',
-            self.settings['vehicle'] + '_loop_log.txt')
-        self.generated_vars["error_log"] = os.path.join(
-            self.base_path, 'RUN', 'log',
-            self.settings['vehicle'] + '_error_log.txt')
+        # 통합 로그: query/loop/error 로그를 '제품명_log.txt' 하나로 합침(rotation은 코드에서 30MB).
+        _prod_name = self.settings.get('prod', self.settings['vehicle'])
+        _unified_log = os.path.join(self.base_path, 'RUN', 'log', f'{_prod_name}_log.txt')
+        self.generated_vars["unified_log"] = _unified_log
+        self.generated_vars["query_log"] = _unified_log
+        self.generated_vars["loop_log"] = _unified_log
+        self.generated_vars["error_log"] = _unified_log
         self.generated_vars["et_log_path"] = os.path.join(
             self.base_path, 'RUN', 'log',
             self.settings['vehicle'] + '_et_log.csv')
