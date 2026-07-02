@@ -23,7 +23,9 @@ import pandas as pd
 import requests
 
 # ----- 프로젝트 내부 모듈
-from bigdataquery import *
+# NOTE: bigdataquery는 Main에서 직접 쓰지 않으므로 import하지 않는다.
+#   (병렬 렌더링 워커가 __main__=Main을 재import할 때 무거운 bigdataquery 재import·안내문
+#    출력이 매번 발생하던 문제 방지 — 실제 쿼리는 My_Function 내부에서 지연 import한다.)
 from My_Function import *
 from My_config import GLOBAL_CONFIG
 from anomaly_engine import run_anomaly_pipeline, analyze_commonality, render_findings_html, interpret_with_ai, item_excluded

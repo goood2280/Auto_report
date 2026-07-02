@@ -367,7 +367,9 @@ def _parse_pchk_item_map(text):
     for line in body.splitlines():
         if 'PCHK_ITEM_MAP' in line:   # 마커(:start/:end) 라인 제외
             continue
-        mt = re.match(r'\s*[-*]?\s*(PCHK\w*)\s*[:：]\s*(.+)$', line, re.IGNORECASE)
+        # 마커 사이의 '- <PCHK 표시명>: ITEM1, ITEM2' 라인. PCHK명은 임의 형식 허용
+        # (예: 'RMAX(PCHK Lkg)'). 콜론 앞 전체를 키로 사용.
+        mt = re.match(r'\s*[-*]\s*([^:：]+?)\s*[:：]\s*(.+)$', line)
         if not mt:
             continue
         key = mt.group(1).strip()

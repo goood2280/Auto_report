@@ -31,7 +31,9 @@ import pandas as pd
 #  프로젝트 내부 모듈 (Project Internal Imports)
 # ===================================================================
 from My_config import GLOBAL_CONFIG
-from bigdataquery import getData
+# NOTE: bigdataquery(getData)는 모듈 최상단에서 import하지 않는다.
+#   병렬 렌더링 워커가 My_Function을 재import할 때마다 무거운 bigdataquery 재import·안내문이
+#   뜨던 문제 방지. 실제 쿼리 시점(getData_with_retry)에만 지연 import한다.
 
 
 # ===================================================================
@@ -3097,6 +3099,7 @@ def getData_with_retry(params, custom_columns=None, user_name=None,
     """
     import threading
     import time as _time
+    from bigdataquery import getData   # 지연 import — 실제 쿼리 시점에만 bigdataquery 로드
 
     attempt = 0
     while True:

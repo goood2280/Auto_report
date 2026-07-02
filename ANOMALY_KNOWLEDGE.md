@@ -57,24 +57,20 @@
 
 ### PCHK 종류별 '검증 대상 ITEM' 매핑
 
-> **PCHK마다 검증하는 ITEM 군이 다릅니다.** 예: `PCHK_LKG`(누설)는 누설에 민감한 항목군,
-> `PCHK_Res`(접촉저항)는 저항/구동 항목군을 검증합니다. 각 PCHK가 **자기 대상 ITEM들과
+> **PCHK 종류별로 검증하는 ITEM 군이 다릅니다.** 누설(Lkg) 체크는 누설에 민감한 항목군을,
+> 접촉저항(Res) 체크는 저항/구동 항목군을 검증합니다. 각 PCHK가 **자기 대상 ITEM들과
 > 동일 PGM(pt)·동일 shot에서 함께 spec-out**일 때만 그 항목들을 측정이상으로 봅니다.
 > (여러 대상 항목이 겹칠수록 확신↑.)
 >
 > - 아래 매핑을 **엔지니어가 편집**하면 코드가 그대로 반영합니다(마커 사이만 파싱).
-> - 형식: `- PCHK명: ITEM1, ITEM2, ...`
+> - 형식: `- <PCHK 표시명>: ITEM1, ITEM2, ...` (PCHK 표시명 = reformatter의 실제 PCHK alias/표시명).
 > - **ITEM 명은 Index ALIAS(원 이름)든 HTML/PPT 표시명(replace/접미·접두 제거 적용)이든 둘 다 인식**합니다.
 > - 매핑에 없는 PCHK는 (하위호환) 모든 spec-out 항목과 대조합니다.
 
 <!-- PCHK_ITEM_MAP:start -->
-- PCHK_LKG: VTH_N, VTH_P, VTH_AVG
-- PCHK_CONT: IDSAT_N, IDSAT_P, IDSAT_RATIO
+- RMAX(PCHK Lkg): VTH_N, VTH_P, VTH_AVG
+- RMAX(PCHK Res): IDSAT_N, IDSAT_P, IDSAT_RATIO
 <!-- PCHK_ITEM_MAP:end -->
-
-<!-- 실환경 예시(주석): `PCHK_Res`처럼 표시명(AA_Rs 등)으로 적어도, ALIAS(AAA 등)로 적어도 매칭됩니다.
-- PCHK_Res: AA_Rs, BB, CC, DD, EE
--->
 
 - 코드가 실제 사용한 대상/겹침 결과는 `RUN/TEMP/anomaly_basis_<lot>.json`의
   `meas_target_items`(매핑 원문)·`meas_target_resolved`(매칭된 alias)·`meas_overlap_*`에서 확인할 수 있습니다.
@@ -86,23 +82,12 @@
 > AI 없이도 동작하며, 매칭된 판정은 리포트 Anomaly 요약/상세에 표기됩니다.
 >
 > - 여기서 **"이상/주의"는 `analyze_commonality` 기준과 동일**합니다
->   (이상 = spec(LCL/UCL) 이탈 point 존재 / 주의 = 해당 wafer 산포가 보통 wafer 대비 임계배수 초과).
+>   (이상 = spec 이탈 point 존재 / 주의 = 해당 wafer 산포가 보통 wafer 대비 임계배수 초과).
 > - **항목명(ITEM)은 Index ALIAS(원 이름)든, replace/접미·접두가 제거된 표시명이든 둘 다 인식**합니다.
 >   실제 컬럼명(예: `RMAX_VTH`, 파생 `MAWIN_new`, 표시명 등)을 그대로 적으면 됩니다.
 > - `trend_tkout_agg`(P10 등)로 집계되는 항목은 이상/주의도 **집계값 기준**으로 판정됩니다.
 
-### 사람이 읽는 로직 예시 (항목명만 바꿔서 사용)
-
-- **예시 로직 1**: `D_EXAMPLE` 항목이 주의 혹은 이상 수준일 때 확인한다.
-  `A_EXAMPLE > B_EXAMPLE > C_EXAMPLE > D_EXAMPLE` 순으로 (주의 보이는 wafer에서) 산포수준이 더 커지면
-  **'AA_불량모드 의심'** 이라 표기하고 참고링크 `https://example.com/aa_failure` 를 함께 제시한다.
-  산포수준이 그렇지 않고 A·B·C·D 모두 주의 이상 수준을 보이면 **'BB_불량모드 의심'** 이라 적고 'OOO를 확인해달라'고 적는다.
-- **예시 로직 2**: `ABC_EXAMPLE` 항목이 이상을 보이면 **'ABC risk가 존재한다'** 고 적고 링크 `https://example.com/abc_risk` 를 제시한다.
-- **예시 로직 3**: `BBB_EXAMPLE` 항목이 주의 이상이고 `CCC_EXAMPLE` 항목의 median이 Trend에서 매우 낮으면 **'NNN 이상 추정'** 코멘트를 남긴다.
-- **예시 로직 4**: `F_EXAMPLE` 항목에 주의 이상이 발생하지 않으면 `A_EXAMPLE, B_EXAMPLE, C_EXAMPLE, D_EXAMPLE, E_EXAMPLE` 항목의 산포는 따로 언급하지 않는다. `F_EXAMPLE`에서 이상이 발생하면 `A_EXAMPLE, B_EXAMPLE` 와 `D_EXAMPLE, E_EXAMPLE` 중 어느 쪽 산포가 더 커졌는지 언급하고 Trend에서 그 수준을 확인한다.
-- **예시 로직 5**: `A_EXAMPLE, B_EXAMPLE` 항목은 이상(spec-out)이 나타나지 않으면 그 산포 이상에 대해 언급하지 않는다.
-
-### 코드가 파싱하는 규칙 (아래 마커 사이만 파싱 — 위 예시를 규칙 문법으로 옮긴 것)
+### 규칙 (아래 `ANOMALY_RULES` 마커 사이만 파싱·관리)
 
 > **문법**: 한 규칙 = `RULE:`(출력 문구/설명, 필수) + 아래 액션/조건.
 > 규칙끼리는 빈 줄로 구분. `LEVEL`(이상|주의, 기본 주의)은 판정 결과의 심각도.
