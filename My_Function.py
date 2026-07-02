@@ -2548,6 +2548,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
     col_mask = _pick('mask', 'MASK')
 
     current_cat = None
+    _pending_desc = None   # (cat2, entry): 데이터가 실제로 찍힌 CAT2에만 간지 삽입하기 위한 대기 슬롯
     metrics_dict = {}
 
     import os
@@ -2782,7 +2783,10 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             continue
         print(f"[{idx}/{total_items}] {item_name} 처리 중...")
 
-        # ---- 카테고리 간지(Description) 슬라이드 삽입 (My_config.use_description_page로 on/off) ----
+        # ---- 카테고리 간지(Description) '대기' 등록 (My_config.use_description_page로 on/off) ----
+        #   실제 데이터가 찍힌 CAT2에만 간지를 붙이기 위해, 여기서는 대기(_pending_desc)로만 잡아둔다.
+        #   아래에서 이 CAT2의 item이 '실제 chart 슬라이드'를 만들 때(=데이터 존재) 그 직전에 삽입한다.
+        #   데이터가 하나도 없는 CAT2는 다음 CAT2로 넘어가며 대기가 덮어써져 간지가 붙지 않는다.
         if getattr(GLOBAL_CONFIG, 'use_description_page', True) and 'CAT2' in spec_data.columns:
             cat2 = str(spec_data.loc[spec_name, 'CAT2']).strip()
             if cat2 != current_cat and cat2.lower() != 'nan':
@@ -2801,20 +2805,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                         if ck in kl or kl in ck:
                             matched_entry = _entry
                             break
-
-                # CAT2 그룹 시작 전에 description 슬라이드를 현재 PPT 크기에 맞게 복사 삽입 (PNG 변환 없음)
-                if matched_entry is not None:
-                    try:
-                        # 하위호환: entry가 dict({'slide','w','h'})이거나 과거 slide 객체일 수 있음
-                        if isinstance(matched_entry, dict):
-                            _copy_slide_into(prs, matched_entry.get('slide'),
-                                             src_w=matched_entry.get('w'), src_h=matched_entry.get('h'))
-                        else:
-                            _copy_slide_into(prs, matched_entry)
-                    except Exception as _de:
-                        print(f"[WARN] CAT2 '{cat2}' description 슬라이드 복사 실패: {_de}")
-                else:
-                    print(f"[WARN] CAT2 '{cat2}' description 슬라이드를 찾지 못해 간지 생략")
+                _pending_desc = (cat2, matched_entry)   # 데이터가 실제 찍히면 chart 슬라이드 앞에 삽입
 
         if t == '_empty':
             task_cache.pop(i, None)
@@ -2846,6 +2837,22 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             metrics_dict[item_name] = res['metrics']
         if res.get('summary_row'):
             summary_rows.append(res['summary_row'])
+
+        # 이 item은 실제 데이터가 있어 chart 슬라이드를 만든다 → 대기 중인 CAT2 간지를 이 앞에 삽입
+        if _pending_desc is not None:
+            _pd_cat, _pd_entry = _pending_desc
+            _pending_desc = None
+            if _pd_entry is not None:
+                try:
+                    if isinstance(_pd_entry, dict):
+                        _copy_slide_into(prs, _pd_entry.get('slide'),
+                                         src_w=_pd_entry.get('w'), src_h=_pd_entry.get('h'))
+                    else:
+                        _copy_slide_into(prs, _pd_entry)
+                except Exception as _de:
+                    print(f"[WARN] CAT2 '{_pd_cat}' description 슬라이드 복사 실패: {_de}")
+            else:
+                print(f"[WARN] CAT2 '{_pd_cat}' description 슬라이드를 찾지 못해 간지 생략")
 
         try:
             slide = prs.slides.add_slide(prs.slide_layouts[6])
