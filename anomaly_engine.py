@@ -686,7 +686,13 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
 
     # ── 통계 자동분석 제외 항목(My_config.anomaly_exclude_items) 적용 ──
     #   여기서 걸러진 항목은 finding·basis·우선순위·Trend chart 어디에도 나오지 않는다.
-    _excl = cfg('anomaly_exclude_items', []) or []
+    _excl = list(cfg('anomaly_exclude_items', []) or [])
+    # WF MAP 제외 키워드(wfmap_exclude_keywords)에 해당하는 항목도 통계 이상/주의 판정에서 제외.
+    #   키워드는 '부분일치'이므로 item_excluded(fnmatch)용 *KEYWORD* 패턴으로 변환.
+    for _kw in (cfg('wfmap_exclude_keywords', []) or []):
+        _kw = str(_kw).strip()
+        if _kw:
+            _excl.append(f"*{_kw}*")
     if _excl:
         _n0 = len(items)
         items = [it for it in items if not item_excluded(it, _excl)]
