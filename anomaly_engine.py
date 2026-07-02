@@ -377,6 +377,48 @@ def _parse_pchk_item_map(text):
     return out
 
 
+def _parse_knowledge_rules(text):
+    """ANOMALY_KNOWLEDGE.md의 판정 로직 규칙(ANOMALY_RULES 마커 사이)을 파싱.
+
+    한 규칙 = RULE:(라벨) + WHEN:(조건) + [LEVEL/LINK/NOTE]. 규칙끼리는 새 RULE:로 구분.
+    반환: [{'label','when','level','link','note'}, ...]
+    """
+    import re
+    rules = []
+    if not text:
+        return rules
+    _s = text.find('ANOMALY_RULES:start')
+    _e = text.find('ANOMALY_RULES:end')
+    if _s == -1 or _e == -1 or _e <= _s:
+        return rules
+    body = text[_s:_e]
+    cur = None
+    for line in body.splitlines():
+        if 'ANOMALY_RULES' in line:      # 마커 라인 제외
+            continue
+        m = re.match(r'\s*(RULE|WHEN|LEVEL|LINK|NOTE)\s*[:：]\s*(.*)$', line, re.IGNORECASE)
+        if not m:
+            continue
+        key = m.group(1).upper()
+        val = m.group(2).strip()
+        if key == 'RULE':
+            if cur and cur.get('when'):
+                rules.append(cur)
+            cur = {'label': val, 'when': '', 'level': '주의', 'link': '', 'note': ''}
+        elif cur is not None:
+            if key == 'WHEN':
+                cur['when'] = val
+            elif key == 'LEVEL':
+                cur['level'] = val
+            elif key == 'LINK':
+                cur['link'] = val
+            elif key == 'NOTE':
+                cur['note'] = val
+    if cur and cur.get('when'):
+        rules.append(cur)
+    return rules
+
+
 def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         main_vehicle=None, config=None, reformatter=None,
                         knowledge_text=""):
@@ -726,8 +768,57 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                     examples.append((_w, _xx, _yy, _pgm, co))
         return ov_shots, ov_items, examples
 
+    # ── trend_tkout_agg 항목: 이상/주의 판정을 'agg된 값' 기준으로 ──
+    #   P10 등 지정 항목/이름에 'window' 포함 항목은 raw point 대신
+    #   (mask,lot,root,wafer,match_key,tkout) 그룹별 agg 1값으로 치환 → spec-out·산포 판정이
+    #   Trend와 동일한 집계값 기준으로 이뤄진다. (그룹 첫 행에 agg값, 나머지 NaN)
+    _agg_item_set = set()
+    try:
+        import numpy as _np
+        _agg_map = (getattr(config, 'trend_tkout_agg', {}) or {}) if config else {}
+
+        def _agg_fn_for(_it):
+            _spec = _agg_map.get(_it)
+            if not _spec and 'window' in str(_it).lower():
+                _spec = 'P10'
+            if not _spec:
+                return None
+            _s = str(_spec).strip().upper()
+            if _s in ('MEAN', 'AVG'):
+                return 'mean'
+            if _s in ('MEDIAN', 'P50'):
+                return 'median'
+            _m = re.match(r'P(\d+(?:\.\d+)?)$', _s)
+            if _m:
+                _q = min(max(float(_m.group(1)) / 100.0, 0.0), 1.0)
+                return (lambda s, _qq=_q: s.quantile(_qq))
+            return 'median'
+
+        _agg_items = [it for it in items if _agg_fn_for(it) is not None]
+        if _agg_items:
+            _root_col = _pick_col(pop, 'ROOT_LOT_ID', 'root_lot_id')
+            _gk = [c for c in [col_mask, col_lot, _root_col, col_waf,
+                               ('match_key' if 'match_key' in pop.columns else None), col_time]
+                   if c and c in pop.columns]
+            if _gk:
+                pop = pop.copy(); tgt = tgt.copy()
+                for _ai in _agg_items:
+                    _fn = _agg_fn_for(_ai)
+                    for _fr in (pop, tgt):
+                        if _ai not in _fr.columns or len(_fr) == 0:
+                            continue
+                        _num = pd.to_numeric(_fr[_ai], errors='coerce')
+                        _tmp = _fr[_gk].copy(); _tmp['_v'] = _num.values
+                        _bcast = _tmp.groupby(_gk)['_v'].transform(_fn)
+                        _first = ~_fr.duplicated(subset=_gk)
+                        _fr[_ai] = _np.where(_first.values, _bcast.values, _np.nan)
+                    _agg_item_set.add(_ai)
+    except Exception as _ae:
+        print(f"[WARN] trend_tkout_agg 판정용 집계 실패: {_ae}")
+
     _basis = []      # 판단 근거 중간 데이터 (RUN/TEMP 저장용) — 전 Index 통합
     _rankinfo = {}   # 항목별 정렬 지표 (spec-out 비율/wafer 수/이탈 크기/REPORT ORDER)
+    _item_ctx = {}   # 규칙 평가용 항목별 컨텍스트 {level, disp, tmed, pmed, pspread}
     for it in items:
         is_pchk = it in pchk_set
         lo, hi = spec.get(it, (None, None))
@@ -780,7 +871,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 _specout_by_wafer(tgt_it, col_waf, it, lo, hi)
             if n_out > 0:
                 so_pgms, so_zones = _specout_extra(it, lo, hi)
-        if n_out == 0:
+        # agg 판정 항목은 raw metrics 폴백을 쓰지 않는다(집계값 기준 유지)
+        if n_out == 0 and it not in _agg_item_set:
             n_out = int(metrics_dict.get(it, {}).get('spec_out_count', 0) or 0)
 
         # PCHK 겹침(측정이상) 신호 — basis 기록용(AI가 측정이상 추정에 활용). finding/severity엔 미반영.
@@ -827,6 +919,19 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             _sev = 'WARNING'
         else:
             _sev = 'INFO'
+
+        # ── 지식 규칙 평가용 항목 컨텍스트 (severity level / 산포배수 / target·pop median) ──
+        _tmed = None
+        if tgt_it is not None:
+            try:
+                _tmed = float(pd.to_numeric(tgt_it[it], errors='coerce').median())
+            except Exception:
+                _tmed = None
+        _item_ctx[it] = {
+            'level': 2 if _sev == 'CRITICAL' else (1 if _sev == 'WARNING' else 0),
+            'disp': float(worst_disp_ratio) if worst_disp_ratio else 0.0,
+            'tmed': _tmed, 'pmed': pop_med, 'pspread': pop_spread,
+        }
 
         # ── 근거 데이터 축적 (전 Index 통합 스키마) ──
         #   meas_* 필드는 PCHK spec-out 항목에서만 채워지고 나머지는 기본값(0/{}/[]).
@@ -901,6 +1006,78 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     except Exception as _be:
         print(f"[WARN] anomaly 근거 데이터 저장 실패: {_be}")
 
+    # ── 지식 규칙(ANOMALY_KNOWLEDGE.md) 파싱·평가 → '지식 기반 판정' finding 생성 ──
+    #   md의 RULE을 파싱해 항목별 통계 판정(_item_ctx: 이상/주의 level·산포배수·median)과 매칭.
+    try:
+        _kn_rules = _parse_knowledge_rules(knowledge_text)
+        if _kn_rules:
+            _mlow_sigma = cfg('anomaly_median_low_sigma', 2.0)
+
+            def _find_ctx(name):
+                _nf = _name_forms(name)
+                for _cit, _cx in _item_ctx.items():
+                    if _name_forms(_cit) & _nf:
+                        return _cx
+                return None
+
+            def _eval_atom(atom):
+                atom = atom.strip()
+                m = re.match(r'sev\(([^)]+)\)\s*(>=|==)\s*(이상|주의)$', atom)
+                if m:
+                    cx = _find_ctx(m.group(1).strip())
+                    if not cx:
+                        return False
+                    need = 2 if m.group(3) == '이상' else 1
+                    return cx['level'] == need if m.group(2) == '==' else cx['level'] >= need
+                m = re.match(r'all_sev\(([^)]+)\)\s*>=\s*(이상|주의)$', atom)
+                if m:
+                    need = 2 if m.group(2) == '이상' else 1
+                    _ns = [t.strip() for t in m.group(1).split(',') if t.strip()]
+                    _cs = [_find_ctx(n) for n in _ns]
+                    return bool(_cs) and all(c and c['level'] >= need for c in _cs)
+                m = re.match(r'disp_(desc|asc)\(([^)]+)\)$', atom)
+                if m:
+                    _ns = [t.strip() for t in m.group(2).split(',') if t.strip()]
+                    _vs = []
+                    for n in _ns:
+                        c = _find_ctx(n)
+                        if not c:
+                            return False
+                        _vs.append(c['disp'])
+                    if len(_vs) < 2:
+                        return False
+                    if m.group(1) == 'desc':
+                        return all(_vs[i] > _vs[i + 1] for i in range(len(_vs) - 1))
+                    return all(_vs[i] < _vs[i + 1] for i in range(len(_vs) - 1))
+                m = re.match(r'median_low\(([^)]+)\)$', atom)
+                if m:
+                    c = _find_ctx(m.group(1).strip())
+                    if not c or c['tmed'] is None or c['pmed'] is None or not c['pspread']:
+                        return False
+                    return (c['pmed'] - c['tmed']) / c['pspread'] >= _mlow_sigma
+                return False
+
+            def _eval_when(expr):
+                for _grp in re.split(r'\s+OR\s+', expr):
+                    _atoms = [a for a in re.split(r'\s+AND\s+', _grp) if a.strip()]
+                    if _atoms and all(_eval_atom(a) for a in _atoms):
+                        return True
+                return False
+
+            for _r in _kn_rules:
+                try:
+                    if _eval_when(_r['when']):
+                        _lvl = 'CRITICAL' if str(_r.get('level', '주의')).strip() == '이상' else 'WARNING'
+                        _det = _r.get('note', '') or ''
+                        if _r.get('link'):
+                            _det = (_det + '  ' if _det else '') + f"참고: {_r['link']}"
+                        findings.append(_finding(_lvl, 'KNOWLEDGE', _r['label'],
+                                                 f"[지식 판정] {_r['label']}", _det.strip()))
+                except Exception:
+                    continue
+    except Exception as _ke:
+        print(f"[WARN] 지식 규칙 평가 실패: {_ke}")
+
     # ── Priority(우선순위) 명시적 수식 — 값이 클수록 우선(위에 정렬) ──
     #   이상(SPEC_OUT) : P = 20000 + 100·R_max + N_wf/100
     #        R_max = 항목 내 '최대 wafer spec-out 비율' = max_wafer(이탈 pt / 측정 pt), 0~1
@@ -912,6 +1089,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     def _priority(f):
         ri = _rankinfo.get(f.get('item', ''), {})
         t = f.get('type')
+        if t == 'KNOWLEDGE':   # 지식 기반 판정(불량모드/risk 등)은 종합 결론 → 최상단
+            return 30000.0 + (100.0 if f.get('severity') == 'CRITICAL' else 0.0)
         if t == 'SPEC_OUT':
             return 20000.0 + 100.0 * ri.get('max_ratio', 0.0) + ri.get('n_so_wafers', 0) / 100.0
         if t == 'DISPERSION':

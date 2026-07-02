@@ -550,6 +550,7 @@ class Config:
         # ──────────────────────────────────────────────────────
         self.anomaly_lot_median_sigma = 2.0      # 주의(median): target wafer median이 '제품 wafer median 분포'에서 이 σ 초과 이탈 시 주의
         self.anomaly_lot_dispersion_ratio = 1.5  # 주의(산포): target wafer 내부 산포가 '보통 wafer 산포'의 이 배수 초과 시 주의
+        self.anomaly_median_low_sigma = 2.0      # 지식규칙 median_low(): target median이 제품 median 대비 이 σ 이상 낮으면 True
         # ── 통계 자동분석 제외 항목 ──
         #   여기에 넣은 ITEM(ALIAS)은 통계 자동분석(이상/주의 finding·우선순위·Anomaly Trend Chart)에서
         #   완전히 제외된다(Score Board/Trend 등 나머지 리포트에는 그대로 나옴).
