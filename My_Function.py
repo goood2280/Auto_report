@@ -878,6 +878,63 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
     return prs
 
 
+def _wafer_circle_params(df, x_col, y_col, rad_col=None, wafer_radius_mm=150.0):
+    """WF MAP 배경 wafer 원(경계) 파라미터 (cx, cy, r)를 '플롯 좌표계' 단위로 산출.
+
+    Data Extractor의 radius(mm) 컬럼이 '각 shot 중점 ~ wafer 중점 거리(mm)'라는 전제로,
+    좌표(x,y)와 radius(r)의 관계 (x-cx)^2+(y-cy)^2 = (r/k)^2 를 선형 최소자승으로 fit해
+    중심(cx,cy)과 스케일 k를 구하고, wafer_radius_mm(=150) 원의 반경을 좌표계 단위로 환산한다.
+      선형화: a*x + b*y + e + f*r^2 = x^2+y^2  (a=2cx, b=2cy, f=1/k^2) → r_plot = 150*sqrt(f)
+    radius가 없거나 fit이 비합리적이면 데이터 bounding 원(centroid·최대거리)로 폴백. 무효면 None.
+    """
+    try:
+        import numpy as _np
+        if x_col not in df.columns or y_col not in df.columns:
+            return None
+        x = pd.to_numeric(df[x_col], errors='coerce')
+        y = pd.to_numeric(df[y_col], errors='coerce')
+        m0 = x.notna() & y.notna()
+        if int(m0.sum()) < 4:
+            return None
+        x = x[m0].to_numpy(dtype=float); y = y[m0].to_numpy(dtype=float)
+        cxg = float(x.mean()); cyg = float(y.mean())
+        max_dist = float(_np.sqrt((x - cxg) ** 2 + (y - cyg) ** 2).max())
+        if rad_col and rad_col in df.columns:
+            r = pd.to_numeric(df[rad_col], errors='coerce')[m0].to_numpy(dtype=float)
+            fin = _np.isfinite(r)
+            if int(fin.sum()) >= 4 and float(_np.nanstd(r[fin])) > 0:
+                xx = x[fin]; yy = y[fin]; rr = r[fin]
+                A = _np.column_stack([xx, yy, _np.ones_like(xx), rr ** 2])
+                try:
+                    sol, *_ = _np.linalg.lstsq(A, xx ** 2 + yy ** 2, rcond=None)
+                    a, b, e, f = [float(v) for v in sol]
+                    if _np.isfinite(f) and f > 0:
+                        cx = a / 2.0; cy = b / 2.0
+                        r_plot = wafer_radius_mm * (f ** 0.5)
+                        # fit된 원이 데이터 범위와 크게 어긋나면(단위 불일치 등) 폴백
+                        if _np.isfinite(r_plot) and (max_dist * 0.5) <= r_plot <= (max_dist * 3.0):
+                            return (cx, cy, r_plot)
+                except Exception:
+                    pass
+        if max_dist > 0:
+            return (cxg, cyg, max_dist * 1.03)   # 폴백: 데이터 bounding 원
+        return None
+    except Exception:
+        return None
+
+
+def _add_wafer_circle(ax, params, color='#9aa4b0', lw=0.7, zorder=0):
+    """_wafer_circle_params 결과를 ax에 배경 wafer 원(테두리)으로 추가(칩 산점 뒤)."""
+    if not params:
+        return
+    try:
+        from matplotlib.patches import Circle
+        ax.add_patch(Circle((params[0], params[1]), params[2], fill=False,
+                             edgecolor=color, linewidth=lw, zorder=zorder))
+    except Exception:
+        pass
+
+
 def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
                             direction='BOTH', size_in=0.85, dpi=None,
                             spec_low=None, spec_high=None, by_lot=False):
@@ -910,15 +967,17 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
     cw = _pick('WAFER_ID', 'wafer_id')
     ct = _pick('TKOUT_TIME', 'tkout_time')
     cl = _pick('FAB_LOT_ID', 'fab_lot_id')
+    crad = _pick('Chip_Radius', 'chip_radius')
     if not (cx and cy and cw and ct):
         return {}
 
-    d = df[[c for c in [cx, cy, cw, ct, cl, item] if c]].dropna(subset=[item]).copy()
+    d = df[[c for c in [cx, cy, cw, ct, cl, crad, item] if c]].dropna(subset=[item]).copy()
     if lot_prefix and cl:
         d = d[d[cl].astype(str).str.startswith(str(lot_prefix))]
     if len(d) == 0:
         return {}
     d[ct] = pd.to_datetime(d[ct], errors='coerce')
+    _circ = _wafer_circle_params(d, cx, cy, crad)   # 배경 wafer 원(150mm)
 
     norm = _wfmap_norm(direction, spec_low, spec_high, d[item])
     gdim = max(int(d[cx].nunique()), int(d[cy].nunique()), 1)
@@ -962,6 +1021,7 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
         fig, ax = plt.subplots(figsize=(size_in, size_in))
         ax.scatter(g[cx].astype(float), g[cy].astype(float), c=g[item].astype(float),
                    cmap=cmap, norm=norm, s=s, marker='s', linewidths=0)
+        _add_wafer_circle(ax, _circ)
         ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal', adjustable='box'); ax.set_facecolor('#f8f9fa')
         # chip x 정방향(chip #1=왼쪽, 큰 번호=오른쪽): invert_xaxis 대신 xlim을 역순으로 두어 방향 교정
         ax.set_xlim(_gx1 + _xpad, _gx0 - _xpad)
@@ -1023,14 +1083,16 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
     ct = _pick('TKOUT_TIME', 'tkout_time')
     croot = _pick('ROOT_LOT_ID', 'root_lot_id')
     clot = _pick('FAB_LOT_ID', 'fab_lot_id')
+    crad = _pick('Chip_Radius', 'chip_radius')
     if not (cx and cy and cw and ct):
         return []
 
-    keep = [c for c in [cx, cy, cw, ct, croot, clot, item] if c]
+    keep = [c for c in [cx, cy, cw, ct, croot, clot, crad, item] if c]
     d = merged_df[keep].dropna(subset=[item]).copy()
     if len(d) == 0:
         return []
     d[ct] = pd.to_datetime(d[ct], errors='coerce')
+    _circ = _wafer_circle_params(d, cx, cy, crad)   # 배경 wafer 원(150mm)
     vals = pd.to_numeric(d[item], errors='coerce')
     lo = None if spec_low is None else float(spec_low)
     hi = None if spec_high is None else float(spec_high)
@@ -1088,6 +1150,7 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
         colors = np.where(g['_specout'].values, '#d32f2f', '#bdbdbd')
         ax.scatter(g[cx].astype(float), g[cy].astype(float), c=colors,
                    s=s, marker='s', linewidths=0)
+        _add_wafer_circle(ax, _circ)
         ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal', adjustable='box'); ax.set_facecolor('#f8f9fa')
         # chip x 정방향(chip #1=왼쪽): xlim 역순으로 방향 교정
         ax.set_xlim(gx1 + xpad, gx0 - xpad)
@@ -1188,16 +1251,18 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
     cw = _pick('WAFER_ID', 'wafer_id')
     ct = _pick('TKOUT_TIME', 'tkout_time')
     cl = _pick('FAB_LOT_ID', 'fab_lot_id')
+    crad = _pick('Chip_Radius', 'chip_radius')
     if not (cx and cy and cw and ct):
         return None
 
-    cols = [c for c in [cx, cy, cw, ct, cl, item] if c]
+    cols = [c for c in [cx, cy, cw, ct, cl, crad, item] if c]
     d = df[cols].dropna(subset=[item]).copy()
     if lot_prefix and cl:
         d = d[d[cl].astype(str).str.startswith(str(lot_prefix))]
     if len(d) == 0:
         return None
     d[ct] = pd.to_datetime(d[ct], errors='coerce')
+    _circ = _wafer_circle_params(d, cx, cy, crad)   # 배경 wafer 원(150mm)
 
     grp_keys = [k for k in [cl, cw, ct] if k]
     sizes = d.groupby(grp_keys).size().reset_index(name='n')
@@ -1224,6 +1289,7 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
     ax.scatter(g[cx].astype(float), g[cy].astype(float), c=g[item].astype(float),
                cmap=cmap or _wfmap_cmap(direction), vmin=vmin, vmax=vmax,
                s=s, marker='s', linewidths=0)
+    _add_wafer_circle(ax, _circ)
     ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal')
     ax.set_facecolor('#f8f9fa')
     for sp in ax.spines.values():
@@ -1930,6 +1996,8 @@ def _render_item_charts(task):
 
         # ---- WF MAP 공유 컬러 스케일 (spec line 기준 diverging, HTML과 동일 규칙) ----
         wfmap_norm = _wfmap_norm(direction, wfmap_spec_low, wfmap_spec_high, item_df[item_name])
+        # 배경 wafer 원(150mm) — radius(mm) 기반 중심·스케일 fit (모든 셀 공통)
+        _circ_ppt = _wafer_circle_params(item_df, map_x, map_y, col_rad)
 
         # 칩 격자 차원(예: 13x13)
         nx = max(int(item_df[map_x].nunique()), 1)
@@ -1964,6 +2032,7 @@ def _render_item_charts(task):
                     sc = ax.scatter(w_grp[map_x], w_grp[map_y], c=w_grp[item_name],
                                     cmap=_wfmap_cmap(direction), norm=wfmap_norm,
                                     s=marker_s, marker='s', alpha=1.0, linewidths=0)
+                    _add_wafer_circle(ax, _circ_ppt, lw=0.5)   # 배경 wafer 원
                 ax.set_facecolor('white')
                 # 마지막(맨 아래) PGM 행에만 wafer 번호 표기
                 if r == grid_rows - 1:
@@ -3053,7 +3122,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             white = RGBColor(255, 255, 255); black = RGBColor(0, 0, 0)
 
             # 고정 열 너비: Index 넓게(잘림 방지) + wafer 좁게(상한 캡으로 일정 유지)
-            _idx_w, _stat_w = 2.25, 0.55   # Index명 폭(약 45자→30자, 15자 축소)
+            _idx_w, _stat_w = 3.85, 0.55   # Index명 폭 확대(2.25→3.85, wafer 약 4칸분 추가)
             _ww = min(0.40, max(0.14, (13.333 - 0.24 - _idx_w - _stat_w) / max(len(_ordered), 1)))
             _tbl_w = min(13.10, _idx_w + _stat_w + _ww * len(_ordered))
 
