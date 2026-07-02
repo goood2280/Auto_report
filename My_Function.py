@@ -812,20 +812,20 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         _rc, _rm = float(radius_zones[0]), float(radius_zones[1])
     except Exception:
         _rc, _rm = 60.0, 100.0
-    _sig = getattr(GLOBAL_CONFIG, 'anomaly_lot_median_sigma', 2.0)
     _dsp = getattr(GLOBAL_CONFIG, 'anomaly_lot_dispersion_ratio', 1.5)
     _note_lines = [
         f"※ 참고: 모든 판정은 대상 lot의 'wafer 단위'로 보며, 비교 기준은 제품({_veh}) 전체의 'wafer별' 통계입니다.",
         "· robust 산포 = 값들의 1.4826×MAD(0이면 IQR/1.349, 그래도 0이면 std).",
-        "· 제품 wafer 기준 = 제품 전 lot의 각 wafer를 단위로 산출 — ①wafer median들의 중심·산포(wafer간 변동), "
-        "②'보통 wafer 산포'(각 wafer 내부 산포의 중앙값).",
-        "· 'Nσ' = (대상 wafer median − 제품 wafer median 중심) / 제품 wafer median 산포,   "
+        "· '보통 wafer 산포' = 제품 전 lot 각 wafer의 '내부 robust 산포'들의 중앙값.   "
         "'N배' = 대상 wafer 내부 산포 / 보통 wafer 산포.",
         f"· 위치(radius zone): Center ≤ {_rc:g}, Middle {_rc:g}~{_rm:g}, Edge > {_rm:g}.",
-        f"· 판정 기준 — 이상: spec(LCL/UCL) 이탈. 주의: spec 이내라도 (대상 wafer median이 {_sig:g}σ 초과 이탈) "
-        f"또는 (대상 wafer 산포가 보통 wafer 산포의 {_dsp:g}배 초과). 둘 다 아니면 참고.",
-        "· 우선순위: 이상 > 주의 순. 이상은 ①wafer 최고 spec-out 비율(out pt/측정 pt) ②spec-out wafer 수 "
-        "③REPORT ORDER 순, 주의는 이탈 크기(σ·배수) 큰 순.",
+        "· [판정 기준]",
+        "   - 이상(빨강): spec(LCL/UCL)을 벗어난 측정 point가 하나라도 있으면 이상. (median 이동은 판정에 사용하지 않음)",
+        f"   - 주의(주황): spec은 모두 만족하지만, 대상 lot의 어떤 wafer 내부 산포가 '보통 wafer 산포'의 {_dsp:g}배를 넘으면 주의.",
+        "   - 그 외: 참고.",
+        "· [우선순위 P] — 값이 클수록 위에 정렬. R_max=최대 wafer spec-out 비율(out pt/측정 pt), "
+        "N_wf=spec-out wafer 수, D=최대 wafer 산포배수.",
+        "   - 이상: P = 20000 + 100·R_max + N_wf/100      - 주의: P = 10000 + 100·D      (동점 시 REPORT ORDER 오름차순)",
     ]
     for _k, _ln in enumerate(_note_lines):
         _np = tf.paragraphs[0] if _k == 0 else tf.add_paragraph()

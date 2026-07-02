@@ -812,18 +812,17 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 f"{z} {so_zones[z]}" for z in ('Center', 'Middle', 'Edge') if z in so_zones))
         if so_pgms:
             _bits.append('PGM(pt): ' + ', '.join(so_pgms))
-        if dev_txt:
-            _bits.append(dev_txt)
+        # median 이탈(dev_txt)은 판정 기준에서 제외됨 → 상세에도 표시하지 않음. 산포(disp_txt)만.
         if disp_txt:
             _bits.append(disp_txt)
         detail = '. '.join(_bits)
 
         # 판단 severity 결정 — 모든 Index 동일 기준(PCHK 특수처리 없음).
-        #   spec-out=이상(CRITICAL) / wafer median 이탈·wafer 산포 확대=주의(WARNING) / 그 외 참고(INFO)
+        #   이상(CRITICAL): spec(LCL/UCL) 이탈 point가 하나라도 있으면 이상. (median 기준 미사용)
+        #   주의(WARNING) : spec 이내지만 '해당 wafer의 내부 산포'가 다른 wafer(보통 wafer) 대비 큰 경우.
+        #   그 외         : 참고(INFO).
         if n_out > 0:
             _sev = 'CRITICAL'
-        elif worst_med_dev > sigma_med:
-            _sev = 'WARNING'
         elif worst_disp_ratio > disp_ratio:
             _sev = 'WARNING'
         else:
@@ -860,19 +859,14 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'detail': detail.strip(),
         })
 
-        # ── finding 산출 (전 Index 동일) ──
+        # ── finding 산출 — 이상=spec-out only / 주의=wafer 산포 확대 only (median 판정 제거) ──
         if n_out > 0:
             findings.append(_finding(
                 "CRITICAL", "SPEC_OUT", it,
                 f"Spec-out: {it}", detail.strip()))
             continue
 
-        if worst_med_dev > sigma_med:
-            findings.append(_finding(
-                "WARNING", "MEDIAN_SHIFT", it,
-                f"Median 이탈(spec 내): {it} #{worst_med_w} {worst_med_dev:.1f}σ",
-                detail.strip() or f"#{worst_med_w} median {worst_med_dev:.1f}σ 이탈."))
-        elif worst_disp_ratio > disp_ratio:
+        if worst_disp_ratio > disp_ratio:
             findings.append(_finding(
                 "WARNING", "DISPERSION", it,
                 f"산포 확대: {it} #{worst_disp_w} 보통 대비 {worst_disp_ratio:.1f}배",
@@ -907,25 +901,28 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     except Exception as _be:
         print(f"[WARN] anomaly 근거 데이터 저장 실패: {_be}")
 
-    def _rank(f):
-        """정렬 우선순위 (튜플 사전식, 작을수록 앞):
-          1) severity 등급 (이상 > 주의 > 참고)
-          2) 이상(SPEC_OUT): wafer 최고 spec-out 비율 큰 순
-             주의(WARNING) : 임계 대비 이탈 배수 큰 순
-          3) 이상: spec-out wafer 수 많은 순 (주의는 미사용=0)
-          4) REPORT ORDER 오름차순 (최종 tie-break)
-        """
+    # ── Priority(우선순위) 명시적 수식 — 값이 클수록 우선(위에 정렬) ──
+    #   이상(SPEC_OUT) : P = 20000 + 100·R_max + N_wf/100
+    #        R_max = 항목 내 '최대 wafer spec-out 비율' = max_wafer(이탈 pt / 측정 pt), 0~1
+    #        N_wf  = spec-out wafer 수 (0~25, 동점 tie-break용으로 /100 축소)
+    #   주의(DISPERSION): P = 10000 + 100·D
+    #        D = 항목 내 '최대 wafer 산포배수' = max_wafer(wafer 내부 robust 산포 / 보통 wafer 산포)
+    #   참고(그 외)     : P = 100·D
+    #   → 이상(20000+) > 주의(10000+) > 참고(<수백) 순이 항상 보장. 동점 시 REPORT ORDER 오름차순.
+    def _priority(f):
         ri = _rankinfo.get(f.get('item', ''), {})
-        sev = _SEV_ORDER.get(f["severity"], 9)
-        ro = ri.get('report_order', 1e9)
-        if f.get('type') == 'SPEC_OUT':
-            return (sev, -ri.get('max_ratio', 0.0), -ri.get('n_so_wafers', 0), ro)
-        # 주의: median/산포 중 임계 대비 초과 배수가 큰 쪽으로 정렬
-        exc = max(ri.get('worst_med_dev', 0.0) / (sigma_med or 1e-9),
-                  ri.get('worst_disp_ratio', 0.0) / (disp_ratio or 1e-9))
-        return (sev, -exc, 0.0, ro)
+        t = f.get('type')
+        if t == 'SPEC_OUT':
+            return 20000.0 + 100.0 * ri.get('max_ratio', 0.0) + ri.get('n_so_wafers', 0) / 100.0
+        if t == 'DISPERSION':
+            return 10000.0 + 100.0 * ri.get('worst_disp_ratio', 0.0)
+        return 100.0 * ri.get('worst_disp_ratio', 0.0)
 
-    findings.sort(key=_rank)
+    for _f in findings:
+        _f['priority'] = round(_priority(_f), 3)   # 투명성 위해 finding에 priority 값 부착
+
+    findings.sort(key=lambda f: (-_priority(f),
+                                 _rankinfo.get(f.get('item', ''), {}).get('report_order', 1e9)))
     return findings
 
 
