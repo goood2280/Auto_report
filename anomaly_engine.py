@@ -393,18 +393,24 @@ def _parse_knowledge_rules(text):
         return rules
     body = text[_s:_e]
     cur = None
+    def _has_action(c):
+        return bool(c) and (c.get('when') or c.get('suppress_disp') or c.get('compare_disp'))
+
     for line in body.splitlines():
         if 'ANOMALY_RULES' in line:      # 마커 라인 제외
             continue
-        m = re.match(r'\s*(RULE|WHEN|LEVEL|LINK|NOTE)\s*[:：]\s*(.*)$', line, re.IGNORECASE)
+        m = re.match(r'\s*(RULE|WHEN|LEVEL|LINK|NOTE|SUPPRESS_DISP|COMPARE_DISP)\s*[:：]\s*(.*)$',
+                     line, re.IGNORECASE)
         if not m:
             continue
         key = m.group(1).upper()
         val = m.group(2).strip()
+
         if key == 'RULE':
-            if cur and cur.get('when'):
+            if _has_action(cur):
                 rules.append(cur)
-            cur = {'label': val, 'when': '', 'level': '주의', 'link': '', 'note': ''}
+            cur = {'label': val, 'when': '', 'level': '주의', 'link': '', 'note': '',
+                   'suppress_disp': None, 'compare_disp': None}
         elif cur is not None:
             if key == 'WHEN':
                 cur['when'] = val
@@ -414,7 +420,16 @@ def _parse_knowledge_rules(text):
                 cur['link'] = val
             elif key == 'NOTE':
                 cur['note'] = val
-    if cur and cur.get('when'):
+            elif key == 'SUPPRESS_DISP':
+                cur['suppress_disp'] = [t.strip() for t in val.split(',') if t.strip()]
+            elif key == 'COMPARE_DISP':
+                # "A,B | D,E" → 두 그룹
+                _parts = val.split('|')
+                if len(_parts) == 2:
+                    cur['compare_disp'] = (
+                        [t.strip() for t in _parts[0].split(',') if t.strip()],
+                        [t.strip() for t in _parts[1].split(',') if t.strip()])
+    if _has_action(cur):
         rules.append(cur)
     return rules
 
@@ -1013,6 +1028,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         if _kn_rules:
             _mlow_sigma = cfg('anomaly_median_low_sigma', 2.0)
 
+            _LV = {'이상': 2, '주의': 1, '참고': 0}
+
             def _find_ctx(name):
                 _nf = _name_forms(name)
                 for _cit, _cx in _item_ctx.items():
@@ -1020,15 +1037,29 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         return _cx
                 return None
 
+            def _resolve_item(name):
+                """규칙의 항목명 → 실제 컨텍스트/finding 키(컬럼명). 없으면 None."""
+                _nf = _name_forms(name)
+                for _cit in _item_ctx:
+                    if _name_forms(_cit) & _nf:
+                        return _cit
+                return None
+
+            def _grp_disp(names):
+                """그룹 항목들의 최대 산포배수(disp) 반환."""
+                _vs = [(_find_ctx(n) or {}).get('disp', 0.0) for n in names]
+                return max(_vs) if _vs else 0.0
+
             def _eval_atom(atom):
                 atom = atom.strip()
-                m = re.match(r'sev\(([^)]+)\)\s*(>=|==)\s*(이상|주의)$', atom)
+                # sev(ITEM) 연산자: >= <= == < > , 등급 이상/주의/참고 (미측정 항목은 참고=0으로 간주)
+                m = re.match(r'sev\(([^)]+)\)\s*(>=|<=|==|<|>)\s*(이상|주의|참고)$', atom)
                 if m:
                     cx = _find_ctx(m.group(1).strip())
-                    if not cx:
-                        return False
-                    need = 2 if m.group(3) == '이상' else 1
-                    return cx['level'] == need if m.group(2) == '==' else cx['level'] >= need
+                    lv = cx['level'] if cx else 0
+                    need = _LV[m.group(3)]; op = m.group(2)
+                    return {'>=': lv >= need, '<=': lv <= need, '==': lv == need,
+                            '<': lv < need, '>': lv > need}[op]
                 m = re.match(r'all_sev\(([^)]+)\)\s*>=\s*(이상|주의)$', atom)
                 if m:
                     need = 2 if m.group(2) == '이상' else 1
@@ -1064,9 +1095,35 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         return True
                 return False
 
+            _suppress_disp_items = set()   # DISPERSION(주의) finding을 억제할 항목(실제 키)
             for _r in _kn_rules:
                 try:
-                    if _eval_when(_r['when']):
+                    _when = _r.get('when') or ''
+                    _when_ok = (not _when) or _eval_when(_when)
+                    # (1) 산포 언급 억제: WHEN 없으면 항상, 있으면 WHEN 참일 때만
+                    if _r.get('suppress_disp'):
+                        if _when_ok:
+                            for _n in _r['suppress_disp']:
+                                _ri = _resolve_item(_n)
+                                if _ri:
+                                    _suppress_disp_items.add(_ri)
+                        continue
+                    # (2) 산포 그룹 비교: WHEN 참일 때 두 그룹 산포 비교 코멘트 생성
+                    if _r.get('compare_disp'):
+                        if _when_ok:
+                            _g1, _g2 = _r['compare_disp']
+                            _v1, _v2 = _grp_disp(_g1), _grp_disp(_g2)
+                            _big = f"[{', '.join(_g1)}]" if _v1 >= _v2 else f"[{', '.join(_g2)}]"
+                            _cmp = f"산포 비교: [{', '.join(_g1)}]={_v1:.1f}배 vs [{', '.join(_g2)}]={_v2:.1f}배 → {_big} 산포가 더 큼"
+                            _lvl = 'CRITICAL' if str(_r.get('level', '주의')).strip() == '이상' else 'WARNING'
+                            _det = _cmp + ((' · ' + _r['note']) if _r.get('note') else '')
+                            if _r.get('link'):
+                                _det += f"  참고: {_r['link']}"
+                            findings.append(_finding(_lvl, 'KNOWLEDGE', _r['label'],
+                                                     f"[지식 판정] {_r['label']}", _det.strip()))
+                        continue
+                    # (3) 일반 판정: WHEN 참이면 finding 생성
+                    if _when and _eval_when(_when):
                         _lvl = 'CRITICAL' if str(_r.get('level', '주의')).strip() == '이상' else 'WARNING'
                         _det = _r.get('note', '') or ''
                         if _r.get('link'):
@@ -1075,6 +1132,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                                                  f"[지식 판정] {_r['label']}", _det.strip()))
                 except Exception:
                     continue
+            # 억제 적용: 지정 항목의 DISPERSION(주의) finding 제거 (spec-out=이상은 유지)
+            if _suppress_disp_items:
+                findings[:] = [f for f in findings
+                               if not (f.get('type') == 'DISPERSION' and f.get('item') in _suppress_disp_items)]
     except Exception as _ke:
         print(f"[WARN] 지식 규칙 평가 실패: {_ke}")
 

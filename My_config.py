@@ -405,8 +405,6 @@ class Config:
         self.endpoint_url = '0'                    # S3 호환 엔드포인트 URL
         self.GPT_USER_ID = 'simyung.woo'           # GPT API 사용자 ID
         self.bucket_dx = 'simyung.woo'             # DX 용 S3 버킷 이름
-        self.bucket_simyung = 'simyung.woo'        # 개인 S3 버킷 이름
-        self.s3_region_name = 'DS'                 # S3 리전 이름 (region name)
 
         # ──────────────────────────────────────────────────────
         # 데이터 전처리 설정 (Data preprocessing settings)
@@ -441,11 +439,6 @@ class Config:
         ]
 
         # FAB (Fabrication) 공정 데이터 컬럼
-        self.fab_custom_columns = [
-            'root_lot_id', 'wafer_id', 'ppid', 'eqp_id',
-            'tkout_time', 'chamber_id', 'reticle_id'
-        ]
-
         # Inline 계측 데이터 컬럼
         self.inline_custom_columns = [
             'root_lot_id', 'wafer_id', 'tkout_time', 'step_id',
@@ -484,7 +477,6 @@ class Config:
         # ──────────────────────────────────────────────────────
         # 시트 이름 설정 (Sheet name settings)
         # ──────────────────────────────────────────────────────
-        self.mask_table_sheet = 'MASK_TABLE'    # 마스크 테이블 시트명
         self.inline_file_sheet = 'INLINE_1'     # Inline 데이터 시트명
 
         # ──────────────────────────────────────────────────────
@@ -514,16 +506,7 @@ class Config:
         # 엔지니어가 PPT 및 차트의 색상, 폰트, 여백 등을 쉽게 변경할 수 있습니다.
         # ──────────────────────────────────────────────────────
         self.theme_font_family = 'Segoe UI'        # 기본 폰트
-        self.theme_header_bg = (31, 73, 125)       # 테이블 헤더 배경색 (R, G, B) - Dark Blue
-        self.theme_header_fg = (255, 255, 255)     # 테이블 헤더 글자색 (R, G, B) - White
-        self.theme_zebra_bg1 = (242, 242, 242)     # 행 엇갈림 배경 1 (Light Gray)
-        self.theme_zebra_bg2 = (255, 255, 255)     # 행 엇갈림 배경 2 (White)
-        self.theme_table_border = (200, 200, 200)  # 테이블 테두리 색상 (Light Gray)
         self.theme_title_color = (31, 73, 125)     # 슬라이드/차트 제목·헤더 색상 (Dark Blue, 전 슬라이드 통일)
-
-        self.plot_style = 'seaborn-v0_8-whitegrid' # Matplotlib 전역 스타일
-        self.plot_cmap = 'viridis'                 # WF MAP 컬러맵
-        self.plot_wafer_colors = 'tab20'           # Wafer 구분을 위한 컬러 팔레트
 
         # ──────────────────────────────────────────────────────
         # GPT 연동 기능 ON/OFF (GPT feature toggles)
@@ -559,10 +542,6 @@ class Config:
         self.anomaly_exclude_items = [
             'MAWIN_minus_margin', 'MAWIN_plus_margin', 'MAWIN_ovl_index', 'MAWIN_new',
         ]
-        self.anomaly_trend_slope_sigma = 1.0     # Trend drift: (기울기*기간)/std 임계
-        self.anomaly_split_separation = 2.0      # lot내 집단 분리: |두 군 평균차|/pooled std 임계
-        self.anomaly_site_recurrence_min_lots = 2  # 동일 site spec-out 재발 최소 lot 수
-        self.anomaly_pchk_check = True           # 동일 site PCHK(reformatter SPEC) 이탈 시 측정 의심 표기
         self.scoreboard_wfmap_min_pts = 50       # Score Board(HTML)에 wafer별 WF MAP을 넣을 최소 측정 point 수
         # WF MAP 제외 키워드: item(ALIAS)명에 아래 키워드가 포함되면 측정 point 수와
         # 무관하게 Score Board WF MAP을 표시하지 않는다. (예: PCHK 측정 항목)
@@ -575,7 +554,7 @@ class Config:
         #   (lot 25매 전부 spec이면 25장 다 표시), 남는 칸은 다른 lot을 TKOUT_TIME 최신순으로 채운다.
         #   anomaly_wfmap_max_count는 'target 외'를 포함한 총 표시 상한(target spec wafer는 상한과 무관하게 모두 표시).
         self.anomaly_wfmap_specout = True        # spec-out WF MAP 표시 on/off
-        self.anomaly_wfmap_max_count = 36        # 총 표시 상한(target spec wafer는 항상 전부 표시)
+        self.anomaly_wfmap_max_count = 42        # 총 표시 상한(target spec wafer는 항상 전부 표시)
 
         # ── PPT Trend chart: 특정 항목은 site(모든 값) 대신 tkout_time 기준 집계점으로 표시 ──
         #   {항목명(ALIAS): 'P10'} 형식. 'P10'=10퍼센타일, 'P90', 'MEDIAN'(=P50), 'MEAN' 지원.
@@ -636,10 +615,6 @@ class Config:
         # 이미지 품질 설정 (Image quality settings)
         # PPT 삽입 시 저화질/고화질 이미지 품질을 결정합니다.
         # ──────────────────────────────────────────────────────
-        self.img_quality_low = 12          # 메일용 저화질 (low quality for mail)
-        self.img_quality_high = 95         # EDM용 고화질 (high quality for EDM)
-        self.desc_img_quality_low = 20     # 설명 PPT 저화질
-        self.desc_img_quality_high = 95    # 설명 PPT 고화질
 
         # ── Description 페이지 복사 시 내장 이미지 재압축(용량 절감) ──
         #   설명 슬라이드를 그대로 복사하면 원본 고해상도 이미지(수 MB~15MB)가 그대로 들어가
@@ -657,11 +632,6 @@ class Config:
         self.max_anomaly_chart_items = 6           # 차트에 표시할 최대 이상 항목 수
         self.anomaly_chart_figsize = (10, 4.0)     # 차트 크기 (width, height in inches)
         self.anomaly_chart_dpi = 120               # 차트 해상도 (DPI)
-
-        # ──────────────────────────────────────────────────────
-        # VRAMP 조회 설정 (VRAMP lookback settings)
-        # ──────────────────────────────────────────────────────
-        self.vramp_lookback_days = 365  # VRAMP 데이터 조회 기간 (일)
 
         # ──────────────────────────────────────────────────────
         # 내부 상태 저장소 (Internal state storage)

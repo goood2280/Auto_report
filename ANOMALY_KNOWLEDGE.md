@@ -99,17 +99,24 @@
   산포수준이 그렇지 않고 A·B·C·D 모두 주의 이상 수준을 보이면 **'BB_불량모드 의심'** 이라 적고 'OOO를 확인해달라'고 적는다.
 - **예시 로직 2**: `ABC_EXAMPLE` 항목이 이상을 보이면 **'ABC risk가 존재한다'** 고 적고 링크 `https://example.com/abc_risk` 를 제시한다.
 - **예시 로직 3**: `BBB_EXAMPLE` 항목이 주의 이상이고 `CCC_EXAMPLE` 항목의 median이 Trend에서 매우 낮으면 **'NNN 이상 추정'** 코멘트를 남긴다.
+- **예시 로직 4**: `F_EXAMPLE` 항목에 주의 이상이 발생하지 않으면 `A_EXAMPLE, B_EXAMPLE, C_EXAMPLE, D_EXAMPLE, E_EXAMPLE` 항목의 산포는 따로 언급하지 않는다. `F_EXAMPLE`에서 이상이 발생하면 `A_EXAMPLE, B_EXAMPLE` 와 `D_EXAMPLE, E_EXAMPLE` 중 어느 쪽 산포가 더 커졌는지 언급하고 Trend에서 그 수준을 확인한다.
+- **예시 로직 5**: `A_EXAMPLE, B_EXAMPLE` 항목은 이상(spec-out)이 나타나지 않으면 그 산포 이상에 대해 언급하지 않는다.
 
 ### 코드가 파싱하는 규칙 (아래 마커 사이만 파싱 — 위 예시를 규칙 문법으로 옮긴 것)
 
-> **문법**: 한 규칙 = `RULE:`(출력 문구, 필수) + `WHEN:`(조건식, 필수) + `LEVEL/LINK/NOTE:`(선택).
+> **문법**: 한 규칙 = `RULE:`(출력 문구/설명, 필수) + 아래 액션/조건.
 > 규칙끼리는 빈 줄로 구분. `LEVEL`(이상|주의, 기본 주의)은 판정 결과의 심각도.
-> **조건 원자**:
-> - `sev(ITEM)>=주의` · `sev(ITEM)>=이상` · `sev(ITEM)==이상` — 항목 심각도
+> **조건(WHEN) 원자**:
+> - `sev(ITEM) <연산자> <이상|주의|참고>` — 연산자 `>= <= == < >` (미측정 항목은 참고로 간주)
 > - `all_sev(A,B,C,...)>=주의` — 나열 항목 **모두** 해당 등급 이상
 > - `disp_desc(A,B,C,...)` — 나열 순서대로 산포배수가 **감소**(즉 A가 최대) / `disp_asc(...)` — 증가
 > - `median_low(ITEM)` — 해당 항목 target median이 제품 대비 매우 낮음(임계 σ, My_config)
-> 조건은 ` AND ` / ` OR ` 로 연결(‘OR로 묶인 AND 그룹’). 항목명은 ALIAS/표시명 모두 가능.
+> - 조건은 ` AND ` / ` OR ` 로 연결(‘OR로 묶인 AND 그룹’). 항목명은 ALIAS/표시명 모두 가능.
+> **액션(RULE 종류)**:
+> - (기본) `WHEN` 참이면 `RULE:` 문구를 '지식 판정'으로 출력(`LINK`/`NOTE` 첨부).
+> - `SUPPRESS_DISP: A,B,...` — 나열 항목의 **산포(주의) 언급을 억제**(해당 항목 spec-out=이상은 유지).
+>   `WHEN`이 있으면 그 조건일 때만 억제, 없으면 항상 억제.
+> - `COMPARE_DISP: A,B | D,E` — `WHEN` 참일 때 두 그룹 산포를 비교해 **어느 쪽이 더 큰지** 코멘트 출력.
 > (실사용 시 `A_EXAMPLE` 등을 실제 항목명으로 바꾸세요.)
 
 <!-- ANOMALY_RULES:start -->
@@ -131,6 +138,19 @@ LINK: https://example.com/abc_risk
 RULE: NNN 이상 추정
 WHEN: sev(BBB_EXAMPLE)>=주의 AND median_low(CCC_EXAMPLE)
 LEVEL: 주의
+
+RULE: F_EXAMPLE 미이상 시 A~E 산포 미언급
+WHEN: sev(F_EXAMPLE)<주의
+SUPPRESS_DISP: A_EXAMPLE, B_EXAMPLE, C_EXAMPLE, D_EXAMPLE, E_EXAMPLE
+
+RULE: F_EXAMPLE 이상 시 산포 그룹 비교
+WHEN: sev(F_EXAMPLE)>=이상
+COMPARE_DISP: A_EXAMPLE,B_EXAMPLE | D_EXAMPLE,E_EXAMPLE
+LEVEL: 주의
+NOTE: 산포가 큰 쪽을 Trend에서 확인
+
+RULE: A_EXAMPLE·B_EXAMPLE 산포는 spec-out 없으면 미언급
+SUPPRESS_DISP: A_EXAMPLE, B_EXAMPLE
 <!-- ANOMALY_RULES:end -->
 
 ## 출력 예시 (형식만 참고 — 내용은 실제 데이터 기반으로 작성)
