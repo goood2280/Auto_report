@@ -239,7 +239,10 @@ def main():
     # =============================================== Folder path 생성 ==================================================================
     # NOTE: DB_et_LOTWF_raw / DB_et_LOTWF_pivot_raw 삭제됨 — daily DB에서 DuckDB로 직접 조회
 
-    for target_path in [ROOT, DB, DB_et_daily, log, Report, low_qual_ppt_save_path, html_save_path]:
+    # RUN/AI = AI 인풋파일 보관 폴더(사이클 정리 대상 아님), RUN/TEMP = 임시 산출물 폴더
+    _ai_dir = os.path.join(ROOT, 'AI')
+    _temp_dir = os.path.join(ROOT, 'TEMP')
+    for target_path in [ROOT, DB, DB_et_daily, log, Report, low_qual_ppt_save_path, html_save_path, _ai_dir, _temp_dir]:
         if not os.path.exists(target_path):
             os.makedirs(target_path)
 

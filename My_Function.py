@@ -508,29 +508,27 @@ def clear_anomaly_inside_run():
 
 
 #  랏 완료 후 삭제하지 않고 남겨둘 '진단/근거' 파일 접두어.
-#  Trend PNG 등 대용량 임시 이미지는 지우되, AI 입력 덤프·판단 근거 같은
-#  가벼운 검증용 산출물은 RUN/TEMP에 남겨 엔지니어가 확인할 수 있게 한다.
-_RUN_TEMP_KEEP_PREFIXES = ('ai_input_', 'anomaly_basis_')
+# RUN/TEMP에서 한 사이클 종료 시 지울 대상 = '임시 그림파일(이미지)'만.
+_RUN_TEMP_IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tif', '.tiff', '.webp')
 
 
 def clear_run_temp_files():
-    """RUN/TEMP 폴더 '내부 파일'을 삭제(폴더/하위폴더 구조는 유지).
+    """RUN/TEMP 폴더의 '임시 그림파일(png 등 이미지)'만 삭제(그 외 파일·폴더는 유지).
 
-    랏 리포트 1건 생성이 끝난 뒤 호출 — Trend PNG({alias}.png) 등 임시 산출물을 비운다.
-    단, `_RUN_TEMP_KEEP_PREFIXES`(AI 입력 덤프·판단 근거)로 시작하는 파일은 **남긴다**
-    (검증/감사용). HTML은 이미지가 base64로 내장돼 있어 파일 삭제 후에도 정상 표시된다.
+    랏 리포트 1건 생성이 끝난 뒤 호출 — Trend PNG({alias}.png) 등 임시 이미지만 비운다.
+    (AI 인풋파일은 RUN/AI에 별도 보관하며 삭제하지 않는다. anomaly_basis 등 비이미지
+     산출물도 그대로 남긴다.) HTML은 이미지가 base64로 내장돼 있어 삭제 후에도 정상.
     """
     _tdir = os.path.join('RUN', 'TEMP')
     if not os.path.isdir(_tdir):
         return
     for _root, _dirs, _files in os.walk(_tdir):
         for _f in _files:
-            if _f.startswith(_RUN_TEMP_KEEP_PREFIXES):
-                continue  # 진단/근거 파일은 보존
-            try:
-                os.remove(os.path.join(_root, _f))
-            except OSError:
-                pass
+            if _f.lower().endswith(_RUN_TEMP_IMAGE_EXTS):   # 이미지 파일만 삭제
+                try:
+                    os.remove(os.path.join(_root, _f))
+                except OSError:
+                    pass
 
 
 # ===================================================================

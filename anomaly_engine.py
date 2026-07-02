@@ -993,7 +993,7 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
     spec_items = [f.get('item') for f in findings if f.get('type') == 'SPEC_OUT']
 
     # ── AI 입력/출력 덤프 ──
-    #   LLM에 실제로 보낸 system/user 프롬프트와 응답을 RUN/TEMP에 남긴다.
+    #   LLM에 실제로 보낸 system/user 프롬프트와 응답을 RUN/AI에 남긴다(삭제하지 않음 — 감사/재현용).
     #   (측정 raw/reformatter는 AI에 전달하지 않음 — findings 요약 + 지식베이스 텍스트만)
     _io = []
 
@@ -1005,7 +1005,7 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
     def _dump_ai_input():
         try:
             import os
-            _outdir = os.path.join('RUN', 'TEMP')
+            _outdir = os.path.join('RUN', 'AI')   # AI 인풋파일 보관 폴더(사이클 종료 후에도 유지)
             os.makedirs(_outdir, exist_ok=True)
             _safe = str(target_lot_id).replace('/', '_').replace('\\', '_') or 'lot'
             _base = os.path.join(_outdir, f"ai_input_{_safe}")
