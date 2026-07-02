@@ -968,15 +968,17 @@ def main():
 
                         inlinedata_filtered_pivot = pd.merge(inlinedata_spec, inlinedata_filtered_pivot,how='right', on='STEP_DESC_ITEM_ID')
 
-                        # [PATCH] Inline Table 멀티 인덱스 (UCL 앞 3열: Module / Step desc / Item)
+                        # [PATCH] Inline Table 멀티 인덱스 (UCL 앞 4열: Module / Step desc / ITEMNAME / Item)
                         #  - Module    : inline setting의 실제 Module 열 (inline_grouped_dict)  → 첫번째 인덱스
                         #  - Step desc : STEP_DESC 열 (inline_grouped_dict_STEP_DESC)
+                        #  - ITEMNAME  : inline setting의 ITEMNAME 열 (inline_grouped_dict_ITEMNAME)
                         #  - Item      : ITEM_ID 열
                         inlinedata_filtered_pivot['Module'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict)
                         inlinedata_filtered_pivot['Step_desc'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_STEP_DESC)
+                        inlinedata_filtered_pivot['ITEMNAME'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_ITEMNAME)
                         inlinedata_filtered_pivot['ITEM_ID'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_ITEM_ID)
-                        inlinedata_filtered_pivot = inlinedata_filtered_pivot.set_index(['Module', 'Step_desc', 'ITEM_ID'])
-                        inlinedata_filtered_pivot.index.names = ['Module', 'Step desc', 'Item']
+                        inlinedata_filtered_pivot = inlinedata_filtered_pivot.set_index(['Module', 'Step_desc', 'ITEMNAME', 'ITEM_ID'])
+                        inlinedata_filtered_pivot.index.names = ['Module', 'Step desc', 'ITEMNAME', 'Item']
 
 
                         # HTML 생성부분 - Mail body
@@ -1086,6 +1088,12 @@ def main():
                         # WF MAP이 있으면 wafer 열 폭을 약간만 넓혀 표시 (48→45px, ~5% 축소 → #25까지 표시)
                         _has_wf = len(wfmaps_by_item) > 0
                         _wf_w = 45
+                        # 메일 클라이언트는 <style> CSS를 무시하므로 각 셀에 inline style로 직접 지정
+                        _SB_BD = 'border:1px solid #2c2c2c;'      # 셀 구분선(inline)
+                        _sb_waf_w = _wf_w if _has_wf else 40      # wafer 셀 폭(숫자 잘림 방지) inline min-width
+                        _SB_WAF = f'{_SB_BD} text-align:center; width:{_sb_waf_w}px; min-width:{_sb_waf_w}px; max-width:{_sb_waf_w}px;'
+                        _SB_CAT = f'{_SB_BD} text-align:center; min-width:77px;'      # category 고정열
+                        _SB_ITEM = f'{_SB_BD} text-align:center; min-width:240px;'    # Item 고정열
                         sb_html = ''
                         if _has_wf:
                             sb_html += (f'<style>.score-board td.sb-val, .score-board th.sb-waf'
@@ -1099,52 +1107,52 @@ def main():
                             else:
                                 _lot_groups.append((_c[0], [_c]))
 
-                        sb_html += '<table class="score-board">\n  <thead>\n'
+                        sb_html += '<table class="score-board" style="border-collapse:collapse;">\n  <thead>\n'
                         sb_html += '    <tr>\n'
-                        sb_html += f'      <th colspan="2" class="sb-frozen-lot" style="text-align:center; background-color:#d9e1f2;">LOT_ID</th>\n'
+                        sb_html += f'      <th colspan="2" class="sb-frozen-lot" style="{_SB_BD} text-align:center; background-color:#d9e1f2;">LOT_ID</th>\n'
                         # root_lot_id가 같은 형제 lot을 각각 헤더로 분리 (target lot은 강조)
                         for _lot, _cols in _lot_groups:
                             _is_tgt = (str(_lot) == str(target_lot_id))
                             _bg = '#dbe7c8' if _is_tgt else '#f0f0f0'
                             _fw = 'bold' if _is_tgt else 'normal'
-                            sb_html += (f'      <th colspan="{len(_cols)}" style="text-align:center; '
+                            sb_html += (f'      <th colspan="{len(_cols)}" style="{_SB_BD} text-align:center; '
                                         f'background-color:{_bg}; font-weight:{_fw};">{_lot}</th>\n')
                         sb_html += '    </tr>\n'
                         sb_html += '    <tr>\n'
-                        sb_html += '      <th class="sb-cat" style="background-color:#d9e1f2;">category</th>\n'
-                        sb_html += '      <th class="sb-item" style="background-color:#d9e1f2;">Item</th>\n'
+                        sb_html += f'      <th class="sb-cat" style="{_SB_CAT} background-color:#d9e1f2;">category</th>\n'
+                        sb_html += f'      <th class="sb-item" style="{_SB_ITEM} background-color:#d9e1f2;">Item</th>\n'
                         for col in _wcols:
-                            sb_html += f'      <th class="sb-waf" style="background-color:#f0f0f0;">#{col[1]}</th>\n'
+                            sb_html += f'      <th class="sb-waf" style="{_SB_WAF} background-color:#f0f0f0;">#{col[1]}</th>\n'
                         sb_html += '    </tr>\n  </thead>\n  <tbody>\n'
 
                         for _i, (kind, cat, item, payload) in enumerate(render_seq):
                             sb_html += '    <tr>\n'
                             if _i in cat_span:
-                                sb_html += f'      <td class="sb-cat row_heading" rowspan="{cat_span[_i]}" style="font-weight:bold; background-color:#ebf4ff; vertical-align:middle;">{cat}</td>\n'
+                                sb_html += f'      <td class="sb-cat row_heading" rowspan="{cat_span[_i]}" style="{_SB_CAT} font-weight:bold; background-color:#ebf4ff; vertical-align:middle;">{cat}</td>\n'
                             if kind == 'score':
                                 row = payload
-                                sb_html += (f'      <td class="sb-item row_heading" style="font-weight:bold; '
+                                sb_html += (f'      <td class="sb-item row_heading" style="{_SB_ITEM} font-weight:bold; '
                                             f'background-color:#ebf4ff;">{item}</td>\n')
                                 for col in _wcols:
                                     val = row[col]
                                     if pd.isna(val) or val == "":
-                                        sb_html += f'      <td class="sb-val" style="background-color:{GLOBAL_CONFIG.score_color_na};"></td>\n'
+                                        sb_html += f'      <td class="sb-val" style="{_SB_WAF} background-color:{GLOBAL_CONFIG.score_color_na};"></td>\n'
                                     else:
                                         # 연속 색상(PPT와 동일), ITEM별 스케일 override 지원
                                         bg_color, color = GLOBAL_CONFIG.score_color(val, item)
-                                        sb_html += f'      <td class="sb-val" style="background-color:{bg_color}; color:{color}; font-weight:bold;">{val:.1f}</td>\n'
+                                        sb_html += f'      <td class="sb-val" style="{_SB_WAF} background-color:{bg_color}; color:{color}; font-weight:bold;">{val:.1f}</td>\n'
                             else:  # 'wfmap' 행 — wafer 열에 각 wafer의 WF MAP 정렬
                                 maps = payload
-                                sb_html += ('      <td class="sb-item row_heading" style="font-size:9px; color:#666; '
+                                sb_html += (f'      <td class="sb-item row_heading" style="{_SB_ITEM} font-size:9px; color:#666; '
                                             'background-color:#ebf4ff;">WF MAP</td>\n')
                                 for col in _wcols:
                                     _b = maps.get(f"{col[0]}|{col[1]}")
                                     if _b:
-                                        sb_html += (f'      <td class="sb-val" style="background-color:#ffffff; padding:0;">'
+                                        sb_html += (f'      <td class="sb-val" style="{_SB_WAF} background-color:#ffffff; padding:0;">'
                                                     f'<img src="data:image/png;base64,{_b}" '
                                                     f'style="width:{_wf_w - 2}px; height:{_wf_w - 2}px; display:block; margin:auto;"/></td>\n')
                                     else:
-                                        sb_html += '      <td class="sb-val" style="background-color:#f4f4f4;"></td>\n'
+                                        sb_html += f'      <td class="sb-val" style="{_SB_WAF} background-color:#f4f4f4;"></td>\n'
                             sb_html += '    </tr>\n'
                         sb_html += '  </tbody>\n</table>\n'
                         score_board_html = sb_html
@@ -1152,27 +1160,52 @@ def main():
                         # ==================== Inline Table HTML 렌더링 (Manual) ====================
                         inlinedata_filtered_pivot = inlinedata_filtered_pivot.reset_index()
 
-                        _head_cols = ['Module', 'Step desc', 'Item']
+                        # 열 순서: Module, Step desc, ITEMNAME, Item (그 뒤 UCL/CL/LCL/wafer)
+                        _head_cols = ['Module', 'Step desc', 'ITEMNAME', 'Item']
                         cols = _head_cols + [c for c in inlinedata_filtered_pivot.columns if c not in _head_cols + ['STEP_DESC_ITEM_ID']]
                         inlinedata_filtered_pivot = inlinedata_filtered_pivot[cols]
 
-                        it_html = '<table class="inline-table">\n'
+                        # Module 열 연속 동일값 rowspan 병합 (위아래 병합) — 그룹 첫 행에서만 셀 출력
+                        _mods = [str(r['Module']) for _, r in inlinedata_filtered_pivot.iterrows()]
+                        _mod_span = {}
+                        _mj = 0
+                        while _mj < len(_mods):
+                            _mk = _mj
+                            while _mk + 1 < len(_mods) and _mods[_mk + 1] == _mods[_mj]:
+                                _mk += 1
+                            _mod_span[_mj] = _mk - _mj + 1
+                            _mj = _mk + 1
+
+                        # 메일 클라이언트용 inline style (셀 구분선 + 가운데 정렬)
+                        _IT_BD = 'border:1px solid #2c2c2c;'
+                        _IT_CTR = 'text-align:center !important;'   # 헤더 CSS(left) override
+                        _IT_WAF = 'width:56px; min-width:56px; max-width:56px;'
+
+                        it_html = '<table class="inline-table" style="border-collapse:collapse;">\n'
                         it_html += '  <thead>\n'
                         it_html += '    <tr>\n'
                         for col in inlinedata_filtered_pivot.columns:
                             if col in _head_cols:
-                                it_html += f'      <th class="row_heading" style="background-color:#e2efda !important;">{col}</th>\n'
+                                it_html += f'      <th class="row_heading" style="{_IT_BD} {_IT_CTR} background-color:#e2efda !important;">{col}</th>\n'
                             elif col in ['UCL', 'CL', 'LCL']:
-                                it_html += f'      <th style="background-color:#f0f0f0 !important;">{col}</th>\n'
+                                it_html += f'      <th style="{_IT_BD} {_IT_CTR} background-color:#f0f0f0 !important;">{col}</th>\n'
                             else:
                                 col_str = str(col) if str(col).startswith('#') else '#' + str(col)
-                                it_html += f'      <th style="background-color:#f0f0f0 !important; width:56px; min-width:56px; max-width:56px;">{col_str}</th>\n'
+                                it_html += f'      <th style="{_IT_BD} {_IT_CTR} {_IT_WAF} background-color:#f0f0f0 !important;">{col_str}</th>\n'
                         it_html += '    </tr>\n'
                         it_html += '  </thead>\n'
                         it_html += '  <tbody>\n'
-                        for _, row in inlinedata_filtered_pivot.iterrows():
+                        for _ri, (_, row) in enumerate(inlinedata_filtered_pivot.iterrows()):
                             it_html += '    <tr>\n'
                             for col in inlinedata_filtered_pivot.columns:
+                                # Module 열은 연속 동일값 rowspan 병합 → 그룹 첫 행에서만 출력
+                                if col == 'Module':
+                                    if _ri not in _mod_span:
+                                        continue
+                                    _span_attr = f' rowspan="{_mod_span[_ri]}"' if _mod_span[_ri] > 1 else ''
+                                else:
+                                    _span_attr = ''
+
                                 val = row[col]
                                 if pd.isna(val):
                                     formatted_val = ""
@@ -1186,11 +1219,10 @@ def main():
                                 else:
                                     formatted_val = str(val)
 
-                                style = ""
                                 if col in ['UCL', 'CL', 'LCL']:
-                                    style = 'background-color:#e0f7fa;'
+                                    style = f'{_IT_BD} {_IT_CTR} background-color:#e0f7fa;'
                                 elif col in _head_cols:
-                                    style = 'background-color:#f0fff4;'
+                                    style = f'{_IT_BD} {_IT_CTR} vertical-align:middle; background-color:#f0fff4;'
                                 else:
                                     # wafer 값 셀: LCL/UCL 벗어나면 셀 배경 빨강 강조
                                     _cellbg = ''
@@ -1202,17 +1234,32 @@ def main():
                                                 _cellbg = 'background-color:#ff4d4d; color:#ffffff; font-weight:bold;'
                                         except (ValueError, TypeError):
                                             pass
-                                    style = f'width:56px; min-width:56px; max-width:56px; {_cellbg}'
+                                    style = f'{_IT_BD} {_IT_CTR} {_IT_WAF} {_cellbg}'
 
-                                it_html += f'      <td style="{style}">{formatted_val}</td>\n'
+                                it_html += f'      <td{_span_attr} style="{style}">{formatted_val}</td>\n'
                             it_html += '    </tr>\n'
                         it_html += '  </tbody>\n'
                         it_html += '</table>\n'
                         inline_table_html = it_html
 
-                        # ==================== Lot Detail Table HTML 렌더링 ====================
-                        et_log_styled = et_log.style.format(na_rep="").hide(axis='index')
-                        lot_detail_html = et_log_styled.set_table_attributes('class="lot-detail-table"').to_html()
+                        # ==================== Lot Detail Table HTML 렌더링 (Manual) ====================
+                        # pandas Styler.to_html()은 class/<style> 기반이라 메일에서 깨짐 → inline style로 직접 생성
+                        _LD_BD = 'border:1px solid #2c2c2c;'
+                        _LD_CELL = f'{_LD_BD} text-align:center; padding:3px 10px; white-space:nowrap;'   # 열 좌우 여백 10px
+                        def _ld_esc(_x):
+                            return str(_x).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                        lot_detail_html = '<table class="lot-detail-table" style="border-collapse:collapse;">\n  <thead>\n    <tr>\n'
+                        for _c in et_log.columns:
+                            lot_detail_html += f'      <th style="{_LD_CELL} background-color:#e8edf3; font-weight:bold;">{_ld_esc(_c)}</th>\n'
+                        lot_detail_html += '    </tr>\n  </thead>\n  <tbody>\n'
+                        for _, _r in et_log.iterrows():
+                            lot_detail_html += '    <tr>\n'
+                            for _c in et_log.columns:
+                                _v = _r[_c]
+                                _vs = '' if pd.isna(_v) else _ld_esc(_v)
+                                lot_detail_html += f'      <td style="{_LD_CELL}">{_vs}</td>\n'
+                            lot_detail_html += '    </tr>\n'
+                        lot_detail_html += '  </tbody>\n</table>\n'
 
                         # ==================== [0] Anomaly: 코드 분석 + (선택)AI 다단계 해석 + Trend chart ====================
                         # 코드(analyze_commonality)는 AI 유무와 무관하게 항상 동작하여 통계 Finding을 산출.
