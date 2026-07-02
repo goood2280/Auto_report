@@ -2692,8 +2692,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             continue
         print(f"[{idx}/{total_items}] {item_name} 처리 중...")
 
-        # ---- 카테고리 간지(Description) 슬라이드 삽입 ----
-        if 'CAT2' in spec_data.columns:
+        # ---- 카테고리 간지(Description) 슬라이드 삽입 (My_config.use_description_page로 on/off) ----
+        if getattr(GLOBAL_CONFIG, 'use_description_page', True) and 'CAT2' in spec_data.columns:
             cat2 = str(spec_data.loc[spec_name, 'CAT2']).strip()
             if cat2 != current_cat and cat2.lower() != 'nan':
                 current_cat = cat2
