@@ -875,7 +875,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             if worst_med_dev > 0 and worst_med_w is not None:
                 dev_txt = f"#{worst_med_w} median {worst_med_dev:.1f}σ 이탈(제품 wafer 기준)"
             if worst_disp_ratio >= 1.3 and worst_disp_w is not None:
-                disp_txt = f"#{worst_disp_w} 산포 {worst_disp_ratio:.1f}배(보통 wafer 대비)"
+                disp_txt = f"#{worst_disp_w} 산포 {worst_disp_ratio:.1f}배"
 
         # spec-out을 wafer별 pt개수로 그룹 + 순위지표(최고 wafer 비율/spec-out wafer 수) + PGM(pt)/zone
         specout_txt, n_out, specout_map = ('', 0, {})
@@ -987,10 +987,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             continue
 
         if worst_disp_ratio > disp_ratio:
+            # 형식: "산포 확대 : ITEM - #W 산포 X배" (제목에 다 담고 상세는 비움 → 깔끔)
             findings.append(_finding(
                 "WARNING", "DISPERSION", it,
-                f"산포 확대: {it} #{worst_disp_w} 보통 대비 {worst_disp_ratio:.1f}배",
-                detail.strip() or "wafer 산포 증가(균일도 검토)."))
+                f"산포 확대 : {it} - #{worst_disp_w} 산포 {worst_disp_ratio:.1f}배", ""))
 
     # ── 판단 근거 중간 데이터를 RUN/TEMP에 저장 (csv + json) ──
     try:

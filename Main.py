@@ -3,6 +3,7 @@ import gc
 import os
 import re
 import sys
+import time
 import traceback
 import uuid
 from datetime import datetime, timedelta, date
@@ -129,6 +130,41 @@ def print_status(category, state, detail=''):
     print(_c(f"{tag} {category}" + (f": {detail}" if detail else ""), color))
 
 
+def _slide_title(slide):
+    """슬라이드의 첫 비어있지 않은 텍스트(제목)를 반환."""
+    for sh in slide.shapes:
+        try:
+            if sh.has_text_frame and sh.text_frame.text.strip():
+                return sh.text_frame.text.strip()
+        except Exception:
+            pass
+    return ""
+
+
+def _move_aggregation_after_scoreboard(prs):
+    """Index Aggregation Table(통계표) 슬라이드를 Score Board 슬라이드 바로 뒤로 이동
+    → 'Score Board → 통계표' 순서로 인접 배치."""
+    try:
+        slides = list(prs.slides)
+        titles = [_slide_title(s) for s in slides]
+        sb_idx = [i for i, t in enumerate(titles) if t.startswith('Score Board')]
+        agg_idx = [i for i, t in enumerate(titles) if t.startswith('Index Aggregation Table')]
+        if not sb_idx or not agg_idx:
+            return
+        last_sb = max(sb_idx)
+        sldIdLst = prs.slides._sldIdLst
+        els = list(sldIdLst)
+        sb_el = els[last_sb]
+        agg_els = [els[i] for i in agg_idx]
+        for _e in agg_els:
+            sldIdLst.remove(_e)
+        _pos = list(sldIdLst).index(sb_el) + 1
+        for _off, _e in enumerate(agg_els):
+            sldIdLst.insert(_pos + _off, _e)
+    except Exception as _e:
+        print(f"[WARN] Aggregation 통계표 위치 이동 실패: {_e}")
+
+
 # ==================================================================================================================================
 # 전체 파이프라인 진입점
 #   ⚠️ 병렬 차트 렌더링(My_Function의 ProcessPoolExecutor, Windows spawn)이 워커 프로세스에서
@@ -250,8 +286,23 @@ def main():
     _LOG_PATH = GLOBAL_CONFIG.get("unified_log") or loop_log
     builtins.print = _run_log_print
 
+    # 실행 환경(CPU 코어 수 / 가용 메모리) 인식·출력
+    _cores = os.cpu_count() or 0
+    try:
+        import psutil as _ps
+        _vm = _ps.virtual_memory()
+        _mem_msg = f"메모리 가용 {_vm.available / 1024**3:.1f} GB / 총 {_vm.total / 1024**3:.1f} GB"
+    except Exception:
+        try:
+            from My_Function import _get_available_mem_gb
+            _a = _get_available_mem_gb()
+            _mem_msg = f"메모리 가용 {_a:.1f} GB" if _a else "메모리 측정 불가"
+        except Exception:
+            _mem_msg = "메모리 측정 불가"
+    print_status("실행 환경", "info", f"CPU {_cores} cores / {_mem_msg}")
+
     # =============================================== Main Loop 실행 ====================================================================
-    bucket_dx = GLOBAL_CONFIG.get("bucket_dx") 
+    bucket_dx = GLOBAL_CONFIG.get("bucket_dx")
 
     # S3 client (사내 환경 전용 - 로컬에서는 graceful skip)
     _use_s3 = getattr(GLOBAL_CONFIG, 'use_s3_upload', True)
@@ -651,6 +702,7 @@ def main():
 
                 for search_key in search_strings : #search key = match key, fablot_id + dc_step_id
                     try :
+                        _t_report_start = time.perf_counter()
                         print_status("Report 발행 시작", "info", f"{search_key}")
 
                         not_measured = False
@@ -820,6 +872,9 @@ def main():
                                 radius_zones=GLOBAL_CONFIG.get('radius_zones', [60, 100]))
                         except Exception as fe:
                             print(f"[WARN] Anomaly 상세 페이지 삽입 스킵: {fe}")
+
+                        # Score Board → 통계표(Index Aggregation Table) 순서로 인접 배치
+                        _move_aggregation_after_scoreboard(prs_low_qual)
 
                         # 1-4. Save ppt - 메일링 버전
                         if not os.path.exists(low_qual_ppt_save_path):
@@ -1438,7 +1493,18 @@ def main():
                             print_status("메일 발송", "off", "use_email_send=False → 스킵")
 
                         log_to_file(f"{search_key} Report 발행 완료", query_log)
-                        print_status("Report 발행 완료", "ok", f"{search_key}")
+                        # 소요 시간 + 산출물(HTML/PPT) 용량 출력
+                        _elapsed = time.perf_counter() - _t_report_start
+
+                        def _mb(_p):
+                            try:
+                                return f"{os.path.getsize(_p) / 1024**2:.2f}MB" if os.path.exists(_p) else "N/A"
+                            except OSError:
+                                return "N/A"
+                        _html_mb = _mb(f'{html_save_path}{fname}')
+                        _ppt_mb = _mb(f'{low_qual_ppt_save_path}{final_ppt_file_name_DX}')
+                        print_status("Report 발행 완료", "ok",
+                                     f"{search_key} — 소요 {_elapsed:.1f}s, HTML {_html_mb}, PPT {_ppt_mb}")
 
                     except Exception as e:
                         print_status("Report 발행 실패", "fail", f"{search_key}: {e}")

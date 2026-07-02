@@ -773,44 +773,18 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
     def _strip(t):
         return _re.sub(r'\s+', ' ', _re.sub(r'<[^>]+>', '', str(t))).strip()
 
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    bg = slide.background; bg.fill.solid(); bg.fill.fore_color.rgb = RGBColor(255, 255, 255)
-
-    hdr = slide.shapes.add_shape(1, Inches(0), Inches(0), prs.slide_width, Inches(0.62))
-    hdr.fill.solid(); hdr.fill.fore_color.rgb = NAVY; hdr.line.fill.background()
-    htf = hdr.text_frame; htf.margin_left = Inches(0.2)
-    hp = htf.paragraphs[0]
     n_crit = sum(1 for f in findings if f.get("severity") == "CRITICAL")
     n_warn = sum(1 for f in findings if f.get("severity") == "WARNING")
-    # 헤더: 제목 + 신호등(●) 색 점 + 건수, 항목 사이 | 구분 (HTML head와 동일 구성)
-    hp.text = ""
     _WHITE = RGBColor(255, 255, 255); _DIV = RGBColor(0xC9, 0xD2, 0xE0)
-
-    def _hrun(text, color, sz=18, bold=True):
-        rr = hp.add_run(); rr.text = text
-        rr.font.size = Pt(sz); rr.font.bold = bold; rr.font.name = FONT; rr.font.color.rgb = color
-
-    _hrun(f"{title}   —   ", _WHITE)
     _hcnt = [("CRITICAL", "이상", n_crit), ("WARNING", "주의", n_warn)]
-    for _k, (_sev, _lbl, _cnt) in enumerate(_hcnt):
-        _hrun("● ", sev_dot.get(_sev, _WHITE))
-        _hrun(f"{_lbl} {_cnt}", _WHITE)
-        if _k < len(_hcnt) - 1:
-            _hrun("  |  ", _DIV)
-    hp.font.size = Pt(18); hp.font.bold = True
-    hp.font.color.rgb = RGBColor(255, 255, 255); hp.font.name = FONT
 
-    box = slide.shapes.add_textbox(Inches(0.3), Inches(0.72),
-                                   prs.slide_width - Inches(0.6), prs.slide_height - Inches(0.95))
-    tf = box.text_frame; tf.word_wrap = True
-
-    # ── 참고사항: 비교 기준·robust 산포 계산법·radius zone 정의 (반복 표현은 여기 1회만) ──
+    # ── 참고사항(1페이지에만): 비교 기준·robust 산포 계산법·radius zone·판정/우선순위 ──
     _veh = main_vehicle or '제품'
     try:
         _rc, _rm = float(radius_zones[0]), float(radius_zones[1])
     except Exception:
         _rc, _rm = 60.0, 100.0
-    _dsp = getattr(GLOBAL_CONFIG, 'anomaly_lot_dispersion_ratio', 1.5)
+    _dsp = getattr(GLOBAL_CONFIG, 'anomaly_lot_dispersion_ratio', 2.0)
     _note_lines = [
         f"※ 참고: 모든 판정은 대상 lot의 'wafer 단위'로 보며, 비교 기준은 제품({_veh}) 전체의 'wafer별' 통계입니다.",
         "· robust 산포 = 값들의 1.4826×MAD(0이면 IQR/1.349, 그래도 0이면 std).",
@@ -818,48 +792,85 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         "'N배' = 대상 wafer 내부 산포 / 보통 wafer 산포.",
         f"· 위치(radius zone): Center ≤ {_rc:g}, Middle {_rc:g}~{_rm:g}, Edge > {_rm:g}.",
         "· [판정 기준]",
-        "   - 이상(빨강): spec(LCL/UCL)을 벗어난 측정 point가 하나라도 있으면 이상. (median 이동은 판정에 사용하지 않음)",
+        "   - 이상(빨강): spec을 벗어난 측정 point가 하나라도 있으면 이상. (median 이동은 판정에 사용하지 않음)",
         f"   - 주의(주황): spec은 모두 만족하지만, 대상 lot의 어떤 wafer 내부 산포가 '보통 wafer 산포'의 {_dsp:g}배를 넘으면 주의.",
         "   - 그 외: 참고.",
         "· [우선순위 P] — 값이 클수록 위에 정렬. R_max=최대 wafer spec-out 비율(out pt/측정 pt), "
         "N_wf=spec-out wafer 수, D=최대 wafer 산포배수.",
         "   - 이상: P = 20000 + 100·R_max + N_wf/100      - 주의: P = 10000 + 100·D      (동점 시 REPORT ORDER 오름차순)",
     ]
-    for _k, _ln in enumerate(_note_lines):
-        _np = tf.paragraphs[0] if _k == 0 else tf.add_paragraph()
-        _nr = _np.add_run(); _nr.text = _ln
-        _nr.font.size = Pt(8); _nr.font.italic = True
-        _nr.font.color.rgb = RGBColor(0x6B, 0x72, 0x80); _nr.font.name = FONT
-    _sp = tf.add_paragraph(); _sp.text = ""   # 참고사항과 finding 사이 간격
 
-    if not findings:
-        p = tf.add_paragraph(); p.text = "유의미한 통계 이상 없음"
-        p.font.size = Pt(12); p.font.name = FONT
-    else:
-        for i, f in enumerate(findings):
-            p = tf.add_paragraph()
-            sev = f.get("severity", "INFO")
-            r0 = p.add_run()                      # 신호등 원(●) — severity 색
-            r0.text = "● "
-            r0.font.bold = True; r0.font.size = Pt(11)
-            r0.font.color.rgb = sev_dot.get(sev, RGBColor(0x5D, 0x6D, 0x7E)); r0.font.name = FONT
-            r1 = p.add_run()                      # 라벨+제목 — 가독성 위해 진회색 고정
-            r1.text = f"{sev_label.get(sev, sev)} {f.get('title', '')}"
-            r1.font.bold = True; r1.font.size = Pt(11)
-            r1.font.color.rgb = RGBColor(0x1A, 0x1A, 0x1A); r1.font.name = FONT
-            det = _strip(f.get("detail", ""))
-            if det:
-                r2 = p.add_run()
-                r2.text = "  —  " + det
-                r2.font.size = Pt(9); r2.font.color.rgb = RGBColor(0x55, 0x55, 0x55); r2.font.name = FONT
+    # findings가 25개 넘으면 다음 페이지로 분할
+    PER_PAGE = 25
+    _pages = [findings[i:i + PER_PAGE] for i in range(0, len(findings), PER_PAGE)] or [[]]
+    _total = len(_pages)
+    _created = []
+    for _pi, _chunk in enumerate(_pages):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        _created.append(slide)
+        bg = slide.background; bg.fill.solid(); bg.fill.fore_color.rgb = RGBColor(255, 255, 255)
 
-    # 새 슬라이드(맨 끝)를 after_index 위치로 이동 (Score Board 바로 뒤)
+        hdr = slide.shapes.add_shape(1, Inches(0), Inches(0), prs.slide_width, Inches(0.62))
+        hdr.fill.solid(); hdr.fill.fore_color.rgb = NAVY; hdr.line.fill.background()
+        htf = hdr.text_frame; htf.margin_left = Inches(0.2)
+        hp = htf.paragraphs[0]; hp.text = ""
+
+        def _hrun(text, color, sz=18, bold=True, _hp=hp):
+            rr = _hp.add_run(); rr.text = text
+            rr.font.size = Pt(sz); rr.font.bold = bold; rr.font.name = FONT; rr.font.color.rgb = color
+
+        _sfx = f" ({_pi + 1}/{_total})" if _total > 1 else ""
+        _hrun(f"{title}{_sfx}   —   ", _WHITE)
+        for _k, (_sev, _lbl, _cnt) in enumerate(_hcnt):
+            _hrun("● ", sev_dot.get(_sev, _WHITE))
+            _hrun(f"{_lbl} {_cnt}", _WHITE)
+            if _k < len(_hcnt) - 1:
+                _hrun("  |  ", _DIV)
+        hp.font.size = Pt(18); hp.font.bold = True
+        hp.font.color.rgb = RGBColor(255, 255, 255); hp.font.name = FONT
+
+        box = slide.shapes.add_textbox(Inches(0.3), Inches(0.72),
+                                       prs.slide_width - Inches(0.6), prs.slide_height - Inches(0.95))
+        tf = box.text_frame; tf.word_wrap = True
+        _firstpara = True
+
+        if _pi == 0:      # 참고사항은 1페이지에만
+            for _ln in _note_lines:
+                _np = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
+                _nr = _np.add_run(); _nr.text = _ln
+                _nr.font.size = Pt(8); _nr.font.italic = True
+                _nr.font.color.rgb = RGBColor(0x6B, 0x72, 0x80); _nr.font.name = FONT
+            _spp = tf.add_paragraph(); _spp.text = ""
+
+        if not findings:
+            p = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
+            p.text = "유의미한 통계 이상 없음"; p.font.size = Pt(12); p.font.name = FONT
+        else:
+            for f in _chunk:
+                p = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
+                sev = f.get("severity", "INFO")
+                r0 = p.add_run(); r0.text = "● "
+                r0.font.bold = True; r0.font.size = Pt(11)
+                r0.font.color.rgb = sev_dot.get(sev, RGBColor(0x5D, 0x6D, 0x7E)); r0.font.name = FONT
+                r1 = p.add_run()
+                r1.text = f"{sev_label.get(sev, sev)} {f.get('title', '')}"
+                r1.font.bold = True; r1.font.size = Pt(11)
+                r1.font.color.rgb = RGBColor(0x1A, 0x1A, 0x1A); r1.font.name = FONT
+                det = _strip(f.get("detail", ""))
+                if det:
+                    r2 = p.add_run(); r2.text = "  —  " + det
+                    r2.font.size = Pt(9); r2.font.color.rgb = RGBColor(0x55, 0x55, 0x55); r2.font.name = FONT
+
+    # 생성한 페이지(들)를 순서 유지하며 after_index 위치로 이동 (Score Board 바로 뒤)
     try:
         sldIdLst = prs.slides._sldIdLst
-        sl = list(sldIdLst)
-        last = sl[-1]
-        sldIdLst.remove(last)
-        sldIdLst.insert(min(after_index, len(sl) - 1), last)
+        _n = len(_created)
+        _tail = list(sldIdLst)[-_n:]
+        for _el in _tail:
+            sldIdLst.remove(_el)
+        _pos = min(after_index, len(list(sldIdLst)))
+        for _off, _el in enumerate(_tail):
+            sldIdLst.insert(_pos + _off, _el)
     except Exception as e:
         print(f"[WARN] Anomaly 상세 페이지 위치 이동 실패: {e}")
     return prs
@@ -1954,13 +1965,16 @@ def _render_item_charts(task):
                 # 마지막(맨 아래) PGM 행에만 wafer 번호 표기
                 if r == grid_rows - 1:
                     ax.set_xlabel(f"#{c + 1}", fontsize=5, labelpad=1, color=C_NEUTRAL)
-                # 다중 PGM이면 첫 열 좌측에 PGM(pt) 라벨(90도 회전)
+                # 다중 PGM이면 첫 열 좌측에 PGM(pt) 라벨(90도 회전, 작은 글씨)
+                # 표기 형식: step_seq(pt수)  예) DC_01(3)  — '_1.0' 같은 접미사·'pt' 문자는 제거
                 if c == 0 and _multi_pgm:
                     _pl = str(sub_name)
                     if 'PGM(pt)' in sub_grp.columns:
                         _u = sub_grp['PGM(pt)'].dropna()
                         if len(_u): _pl = str(_u.iloc[0])
-                    ax.set_ylabel(_pl, fontsize=6, rotation=90, labelpad=6, color=C_NEUTRAL)
+                    _pl = re.sub(r'_[0-9.]+$', '', _pl)   # Duplicate_Count 접미사(_1.0 등) 제거
+                    _pl = re.sub(r'(\d+)\s*pt\)', r'\1)', _pl)  # "(137pt)" → "(137)"
+                    ax.set_ylabel(_pl, fontsize=4, rotation=90, labelpad=4, color=C_NEUTRAL)
                 ax.set_xticks([]); ax.set_yticks([])
                 ax.set_aspect('equal', adjustable='box')   # 웨이퍼 정원형 유지
                 for spine in ax.spines.values():
