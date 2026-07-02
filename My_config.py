@@ -640,6 +640,14 @@ class Config:
         self.desc_img_quality_low = 20     # 설명 PPT 저화질
         self.desc_img_quality_high = 95    # 설명 PPT 고화질
 
+        # ── Description 페이지 복사 시 내장 이미지 재압축(용량 절감) ──
+        #   설명 슬라이드를 그대로 복사하면 원본 고해상도 이미지(수 MB~15MB)가 그대로 들어가
+        #   PPT 용량이 커진다. 아래 값으로 다운스케일+JPEG 재압축해 약 2MB 수준으로 줄인다.
+        #   description_image_recompress=False면 원본 그대로 복사(재압축 안 함).
+        self.description_image_recompress = True   # 설명 이미지 재압축 on/off
+        self.description_image_max_px = 2400       # 이미지 최대 변(px) — 이보다 크면 축소(≈2MB 목표)
+        self.description_image_jpeg_quality = 85   # 재압축 JPEG 품질(0~100)
+
         # ──────────────────────────────────────────────────────
         # 이상치 탐지 설정 (Anomaly detection settings)
         # Z-score 기반 이상치 탐지 및 차트 표시 파라미터

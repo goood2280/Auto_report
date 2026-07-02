@@ -1274,7 +1274,36 @@ def _copy_slide_into(dest_prs, src_slide, src_w=None, src_h=None):
     위치/크기를 스케일하여 **현재 PPT 크기에 맞게 조정**한다(PNG 변환 없이 이미지처럼 꽉 차게).
     """
     import copy as _copy
+    import io as _io
     _R = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
+
+    # ── 설명 이미지 재압축 설정 (My_config) ── 원본 고해상도 이미지를 다운스케일+JPEG 재압축해 용량 절감
+    _recompress = getattr(GLOBAL_CONFIG, 'description_image_recompress', True)
+    _max_px = int(getattr(GLOBAL_CONFIG, 'description_image_max_px', 2000) or 0)
+    _jpeg_q = int(getattr(GLOBAL_CONFIG, 'description_image_jpeg_quality', 80))
+
+    def _shrink_image_blob(blob):
+        """이미지 blob을 max_px 이하로 축소 + JPEG 재압축한 bytes 반환(실패/무효 시 None)."""
+        try:
+            from PIL import Image
+            im = Image.open(_io.BytesIO(blob))
+            w, h = im.size
+            if _max_px and max(w, h) > _max_px:
+                _s = _max_px / float(max(w, h))
+                im = im.resize((max(1, int(w * _s)), max(1, int(h * _s))), Image.LANCZOS)
+            # 투명도 있으면 흰 배경 합성 후 RGB로(JPEG는 알파 미지원)
+            if im.mode in ('RGBA', 'LA', 'P'):
+                _rgba = im.convert('RGBA')
+                _bg = Image.new('RGB', _rgba.size, (255, 255, 255))
+                _bg.paste(_rgba, mask=_rgba.split()[-1])
+                im = _bg
+            else:
+                im = im.convert('RGB')
+            _out = _io.BytesIO()
+            im.save(_out, format='JPEG', quality=_jpeg_q, optimize=True)
+            return _out.getvalue()
+        except Exception:
+            return None
 
     dest_slide = dest_prs.slides.add_slide(dest_prs.slide_layouts[6])
     # 빈 레이아웃의 기본 placeholder 제거(빈 상자 방지)
@@ -1293,6 +1322,18 @@ def _copy_slide_into(dest_prs, src_slide, src_w=None, src_h=None):
                 continue
             if rel.is_external:
                 new_rId = dest_slide.part.rels.get_or_add_ext_rel(rel.reltype, rel._target)
+            elif _recompress and 'image' in rel.reltype:
+                # 이미지: 다운스케일+JPEG 재압축한 새 이미지 파트로 추가(용량↓). 실패 시 원본 그대로.
+                new_rId = None
+                try:
+                    _orig = rel.target_part.blob
+                    _small = _shrink_image_blob(_orig)
+                    if _small is not None and len(_small) < len(_orig):
+                        _img_part, new_rId = dest_slide.part.get_or_add_image_part(_io.BytesIO(_small))
+                except Exception:
+                    new_rId = None
+                if new_rId is None:
+                    new_rId = dest_slide.part.relate_to(rel.target_part, rel.reltype)
             else:
                 new_rId = dest_slide.part.relate_to(rel.target_part, rel.reltype)
             rid_map[rId] = new_rId
