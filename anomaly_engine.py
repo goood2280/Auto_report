@@ -1105,11 +1105,11 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             print(f"[anomaly] 제외 키워드 PCHK {len(_meas_only)}개는 판정 제외, "
                   f"측정이상 추정 신호만 산출: {sorted(_meas_only)}")
 
-    # ── PCHK 종류별 '검증 대상 ITEM' 매핑 (ANOMALY_KNOWLEDGE.md에서 관리) ──
-    #   예) PCHK_LKG → [VTH_N, VTH_P, ...] : PCHK_LKG가 이 항목들과 동일 PGM(pt)·shot에서
-    #       함께 spec-out일 때만 측정이상으로 본다. PCHK_Res는 다른 항목군.
-    #   매핑에 적힌 ITEM 명은 Index ALIAS(원 이름)든 HTML/PPT 표시명(replace 적용)이든
-    #   둘 다 인식한다(_name_forms). 매핑에 없는 PCHK는 모든 spec-out 항목과 대조(하위호환).
+    # ── PCHK 종류별 '검증 대상 CAT2' 매핑 (ANOMALY_KNOWLEDGE.md에서 관리) ──
+    #   예) PCHK_LKG → [VTH, ...](CAT2 이름) : PCHK_LKG가 이 CAT2에 속한 항목들과 동일 PGM(pt)·shot
+    #       에서 함께 spec-out일 때만 측정이상으로 본다. PCHK_RES는 다른 CAT2군.
+    #   매핑 토큰은 CAT2 이름 기준으로 해석(해당 카테고리 내 항목 전체 검사). CAT2/항목명은 원 이름·표시명
+    #   둘 다 인식(_name_forms). 매핑에 없는 PCHK는 모든 spec-out 항목과 대조(하위호환).
     pchk_item_map = _parse_pchk_item_map(knowledge_text)
     _repl = getattr(config, 'replace_map', {}) if config else {}
     _suf = getattr(config, 'suffixes_remove', []) if config else []
@@ -1126,7 +1126,11 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         return _convert_name(nm, _pre, _suf, _repl)
 
     def _resolve_allowed(pchk_alias, device_items):
-        """PCHK의 검증 대상 ITEM(실제 alias) 집합. 매핑 없으면 None(전체 대조)."""
+        """PCHK의 검증 대상 = 매핑에 적힌 'CAT2 이름'들에 속한 ITEM(실제 alias) 집합.
+
+        매핑 토큰은 **CAT2 이름** 기준으로 해석 → 해당 카테고리에 속한 항목 전부를 대상으로 한다.
+        (하위호환: 토큰이 항목명 자체와 일치해도 인정). 매핑 없으면 None(전체 대조).
+        """
         toks = None
         _pf = _name_forms(pchk_alias)
         for k, v in pchk_item_map.items():
@@ -1135,12 +1139,18 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 break
         if toks is None:
             return None, None
-        allowed = set()
+        _tok_forms = set()          # 토큰(=CAT2 이름 목록)의 인식 형태 집합
         for t in toks:
-            _tf = _name_forms(t)
-            for d in device_items:
-                if _name_forms(d) & _tf:
-                    allowed.add(d)
+            _tok_forms |= _name_forms(t)
+        allowed = set()
+        for d in device_items:
+            _dcat = cat2_map.get(d, '')
+            # (1) 항목의 CAT2가 토큰(CAT2명)과 일치 → 그 카테고리 전체를 검사 대상에 포함
+            if _dcat and (_name_forms(_dcat) & _tok_forms):
+                allowed.add(d)
+            # (2) 하위호환: 토큰이 항목명 자체와 일치해도 인정
+            elif _name_forms(d) & _tok_forms:
+                allowed.add(d)
         return allowed, toks
 
     def _outmask(frame, it):

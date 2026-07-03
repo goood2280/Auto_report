@@ -60,27 +60,29 @@
 - 코드는 이 신호를 finding `type=MEAS_SUSPECT`(신호등 🟡 "측정이상 추정")로 표기하고,
   겹친 항목·shot 수·좌표·PGM(pt)를 상세에 담습니다. AI는 이 규칙으로 그 신호를 서술합니다.
 
-### PCHK 종류별 '검증 대상 ITEM' 매핑
+### PCHK 종류별 '검증 대상 CAT2' 매핑
 
-> **PCHK 종류별로 검증하는 ITEM 군을 '따로' 관리합니다.** 누설 체크(**PCHK_LKG**)는 누설에
-> 민감한 항목군을, 접촉저항 체크(**PCHK_RES**)는 저항/구동 항목군을 각각 검증합니다.
-> 각 PCHK가 **자기 대상 ITEM들과 동일 PGM(pt)·동일 shot에서 함께 spec-out**일 때만
+> **PCHK 종류별로 검증하는 CAT2(카테고리) 군을 '따로' 관리합니다.** 누설 체크(**PCHK_LKG**)는
+> 누설에 민감한 카테고리를, 접촉저항 체크(**PCHK_RES**)는 저항/구동 카테고리를 각각 검증합니다.
+> 매핑에 적은 **CAT2에 속한 항목 전체**가 PCHK와 동일 PGM(pt)·동일 shot에서 함께 spec-out일 때만
 > 그 항목들을 측정이상으로 봅니다. (여러 대상 항목이 겹칠수록 확신↑.)
 >
 > - 아래 매핑을 **PCHK별로 한 줄씩** 편집하면 코드가 그대로 반영합니다(마커 사이만 파싱).
->   PCHK_LKG와 PCHK_RES는 **서로 다른 ITEM 군**을 가질 수 있습니다(분리 관리).
-> - 형식: `- <PCHK 표시명>: ITEM1, ITEM2, ...` (PCHK 표시명 = reformatter의 실제 PCHK alias/표시명).
+>   PCHK_LKG와 PCHK_RES는 **서로 다른 CAT2 군**을 가질 수 있습니다(분리 관리).
+> - 형식: `- <PCHK 표시명>: CAT2_1, CAT2_2, ...` (값은 **개별 항목명이 아니라 CAT2 이름**).
+>   PCHK 표시명 = reformatter의 실제 PCHK alias/표시명. 나열한 CAT2에 속한 항목을 모두 검사합니다.
 >   PCHK가 3종 이상이어도 줄을 추가하면 각각 별도 대상군으로 동작합니다.
-> - **ITEM 명은 Index ALIAS(원 이름)든 HTML/PPT 표시명(replace/접미·접두 제거 적용)이든 둘 다 인식**합니다.
+> - **CAT2·항목명은 원 이름이든 HTML/PPT 표시명(replace/접미·접두 제거 적용)이든 둘 다 인식**합니다.
+>   (하위호환: 토큰이 CAT2가 아니라 개별 항목명이어도 그 항목을 인식합니다.)
 > - 매핑에 없는 PCHK는 (하위호환) 모든 spec-out 항목과 대조합니다.
 
 <!-- PCHK_ITEM_MAP:start -->
-- PCHK_LKG: ITEM_A, ITEM_B, ITEM_C
-- PCHK_RES: ITEM_D, ITEM_E, ITEM_F
+- PCHK_LKG: CAT2_A, CAT2_B
+- PCHK_RES: CAT2_C, CAT2_D
 <!-- PCHK_ITEM_MAP:end -->
 
 - 코드가 실제 사용한 대상/겹침 결과는 `RUN/TEMP/anomaly_basis_<lot>.json`의
-  `meas_target_items`(매핑 원문)·`meas_target_resolved`(매칭된 alias)·`meas_overlap_*`에서 확인할 수 있습니다.
+  `meas_target_items`(매핑 원문 = CAT2 이름들)·`meas_target_resolved`(그 CAT2에 속한 실제 항목 alias)·`meas_overlap_*`에서 확인할 수 있습니다.
 - AI에 전달되는 finding에도 이상 pt의 **위치(`spec_out_positions`: wafer·CHIP_X/Y·PGM(pt))와
   PCHK 겹침(`meas_overlap_*`)** 이 포함되므로, AI는 어느 wafer/PGM(pt)에서 겹쳤는지 명시해 서술합니다.
 
