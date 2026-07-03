@@ -1192,9 +1192,9 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
         _add_wafer_circle(ax, _circ, color='#000000', lw=1.0)
         # aspect=ky/kx로 맞춰 wafer 경계가 정원으로 보이게(찌그러짐 방지)
         ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect(_wfmap_aspect(_circ), adjustable='box'); ax.set_facecolor('white')
-        # chip x 정방향(chip #1=왼쪽, 큰 번호=오른쪽): xlim 역순 + 경계까지 포함(안 잘리게)
-        ax.set_xlim(_xhi, _xlo)
-        ax.set_ylim(_ylo, _yhi)
+        # 방향: 왼쪽=chip_x_adj 작은 쪽(정방향), 위쪽=chip_y_adj 작은 쪽(y축 반전). 경계까지 포함(안 잘리게)
+        ax.set_xlim(_xlo, _xhi)
+        ax.set_ylim(_yhi, _ylo)
         for sp in ax.spines.values():
             sp.set_visible(False)
         fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
@@ -1321,9 +1321,9 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
         _add_wafer_circle(ax, _circ, color='#000000', lw=1.0)
         # 흰 배경(회색 격자 제거) + 눈금/스파인 없음 → 경계 + shot map만 표시. aspect로 정원 유지
         ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect(_wfmap_aspect(_circ), adjustable='box'); ax.set_facecolor('white')
-        # chip x 정방향(chip #1=왼쪽): xlim 역순 + 경계까지 포함(안 잘리게)
-        ax.set_xlim(_xhi, _xlo)
-        ax.set_ylim(_ylo, _yhi)
+        # 방향: 왼쪽=chip_x_adj 작은 쪽, 위쪽=chip_y_adj 작은 쪽(y축 반전). 경계까지 포함(안 잘리게)
+        ax.set_xlim(_xlo, _xhi)
+        ax.set_ylim(_yhi, _ylo)
         for sp in ax.spines.values():
             sp.set_visible(False)
         fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
@@ -1465,9 +1465,9 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
     _add_wafer_circle(ax, _circ, color='#000000', lw=1.0)
     ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect(_wfmap_aspect(_circ), adjustable='box')
     ax.set_facecolor('white')
-    # 경계까지 포함하도록 축 범위 지정(안 잘리게) — chip #1 왼쪽(역순)
-    ax.set_xlim(_xhi, _xlo)
-    ax.set_ylim(_ylo, _yhi)
+    # 방향: 왼쪽=chip_x_adj 작은 쪽, 위쪽=chip_y_adj 작은 쪽(y축 반전). 경계까지 포함(안 잘리게)
+    ax.set_xlim(_xlo, _xhi)
+    ax.set_ylim(_yhi, _ylo)
     for sp in ax.spines.values():
         sp.set_visible(False)
     _png = _wfmap_png_bytes(fig, dpi)   # 팔레트 양자화(PNG-8)로 용량 최소화
@@ -2235,9 +2235,9 @@ def _render_item_charts(task):
                 ax.set_aspect(_wfmap_aspect(_circ_ppt), adjustable='box')   # aspect=ky/kx → 정원 유지
                 for spine in ax.spines.values():
                     spine.set_visible(False)
-                # chip x 정방향(chip #1=왼쪽, 13=오른쪽): HTML WF MAP과 동일하게 xlim 역순 + 경계 포함
-                ax.set_xlim(_px_hi, _px_lo)
-                ax.set_ylim(_py_lo, _py_hi)
+                # 방향: 왼쪽=chip_x_adj 작은 쪽, 위쪽=chip_y_adj 작은 쪽(y축 반전). HTML과 동일. 경계 포함
+                ax.set_xlim(_px_lo, _px_hi)
+                ax.set_ylim(_py_hi, _py_lo)
 
         fig_map.subplots_adjust(left=0.02, right=0.99, top=0.97, bottom=0.06)
         # 칩 격자가 선명하도록 해상도 상향
