@@ -1046,21 +1046,52 @@ def _add_wafer_circle(ax, params, color='#9aa4b0', lw=0.7, zorder=0):
         pass
 
 
-def _wfmap_marker_size(size_in, span, fill=1.15, floor=0.5):
-    """WF MAP shot(die) marker 크기(pt^2) — 측정 pt 수와 무관하게 동일 크기로 고정.
+def _wfmap_shot_pitch(vals):
+    """인접 shot 센터 간 거리(격자 pitch) — 정렬된 unique 좌표값의 '양수 diff 중앙값'.
 
-    die 1칸 = 좌표 1단위(칩 index 간격). 측정 밀도(nunique)가 아니라 '축 표시범위(span)'
-    (= Chip_Radius 기반 wafer 원 지름, 제품별 상수)로 계산하므로 pt가 많든 적든 shot 크기가 같다.
-      chip_pt = size_in / span * 72  (die 한 변의 display point 수) → s = (chip_pt*fill)^2
+    shot 사이 간격이 없다고 보고, 이 pitch를 shot의 가로/세로 크기로 써서 빈틈없이 채운다.
+    측정 pt 수(밀도)와 무관하게 격자 간격 자체를 쓰므로 shot 크기가 항목별로 동일하다.
     """
     try:
-        span = float(span)
-    except (TypeError, ValueError):
-        span = 1.0
-    if not (span > 0):
-        span = 1.0
-    chip_pt = size_in / span * 72.0
-    return max(floor, (chip_pt * fill) ** 2)
+        import numpy as _np
+        u = _np.unique(_np.round(
+            pd.to_numeric(pd.Series(vals), errors='coerce').dropna().to_numpy(dtype=float), 6))
+        if len(u) < 2:
+            return 1.0
+        dif = _np.diff(u); dif = dif[dif > 0]
+        return float(_np.median(dif)) if len(dif) else 1.0
+    except Exception:
+        return 1.0
+
+
+def _draw_wfmap_shots(ax, xs, ys, px, py, values=None, colors=None,
+                      cmap=None, norm=None, zorder=1):
+    """shot을 인접 센터 간 거리(px,py) 크기의 '사각형'으로 빈틈없이 그린다(shot 사이 gap 제거).
+
+    데이터 좌표계에서 한 변이 pitch(px/py)인 사각형을 각 center에 배치하면, aspect가 어떻든
+    인접 사각형의 변이 맞닿아 위/아래·좌우 줄(간격)이 생기지 않는다.
+    values+cmap+norm → 연속 컬러맵(정상 WF MAP) / colors → 개별 색(spec-out). PatchCollection 반환.
+    """
+    try:
+        import numpy as _np
+        from matplotlib.collections import PatchCollection
+        from matplotlib.patches import Rectangle
+        xs = _np.asarray(xs, dtype=float); ys = _np.asarray(ys, dtype=float)
+        if len(xs) == 0:
+            return None
+        _hx, _hy = float(px) / 2.0, float(py) / 2.0
+        _rects = [Rectangle((x - _hx, y - _hy), px, py) for x, y in zip(xs, ys)]
+        if values is not None:
+            pc = PatchCollection(_rects, cmap=cmap, norm=norm,
+                                 edgecolors='none', linewidths=0, zorder=zorder)
+            pc.set_array(_np.asarray(values, dtype=float))
+        else:
+            pc = PatchCollection(_rects, facecolors=colors,
+                                 edgecolors='none', linewidths=0, zorder=zorder)
+        ax.add_collection(pc)
+        return pc
+    except Exception:
+        return None
 
 
 def _wfmap_axis_limits(gx0, gx1, gy0, gy1, xpad, ypad, circ, margin_frac=0.08):
@@ -1153,9 +1184,9 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
     _xr = (_gx1 - _gx0) or 1.0; _yr = (_gy1 - _gy0) or 1.0
     _xpad = _xr / max(int(d[cx].nunique()) - 1, 1) * 0.7 if d[cx].nunique() > 1 else _xr * 0.1
     _ypad = _yr / max(int(d[cy].nunique()) - 1, 1) * 0.7 if d[cy].nunique() > 1 else _yr * 0.1
-    # 축 표시범위(원 포함) — 모든 wafer 공통. shot marker 크기는 이 span 기준(측정 pt 수 무관 동일)
+    # 축 표시범위(원 포함) — 모든 wafer 공통. shot은 인접 센터 간격(pitch) 크기 사각형으로 그림(gap 제거)
     _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(_gx0, _gx1, _gy0, _gy1, _xpad, _ypad, _circ)
-    s = _wfmap_marker_size(size_in, max(_xhi - _xlo, _yhi - _ylo), fill=1.15, floor=1.0)
+    _pit_x = _wfmap_shot_pitch(d[cx]); _pit_y = _wfmap_shot_pitch(d[cy])
 
     out = {}
     # by_lot: (lot, wafer)별로 그려 형제 lot을 분리. 아니면 wafer별(lot은 첫 측정 선택).
@@ -1185,8 +1216,8 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
         if len(g) == 0:
             continue
         fig, ax = plt.subplots(figsize=(size_in, size_in))
-        ax.scatter(g[cx].astype(float), g[cy].astype(float), c=g[item].astype(float),
-                   cmap=cmap, norm=norm, s=s, marker='s', linewidths=0)
+        _draw_wfmap_shots(ax, g[cx].astype(float).values, g[cy].astype(float).values,
+                          _pit_x, _pit_y, values=g[item].astype(float).values, cmap=cmap, norm=norm)
         # 원 테두리: radius 기반 원점·150mm 원을 '진한 검정'으로. 내부 배경색 없음(흰색)
         #  — 칩(shot) 컬러가 내부를 채우므로 별도 배경 fill 불필요.
         _add_wafer_circle(ax, _circ, color='#000000', lw=1.0)
@@ -1308,16 +1339,16 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
     xr = (gx1 - gx0) or 1.0; yr = (gy1 - gy0) or 1.0
     xpad = xr / max(int(d[cx].nunique()) - 1, 1) * 0.7 if d[cx].nunique() > 1 else xr * 0.1
     ypad = yr / max(int(d[cy].nunique()) - 1, 1) * 0.7 if d[cy].nunique() > 1 else yr * 0.1
-    # 축 표시범위(원 포함) — 모든 맵 공통. shot marker 크기는 이 span 기준(측정 pt 수 무관 동일)
+    # 축 표시범위(원 포함) — 모든 맵 공통. shot은 인접 센터 간격(pitch) 크기 사각형으로 그림(gap 제거)
     _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(gx0, gx1, gy0, gy1, xpad, ypad, _circ)
-    s = _wfmap_marker_size(size_in, max(_xhi - _xlo, _yhi - _ylo), fill=1.15, floor=1.0)
+    _pit_x = _wfmap_shot_pitch(d[cx]); _pit_y = _wfmap_shot_pitch(d[cy])
 
     res = []
     for gd, g in ordered:
         fig, ax = plt.subplots(figsize=(size_in, size_in))
         colors = np.where(g['_specout'].values, '#d32f2f', '#bdbdbd')
-        ax.scatter(g[cx].astype(float), g[cy].astype(float), c=colors,
-                   s=s, marker='s', linewidths=0)
+        _draw_wfmap_shots(ax, g[cx].astype(float).values, g[cy].astype(float).values,
+                          _pit_x, _pit_y, colors=colors)
         _add_wafer_circle(ax, _circ, color='#000000', lw=1.0)
         # 흰 배경(회색 격자 제거) + 눈금/스파인 없음 → 경계 + shot map만 표시. aspect로 정원 유지
         ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect(_wfmap_aspect(_circ), adjustable='box'); ax.set_facecolor('white')
@@ -1454,14 +1485,16 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
     _xr = (_gx1 - _gx0) or 1.0; _yr = (_gy1 - _gy0) or 1.0
     _xpad = _xr / max(int(d[cx].nunique()) - 1, 1) * 0.7 if d[cx].nunique() > 1 else _xr * 0.1
     _ypad = _yr / max(int(d[cy].nunique()) - 1, 1) * 0.7 if d[cy].nunique() > 1 else _yr * 0.1
-    # 축 표시범위(원 포함) 기준으로 shot marker 크기 고정(측정 pt 수 무관 동일)
+    # 축 표시범위(원 포함) — shot은 인접 센터 간격(pitch) 크기 사각형으로 그림(gap 제거)
     _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(_gx0, _gx1, _gy0, _gy1, _xpad, _ypad, _circ)
-    s = _wfmap_marker_size(size_in, max(_xhi - _xlo, _yhi - _ylo), fill=1.15, floor=1.0)
+    _pit_x = _wfmap_shot_pitch(d[cx]); _pit_y = _wfmap_shot_pitch(d[cy])
+    import matplotlib.colors as _mcolors
+    _norm_idx = _mcolors.Normalize(vmin=vmin, vmax=vmax)
 
     fig, ax = plt.subplots(figsize=(size_in, size_in))
-    ax.scatter(g[cx].astype(float), g[cy].astype(float), c=g[item].astype(float),
-               cmap=cmap or _wfmap_cmap(direction), vmin=vmin, vmax=vmax,
-               s=s, marker='s', linewidths=0)
+    _draw_wfmap_shots(ax, g[cx].astype(float).values, g[cy].astype(float).values,
+                      _pit_x, _pit_y, values=g[item].astype(float).values,
+                      cmap=(cmap or _wfmap_cmap(direction)), norm=_norm_idx)
     _add_wafer_circle(ax, _circ, color='#000000', lw=1.0)
     ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect(_wfmap_aspect(_circ), adjustable='box')
     ax.set_facecolor('white')
@@ -2197,9 +2230,8 @@ def _render_item_charts(task):
                     for c in range(FIXED_N_WAF)}
 
         render_cell = 0.55                             # 셀(=wafer 1칸) 크기(인치) — 25칸 고정
-        # shot marker: 측정 pt 수(nunique)와 무관하게 die 1칸 크기로 고정 → 축 표시범위(원 기준) 사용
-        marker_s = _wfmap_marker_size(render_cell, max(_px_hi - _px_lo, _py_hi - _py_lo),
-                                      fill=0.9, floor=0.5)
+        # shot: 인접 센터 간격(pitch) 크기 사각형으로 그려 gap 없이(측정 pt 수와 무관하게 동일 크기)
+        _shot_px = _wfmap_shot_pitch(item_df[map_x]); _shot_py = _wfmap_shot_pitch(item_df[map_y])
         fig_disp_w = grid_cols * render_cell           # 서브플롯 영역 폭(항상 25*cell)
         fig_h = grid_rows * render_cell + 0.15         # 하단 wafer 번호 라벨 여백
 
@@ -2214,9 +2246,10 @@ def _render_item_charts(task):
                 sub_grp, w, sub_name = cell_map[(r, c)]
                 w_grp = sub_grp[sub_grp[w_col] == w]
                 if not w_grp.empty:   # 측정된 wafer만 die 산점, 없으면 빈 칸
-                    sc = ax.scatter(w_grp[map_x], w_grp[map_y], c=w_grp[item_name],
-                                    cmap=_wfmap_cmap(direction), norm=wfmap_norm,
-                                    s=marker_s, marker='s', alpha=1.0, linewidths=0)
+                    sc = _draw_wfmap_shots(ax, w_grp[map_x].astype(float).values,
+                                           w_grp[map_y].astype(float).values, _shot_px, _shot_py,
+                                           values=w_grp[item_name].astype(float).values,
+                                           cmap=_wfmap_cmap(direction), norm=wfmap_norm)
                     _add_wafer_circle(ax, _circ_ppt, lw=0.5)   # 배경 wafer 원
                 ax.set_facecolor('white')
                 # 마지막(맨 아래) PGM 행에만 wafer 번호 표기
