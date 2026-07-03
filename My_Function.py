@@ -3289,10 +3289,10 @@ def insert_plots(merged_df, prs, description_image_info_dict,
 
 
 def getData_with_retry(params, custom_columns=None, user_name=None,
-                       timeout_sec=1200, retry_wait_sec=300, max_retries=3, long_wait_sec=3600):
+                       timeout_sec=1800, retry_wait_sec=300, max_retries=3, long_wait_sec=3600):
     """bigdatalake `getData`를 타임아웃 + 재시도로 감싼다(성공할 때까지 반환하지 않음).
 
-    - 쿼리 1회가 timeout_sec(기본 20분)를 넘으면 강제 중단(daemon thread 포기)하고 재시도.
+    - 쿼리 1회가 timeout_sec(기본 30분)를 넘으면 강제 중단(daemon thread 포기)하고 재시도.
     - 에러/타임아웃 시: 처음 max_retries(3)회까지는 retry_wait_sec(5분) 간격으로 재시도.
     - 3회 모두 실패하면 그 이후로는 long_wait_sec(1시간) 간격으로 계속 재시도(성공할 때까지).
     → API 오류로 터미널이 멈추지 않고 자동 복구한다.
