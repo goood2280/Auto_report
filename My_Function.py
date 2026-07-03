@@ -1046,6 +1046,23 @@ def _add_wafer_circle(ax, params, color='#9aa4b0', lw=0.7, zorder=0):
         pass
 
 
+def _wfmap_marker_size(size_in, span, fill=1.15, floor=0.5):
+    """WF MAP shot(die) marker 크기(pt^2) — 측정 pt 수와 무관하게 동일 크기로 고정.
+
+    die 1칸 = 좌표 1단위(칩 index 간격). 측정 밀도(nunique)가 아니라 '축 표시범위(span)'
+    (= Chip_Radius 기반 wafer 원 지름, 제품별 상수)로 계산하므로 pt가 많든 적든 shot 크기가 같다.
+      chip_pt = size_in / span * 72  (die 한 변의 display point 수) → s = (chip_pt*fill)^2
+    """
+    try:
+        span = float(span)
+    except (TypeError, ValueError):
+        span = 1.0
+    if not (span > 0):
+        span = 1.0
+    chip_pt = size_in / span * 72.0
+    return max(floor, (chip_pt * fill) ** 2)
+
+
 def _wfmap_axis_limits(gx0, gx1, gy0, gy1, xpad, ypad, circ, margin_frac=0.08):
     """WF MAP 축 범위 = 데이터 범위 + wafer 경계(타원)를 '모두' 포함하는 (xlo,xhi,ylo,yhi).
 
@@ -1129,9 +1146,6 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
     _circ = _wafer_circle_params(d, cx, cy, crad)   # 배경 wafer 원(150mm)
 
     norm = _wfmap_norm(direction, spec_low, spec_high, d[item])
-    gdim = max(int(d[cx].nunique()), int(d[cy].nunique()), 1)
-    chip_pt = size_in / gdim * 72.0
-    s = max(1.0, (chip_pt * 1.15) ** 2)   # 셀을 꽉 채워 칩 사이 배경(흰 격자선)이 안 보이게
     cmap = _wfmap_cmap(direction)
     # 전체 wafer 격자가 잘리지 않도록 공통 축범위 + 반칩 여백 (가장자리 칩 보존)
     _gx0, _gx1 = float(d[cx].min()), float(d[cx].max())
@@ -1139,6 +1153,9 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
     _xr = (_gx1 - _gx0) or 1.0; _yr = (_gy1 - _gy0) or 1.0
     _xpad = _xr / max(int(d[cx].nunique()) - 1, 1) * 0.7 if d[cx].nunique() > 1 else _xr * 0.1
     _ypad = _yr / max(int(d[cy].nunique()) - 1, 1) * 0.7 if d[cy].nunique() > 1 else _yr * 0.1
+    # 축 표시범위(원 포함) — 모든 wafer 공통. shot marker 크기는 이 span 기준(측정 pt 수 무관 동일)
+    _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(_gx0, _gx1, _gy0, _gy1, _xpad, _ypad, _circ)
+    s = _wfmap_marker_size(size_in, max(_xhi - _xlo, _yhi - _ylo), fill=1.15, floor=1.0)
 
     out = {}
     # by_lot: (lot, wafer)별로 그려 형제 lot을 분리. 아니면 wafer별(lot은 첫 측정 선택).
@@ -1176,7 +1193,6 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
         # aspect=ky/kx로 맞춰 wafer 경계가 정원으로 보이게(찌그러짐 방지)
         ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect(_wfmap_aspect(_circ), adjustable='box'); ax.set_facecolor('white')
         # chip x 정방향(chip #1=왼쪽, 큰 번호=오른쪽): xlim 역순 + 경계까지 포함(안 잘리게)
-        _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(_gx0, _gx1, _gy0, _gy1, _xpad, _ypad, _circ)
         ax.set_xlim(_xhi, _xlo)
         ax.set_ylim(_ylo, _yhi)
         for sp in ax.spines.values():
@@ -1286,15 +1302,15 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
     else:
         ordered = tgt + rest
 
-    gdim = max(int(d[cx].nunique()), int(d[cy].nunique()), 1)
-    chip_pt = size_in / gdim * 72.0
-    s = max(1.0, (chip_pt * 1.15) ** 2)   # 셀을 꽉 채워 칩 사이 배경(흰 격자선)이 안 보이게
     # 전체 wafer 격자가 잘리지 않도록 공통 축범위 + 반칩 여백 (모든 소형맵 동일 범위)
     gx0, gx1 = float(d[cx].min()), float(d[cx].max())
     gy0, gy1 = float(d[cy].min()), float(d[cy].max())
     xr = (gx1 - gx0) or 1.0; yr = (gy1 - gy0) or 1.0
     xpad = xr / max(int(d[cx].nunique()) - 1, 1) * 0.7 if d[cx].nunique() > 1 else xr * 0.1
     ypad = yr / max(int(d[cy].nunique()) - 1, 1) * 0.7 if d[cy].nunique() > 1 else yr * 0.1
+    # 축 표시범위(원 포함) — 모든 맵 공통. shot marker 크기는 이 span 기준(측정 pt 수 무관 동일)
+    _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(gx0, gx1, gy0, gy1, xpad, ypad, _circ)
+    s = _wfmap_marker_size(size_in, max(_xhi - _xlo, _yhi - _ylo), fill=1.15, floor=1.0)
 
     res = []
     for gd, g in ordered:
@@ -1306,7 +1322,6 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
         # 흰 배경(회색 격자 제거) + 눈금/스파인 없음 → 경계 + shot map만 표시. aspect로 정원 유지
         ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect(_wfmap_aspect(_circ), adjustable='box'); ax.set_facecolor('white')
         # chip x 정방향(chip #1=왼쪽): xlim 역순 + 경계까지 포함(안 잘리게)
-        _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(gx0, gx1, gy0, gy1, xpad, ypad, _circ)
         ax.set_xlim(_xhi, _xlo)
         ax.set_ylim(_ylo, _yhi)
         for sp in ax.spines.values():
@@ -1434,14 +1449,14 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
     vmin = float(vals.quantile(0.01)); vmax = float(vals.quantile(0.99))
     if not (vmax > vmin):
         vmax = vmin + 1e-9
-    gdim = max(int(d[cx].nunique()), int(d[cy].nunique()), 1)
-    chip_pt = size_in / gdim * 72.0
-    s = max(1.0, (chip_pt * 1.15) ** 2)   # 셀을 꽉 채워 칩 사이 배경(흰 격자선)이 안 보이게
     _gx0, _gx1 = float(d[cx].min()), float(d[cx].max())
     _gy0, _gy1 = float(d[cy].min()), float(d[cy].max())
     _xr = (_gx1 - _gx0) or 1.0; _yr = (_gy1 - _gy0) or 1.0
     _xpad = _xr / max(int(d[cx].nunique()) - 1, 1) * 0.7 if d[cx].nunique() > 1 else _xr * 0.1
     _ypad = _yr / max(int(d[cy].nunique()) - 1, 1) * 0.7 if d[cy].nunique() > 1 else _yr * 0.1
+    # 축 표시범위(원 포함) 기준으로 shot marker 크기 고정(측정 pt 수 무관 동일)
+    _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(_gx0, _gx1, _gy0, _gy1, _xpad, _ypad, _circ)
+    s = _wfmap_marker_size(size_in, max(_xhi - _xlo, _yhi - _ylo), fill=1.15, floor=1.0)
 
     fig, ax = plt.subplots(figsize=(size_in, size_in))
     ax.scatter(g[cx].astype(float), g[cy].astype(float), c=g[item].astype(float),
@@ -1451,7 +1466,6 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
     ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect(_wfmap_aspect(_circ), adjustable='box')
     ax.set_facecolor('white')
     # 경계까지 포함하도록 축 범위 지정(안 잘리게) — chip #1 왼쪽(역순)
-    _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(_gx0, _gx1, _gy0, _gy1, _xpad, _ypad, _circ)
     ax.set_xlim(_xhi, _xlo)
     ax.set_ylim(_ylo, _yhi)
     for sp in ax.spines.values():
@@ -2182,8 +2196,9 @@ def _render_item_charts(task):
                     for c in range(FIXED_N_WAF)}
 
         render_cell = 0.55                             # 셀(=wafer 1칸) 크기(인치) — 25칸 고정
-        chip_pt = render_cell / gdim * 72.0            # 칩 1개 한 변(pt)
-        marker_s = max(0.5, (chip_pt * 0.9) ** 2)      # 격자가 커도(13x13) 겹치지 않게 자동 축소
+        # shot marker: 측정 pt 수(nunique)와 무관하게 die 1칸 크기로 고정 → 축 표시범위(원 기준) 사용
+        marker_s = _wfmap_marker_size(render_cell, max(_px_hi - _px_lo, _py_hi - _py_lo),
+                                      fill=0.9, floor=0.5)
         fig_disp_w = grid_cols * render_cell           # 서브플롯 영역 폭(항상 25*cell)
         fig_h = grid_rows * render_cell + 0.15         # 하단 wafer 번호 라벨 여백
 
