@@ -1644,8 +1644,11 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         if _when_ok:
                             _g1, _g2 = _r['compare_disp']
                             _v1, _v2 = _grp_disp(_g1), _grp_disp(_g2)
-                            _big = f"[{', '.join(_g1)}]" if _v1 >= _v2 else f"[{', '.join(_g2)}]"
-                            _cmp = f"산포 비교: [{', '.join(_g1)}]={_v1:.1f}배 vs [{', '.join(_g2)}]={_v2:.1f}배 → {_big} 산포가 더 큼"
+                            # 표시명 후처리(suffix/prefix 제거) 적용해 그룹 항목명 표기
+                            _g1d = ', '.join(_disp(_x) for _x in _g1)
+                            _g2d = ', '.join(_disp(_x) for _x in _g2)
+                            _big = f"[{_g1d}]" if _v1 >= _v2 else f"[{_g2d}]"
+                            _cmp = f"산포 비교: [{_g1d}]={_v1:.1f}배 vs [{_g2d}]={_v2:.1f}배 → {_big} 산포가 더 큼"
                             _lvl = 'CRITICAL' if str(_r.get('level', '주의')).strip() == '이상' else 'WARNING'
                             _det = _cmp + ((' · ' + _r['note']) if _r.get('note') else '')
                             if _r.get('link'):

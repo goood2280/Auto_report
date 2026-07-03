@@ -3113,10 +3113,10 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 row = reformatter[reformatter['ALIAS'] == spec_name].iloc[0]
                 cat = str(row.get('CATEGORY', '')).strip().upper()
                 if cat == 'REAL':
-                    real_items_str = str(row.get('ITEMID', ''))
+                    real_items_str = display_name(str(row.get('ITEMID', '')))   # 표시명 후처리(suffix/prefix 제거)
                 elif cat == 'ADDP':
                     _leaf = _addp_leaf_refs(spec_name)             # 최종 leaf alias(재귀 해소)
-                    real_items_str = ", ".join(_leaf_to_itemids(_leaf))
+                    real_items_str = ", ".join(display_name(_x) for _x in _leaf_to_itemids(_leaf))
 
             # ---- 1. HEADER & INDEX NAME (Title) ----
             header_shape = slide.shapes.add_shape(1, Inches(0), Inches(0), prs.slide_width, Inches(0.58))
