@@ -853,7 +853,7 @@ def main():
                         prs_low_qual = insert_score_board(VIP_group_lw, prs_low_qual, target_lot_id, ' / '.join([target_lot_id, target_step_merged]), spec_data=spec_data, config=GLOBAL_CONFIG)
 
                         # 1-3. BoxPlot 투입 - 메일링 버전 (description dict는 랏 루프 밖에서 1회 파싱)
-                        prs_low_qual, metrics_dict = insert_plots(merged_df, prs_low_qual, description_image_info_dict_low_qual, target_lot_id, target_root_lot_id, target_DC_step, target_DC_step_id, spec_data, img_quality = 12, ref=False, reformatter=reformatter, dpi=GLOBAL_CONFIG.ppt_chart_dpi)
+                        prs_low_qual, metrics_dict, item_slide_map = insert_plots(merged_df, prs_low_qual, description_image_info_dict_low_qual, target_lot_id, target_root_lot_id, target_DC_step, target_DC_step_id, spec_data, img_quality = 12, ref=False, reformatter=reformatter, dpi=GLOBAL_CONFIG.ppt_chart_dpi)
 
                         # 1-3b. 코드 통계 분석(findings) — HTML [0]와 PPT 상세 페이지에 공용 사용
                         code_findings = []
@@ -873,7 +873,8 @@ def main():
                             prs_low_qual = insert_findings_page(
                                 prs_low_qual, code_findings, after_index=1 + _sb_pages,
                                 main_vehicle=vehicle,
-                                radius_zones=GLOBAL_CONFIG.get('radius_zones', [60, 100]))
+                                radius_zones=GLOBAL_CONFIG.get('radius_zones', [60, 100]),
+                                item_slide_map=item_slide_map)
                         except Exception as fe:
                             print(f"[WARN] Anomaly 상세 페이지 삽입 스킵: {fe}")
 

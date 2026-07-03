@@ -768,8 +768,32 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
     return prs
 
 
+def _add_internal_slide_link(run, source_slide, target_slide):
+    """run 텍스트에 '같은 PPT 내 target_slide로 점프'하는 내부 하이퍼링크를 건다.
+
+    PowerPoint 슬라이드 점프는 a:hlinkClick(action=ppaction://hlinksldjump) + 대상 슬라이드
+    파트로의 relationship(r:id)으로 구현한다. 슬라이드 순서가 바뀌어도 relationship이
+    파트를 직접 가리키므로 링크는 유지된다.
+    """
+    try:
+        from pptx.oxml.ns import qn
+        from pptx.opc.constants import RELATIONSHIP_TYPE as _RT
+        rId = source_slide.part.relate_to(target_slide.part, _RT.SLIDE)
+        rPr = run._r.get_or_add_rPr()
+        for _h in rPr.findall(qn('a:hlinkClick')):
+            rPr.remove(_h)
+        _hl = rPr.makeelement(qn('a:hlinkClick'), {})
+        _hl.set(qn('r:id'), rId)
+        _hl.set('action', 'ppaction://hlinksldjump')
+        rPr.append(_hl)   # rPr 자식 스키마상 hlinkClick은 fill/latin 뒤 → append로 순서 유지
+        return True
+    except Exception as _e:
+        print(f"[WARN] 내부 슬라이드 링크 실패: {_e}")
+        return False
+
+
 def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세 (통계 자동 분석)",
-                         main_vehicle=None, radius_zones=(60, 100)):
+                         main_vehicle=None, radius_zones=(60, 100), item_slide_map=None):
     """코드 통계 분석 Finding 전체를 1개 슬라이드로 만들어 Score Board 뒤에 삽입.
 
     HTML [0]에는 우선순위 상위 N건만 보이고, 전체 상세는 이 PPT 페이지를 참조.
@@ -871,10 +895,30 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
                 r0 = p.add_run(); r0.text = "● "
                 r0.font.bold = True; r0.font.size = Pt(11)
                 r0.font.color.rgb = sev_dot.get(sev, RGBColor(0x5D, 0x6D, 0x7E)); r0.font.name = FONT
-                r1 = p.add_run()
-                r1.text = f"{sev_label.get(sev, sev)} {f.get('title', '')}"
-                r1.font.bold = True; r1.font.size = Pt(11)
-                r1.font.color.rgb = RGBColor(0x1A, 0x1A, 0x1A); r1.font.name = FONT
+                # 제목: 아이템 이름 부분에 '해당 차트 슬라이드로 점프'하는 내부 하이퍼링크 부여
+                _full_title = f"{sev_label.get(sev, sev)} {f.get('title', '')}"
+                _it_raw = f.get('item', '')
+                _it_disp = display_name(_it_raw) if _it_raw else ''
+                _tgt_slide = item_slide_map.get(_it_raw) if (item_slide_map and _it_raw) else None
+                if _tgt_slide is not None and _it_disp and (_it_disp in _full_title):
+                    _pos = _full_title.find(_it_disp)
+                    for _txt, _islink in ((_full_title[:_pos], False),
+                                          (_it_disp, True),
+                                          (_full_title[_pos + len(_it_disp):], False)):
+                        if not _txt:
+                            continue
+                        _rr = p.add_run(); _rr.text = _txt
+                        _rr.font.bold = True; _rr.font.size = Pt(11); _rr.font.name = FONT
+                        if _islink:
+                            _rr.font.color.rgb = RGBColor(0x00, 0x33, 0xCC); _rr.font.underline = True
+                            _add_internal_slide_link(_rr, slide, _tgt_slide)
+                        else:
+                            _rr.font.color.rgb = RGBColor(0x1A, 0x1A, 0x1A)
+                else:
+                    r1 = p.add_run()
+                    r1.text = _full_title
+                    r1.font.bold = True; r1.font.size = Pt(11)
+                    r1.font.color.rgb = RGBColor(0x1A, 0x1A, 0x1A); r1.font.name = FONT
                 det = _strip(f.get("detail", ""))
                 if det:
                     r2 = p.add_run(); r2.text = "  —  " + det
@@ -2578,6 +2622,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
 
     current_cat = None
     _pending_desc = None   # (cat2, entry): 데이터가 실제로 찍힌 CAT2에만 간지 삽입하기 위한 대기 슬롯
+    item_slide_map = {}    # {item_name: chart slide} — Anomaly 상세의 아이템명 내부 링크 대상
     metrics_dict = {}
 
     import os
@@ -2885,6 +2930,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
 
         try:
             slide = prs.slides.add_slide(prs.slide_layouts[6])
+            item_slide_map[item_name] = slide   # Anomaly 상세에서 이 아이템명 → 이 차트 슬라이드로 링크
 
             # 슬라이드 배경색 설정 (흰색)
             slide_bg = slide.background
@@ -3239,7 +3285,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
         except Exception as _e:
             print(f"[WARN] Index Aggregation Table 생성 실패: {_e}")
 
-    return prs, metrics_dict
+    return prs, metrics_dict, item_slide_map
 
 
 def getData_with_retry(params, custom_columns=None, user_name=None,
