@@ -1037,16 +1037,21 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
     return prs
 
 
-def _wafer_circle_params(df, x_col, y_col, rad_col=None, wafer_radius_mm=150.0):
+def _wafer_circle_params(df, x_col, y_col, rad_col=None, wafer_radius_mm=150.0,
+                         px=None, py=None):
     """WF MAP wafer 경계 파라미터 (cx, cy, semi_x, semi_y, aspect)를 '플롯 좌표계' 단위로 산출.
 
-    shot 격자의 x/y 물리 피치가 1:1이 아니면 등방 원을 그리면 찌그러진다. Chip_Radius(mm)와
-    좌표 관계 r^2 = A*(x-cx)^2 + B*(y-cy)^2 (A=kx^2, B=ky^2)를 선형 최소자승으로 fit해 x/y
-    스케일 kx, ky를 각각 구한다.
-      - wafer_radius_mm(=150) 경계의 x/y 반축: semi_x = 150/kx, semi_y = 150/ky
-      - aspect = ky/kx (matplotlib set_aspect 값). 이 aspect로 그리면 정원(true circle)로 보인다.
-    선형화: r^2 = A*x^2 + B*y^2 + p*x + q*y + C (cx=-p/2A, cy=-q/2B).
-    radius가 없거나 fit이 비합리적이면 등방 bounding 원(semi_x=semi_y, aspect=1.0)로 폴백. 무효면 None.
+    두 단계로 나눠 계산한다:
+      (1) 중심(cx,cy)·종횡비(aspect=ky/kx): Chip_Radius(mm) fit으로 물리적 wafer 중심과
+          x/y 스케일비를 구한다. r^2 = A*x^2 + B*y^2 + p*x + q*y + C (cx=-p/2A, cy=-q/2B,
+          kx=√A, ky=√B). radius가 없거나 fit이 비합리적이면 중심=좌표 평균, aspect=1.0.
+      (2) 반지름(semi_x,semi_y): '모든 shot 사각형의 꼭짓점'이 원 안에 들어오도록 크기를 정한다.
+          shot은 pitch(px,py) 크기 사각형으로 그려지므로 가장자리 shot의 '중심'이 아니라 '꼭짓점'
+          까지 포함해야 원 밖으로 삐져나가지 않는다. 고정 150mm 스케일에 의존하지 않고 실제
+          shot 좌표+반pitch로 경계를 잡아, 중심/스케일 오차와 무관하게 모든 shot을 담는다.
+          타원 metric: t = max_shot √( ((|x-cx|+hx)/aspect)² + (|y-cy|+hy)² ),
+          semi_y=t, semi_x=aspect·t (semi_x/semi_y=aspect → set_aspect 후 정원으로 보임).
+    px,py 미전달 시 좌표 unique 간격(_wfmap_shot_pitch)으로 pitch를 추정한다. 좌표 무효면 None.
     """
     try:
         import numpy as _np
@@ -1060,7 +1065,9 @@ def _wafer_circle_params(df, x_col, y_col, rad_col=None, wafer_radius_mm=150.0):
         x = x[m0].to_numpy(dtype=float); y = y[m0].to_numpy(dtype=float)
         cxg = float(x.mean()); cyg = float(y.mean())
         _dx = float(x.max() - x.min()); _dy = float(y.max() - y.min())
-        max_dist = float(_np.sqrt((x - cxg) ** 2 + (y - cyg) ** 2).max())
+
+        # ── (1) 중심·aspect: Chip_Radius fit (실패 시 좌표 평균 중심·등방) ──
+        cx, cy, aspect = cxg, cyg, 1.0
         if rad_col and rad_col in df.columns:
             r = pd.to_numeric(df[rad_col], errors='coerce')[m0].to_numpy(dtype=float)
             fin = _np.isfinite(r)
@@ -1072,22 +1079,30 @@ def _wafer_circle_params(df, x_col, y_col, rad_col=None, wafer_radius_mm=150.0):
                     sol, *_ = _np.linalg.lstsq(M, rr ** 2, rcond=None)
                     A, B, p, q, C = [float(v) for v in sol]
                     if _np.isfinite(A) and _np.isfinite(B) and A > 0 and B > 0:
-                        cx = -p / (2.0 * A); cy = -q / (2.0 * B)
-                        kx = A ** 0.5; ky = B ** 0.5
-                        semi_x = wafer_radius_mm / kx; semi_y = wafer_radius_mm / ky
-                        aspect = ky / kx
-                        _okx = (_dx * 0.25) <= 2 * semi_x <= (_dx * 4.0) if _dx > 0 else True
-                        _oky = (_dy * 0.25) <= 2 * semi_y <= (_dy * 4.0) if _dy > 0 else True
-                        if (_np.isfinite([semi_x, semi_y, aspect, cx, cy]).all()
-                                and semi_x > 0 and semi_y > 0 and _okx and _oky
-                                and 0.2 <= aspect <= 5.0):
-                            return (cx, cy, semi_x, semi_y, aspect)
+                        _cx = -p / (2.0 * A); _cy = -q / (2.0 * B)
+                        _aspect = (B ** 0.5) / (A ** 0.5)   # ky/kx
+                        # fit 중심이 데이터 범위(±50% 여유) 안이고 aspect가 합리적일 때만 채택
+                        _cx_ok = (x.min() - 0.5 * (_dx or 1)) <= _cx <= (x.max() + 0.5 * (_dx or 1))
+                        _cy_ok = (y.min() - 0.5 * (_dy or 1)) <= _cy <= (y.max() + 0.5 * (_dy or 1))
+                        if (_np.isfinite([_cx, _cy, _aspect]).all()
+                                and 0.2 <= _aspect <= 5.0 and _cx_ok and _cy_ok):
+                            cx, cy, aspect = _cx, _cy, _aspect
                 except Exception:
                     pass
-        if max_dist > 0:
-            _r = max_dist * 1.03
-            return (cxg, cyg, _r, _r, 1.0)   # 폴백: 등방 bounding 원
-        return None
+
+        # ── (2) 반지름: 모든 shot 사각형 꼭짓점을 포함하는 최소 반축(+2% 여백) ──
+        hx = (float(px) if px else _wfmap_shot_pitch(x)) / 2.0
+        hy = (float(py) if py else _wfmap_shot_pitch(y)) / 2.0
+        ex = _np.abs(x - cx) + hx        # 각 shot의 x방향 최외곽(꼭짓점)
+        ey = _np.abs(y - cy) + hy        # 각 shot의 y방향 최외곽(꼭짓점)
+        t = float(_np.sqrt((ex / aspect) ** 2 + ey ** 2).max())
+        if not (_np.isfinite(t) and t > 0):
+            return None
+        t *= 1.02                        # 꼭짓점이 경계선에 딱 붙지 않도록 소폭 여백
+        semi_x = aspect * t; semi_y = t
+        if not _np.isfinite([semi_x, semi_y]).all() or semi_x <= 0 or semi_y <= 0:
+            return None
+        return (cx, cy, semi_x, semi_y, aspect)
     except Exception:
         return None
 
@@ -2398,6 +2413,21 @@ def _render_item_charts(task):
 
         veh_df = tdf[tdf['mask'] == main_vehicle] if has_mask else tdf
 
+        # ---- Trend: root_lot_id 그룹별 (색·마커) 배정 ----
+        #   · 같은 root_lot_id 형제 lot은 '동일 색·모양' → 그룹으로 묶여 보임
+        #   · 초록(vehicle 구름대)·빨강(리포트 lot 전용)은 팔레트에서 제외
+        #   · 색(12)·마커(7) 길이를 서로소로 두어 root가 많아도 (색,모양) 조합이 오래 안 겹침
+        _root_col = 'root_lot_id' if 'root_lot_id' in tdf.columns else lot_col
+        # 초록(vehicle)·빨강(리포트 lot)과 그 유사색은 제외 — 파랑/보라/갈색/청록/자홍/주황/회색 계열
+        _ROOT_COLORS = ['#1f77b4', '#9467bd', '#8c564b', '#17becf', '#e377c2', '#7f7f7f',
+                        '#ff7f0e', '#bcbd22', '#393b79', '#00868b', '#5254a3', '#636363']
+        _ROOT_MARKERS = ['o', 's', '^', 'D', 'v', 'P', 'X']
+        root_style = {}
+        if _root_col:
+            for _i, _rt in enumerate(sorted(tdf[_root_col].astype(str).dropna().unique())):
+                root_style[_rt] = (_ROOT_COLORS[_i % len(_ROOT_COLORS)],
+                                   _ROOT_MARKERS[_i % len(_ROOT_MARKERS)])
+
         def _draw_trend(ax):
             # vehicle 기준 1~99% 구름대 + median (main vehicle 데이터만)
             if len(veh_df) > 0:
@@ -2414,21 +2444,38 @@ def _render_item_charts(task):
                     ax.fill_between(roll.index, roll['q01'], roll['q99'], color=C_BAND, alpha=0.6, label=f'{main_vehicle} 1~99%', zorder=1)
                     # 3일 기준 rolling median 라인 (검정색)
                     ax.plot(roll.index, roll['median'], color='black', linewidth=1.5, alpha=1.0, zorder=6, label='3-day median')
-            # 색상 규칙: target lot=빨강(최상단) / 같은 vehicle 나머지=초록 / with_vehicle=회색
-            # 모든 마커는 얇은 검정 테두리(edgecolors='black', linewidths 얇게)를 적용
+            # 색상/모양 규칙:
+            #   · 리포트 lot_id = 빨강 원(o), 최상단 zorder — 다른 모든 마커 위에 확실히 표시
+            #   · 형제 lot(리포트와 같은 root_lot_id) = 리포트 root 그룹의 색·모양(빨강 아님)
+            #   · 그 외 main-vehicle lot = 각자 root_lot_id 그룹의 색·모양(초록/빨강 제외)으로 묶여 보임
+            #   · with_vehicle(다른 vehicle) = WV_PALETTE(회색 계열)
+            #   모든 마커는 얇은 검정 테두리(edgecolors='black')
             if has_lot:
                 tgt = _select_target_lot_frame(tdf, target_lot_id, target_root_lot_id, target_DC_step_id)
                 tgt_idx = set(tgt.index)
                 if has_mask:
-                    # 같은 vehicle이면서 대상 lot이 아닌 데이터 → 초록
+                    # 같은 vehicle이면서 대상(리포트 root)이 아닌 데이터
                     veh_other = tdf[(tdf['mask'] == main_vehicle) & (~tdf.index.isin(tgt_idx))]
                     # with_vehicle(다른 vehicle) 데이터
                     wv = tdf[tdf['mask'] != main_vehicle]
                 else:
                     veh_other = tdf[~tdf.index.isin(tgt_idx)]; wv = tdf.iloc[0:0]
+                # (배경) 타 root의 main-vehicle lot — root_lot_id 그룹별 색·모양, 범례는 1개로 통합
                 if len(veh_other) > 0:
-                    # 범례에 실제 vehicle 명(config.yaml) 표기
-                    ax.scatter(veh_other['tkout_time'], veh_other[item_name], s=10, alpha=0.5, color=C_VEHICLE, label=str(main_vehicle), edgecolors='black', linewidths=0.3, zorder=2)
+                    _bg_labeled = False
+                    if _root_col:
+                        for _rt, _g in veh_other.groupby(veh_other[_root_col].astype(str)):
+                            _cc, _mk = root_style.get(str(_rt), (C_NEUTRAL, 'o'))
+                            _lbl = None
+                            if not _bg_labeled:
+                                _lbl = '타 lot (root별 색/모양)'; _bg_labeled = True
+                            ax.scatter(_g['tkout_time'], _g[item_name], s=10, alpha=0.5,
+                                       color=_cc, marker=_mk, label=_lbl,
+                                       edgecolors='black', linewidths=0.3, zorder=2)
+                    else:
+                        ax.scatter(veh_other['tkout_time'], veh_other[item_name], s=10, alpha=0.5,
+                                   color=C_NEUTRAL, label=str(main_vehicle),
+                                   edgecolors='black', linewidths=0.3, zorder=2)
                 if len(wv) > 0:
                     # with_vehicle은 mask(=실제 vehicle 명)별로 분리하여 각각 다른 색 + 개별 범례
                     for _wi, _wv_name in enumerate(sorted(wv['mask'].dropna().unique()) if has_mask else []):
@@ -2437,19 +2484,27 @@ def _render_item_charts(task):
                         _wv_color = WV_PALETTE[_wi % len(WV_PALETTE)]
                         ax.scatter(_wv_grp['tkout_time'], _wv_grp[item_name], s=10, alpha=0.5, color=_wv_color, label=str(_wv_name), edgecolors='black', linewidths=0.3, zorder=3)
                 if len(tgt) > 0:
-                    if multi_lot and lot_col:
-                        # 같은 root의 여러 lot_id → lot별 색으로 구분 (범례=lot_id)
-                        for _lot in target_lots:
-                            _tl = tgt[tgt[lot_col].astype(str) == _lot]
-                            if len(_tl) == 0: continue
-                            ax.scatter(_tl['tkout_time'], _tl[item_name], s=32, alpha=1.0,
-                                       color=lot_color[_lot], marker=lot_marker.get(_lot, 'o'),
-                                       label=f"{_lot}_{target_DC_step_id}", edgecolors='black', linewidths=0.5, zorder=12)
+                    _report_lot = str(target_lot_id)
+                    # 리포트 root 그룹의 색·모양(형제 lot에 사용)
+                    _tgt_root = (str(target_root_lot_id) if target_root_lot_id
+                                 else (str(tgt[_root_col].iloc[0]) if (_root_col and len(tgt)) else None))
+                    _tc, _tm = root_style.get(str(_tgt_root), ('#1f77b4', 's'))
+                    if lot_col:
+                        _sib = tgt[tgt[lot_col].astype(str) != _report_lot]
+                        _rep = tgt[tgt[lot_col].astype(str) == _report_lot]
                     else:
-                        # 단일 lot: 빨간색 + search_key 라벨 — 최상위 zorder로 다른 마커 위에 확실히 표시
-                        _tgt_label = f"{target_lot_id}_{target_DC_step_id}"
-                        ax.scatter(tgt['tkout_time'], tgt[item_name], s=32, alpha=1.0, color='red',
-                                   label=_tgt_label, edgecolors='black', linewidths=0.5, zorder=12)
+                        _sib = tgt.iloc[0:0]; _rep = tgt
+                    # 형제 lot(같은 root) → 그룹 색·모양, 리포트 lot 바로 아래 zorder
+                    if len(_sib) > 0:
+                        ax.scatter(_sib['tkout_time'], _sib[item_name], s=28, alpha=1.0,
+                                   color=_tc, marker=_tm,
+                                   label=f"형제 lot ({_tgt_root})" if _tgt_root else "형제 lot",
+                                   edgecolors='black', linewidths=0.5, zorder=11)
+                    # 리포트 lot → 빨강 원, 최상단
+                    if len(_rep) > 0:
+                        ax.scatter(_rep['tkout_time'], _rep[item_name], s=34, alpha=1.0, color='red',
+                                   marker='o', label=f"{_report_lot}_{target_DC_step_id}",
+                                   edgecolors='black', linewidths=0.6, zorder=13)
             else:
                 for w in measured_wafers:
                     grp = tdf[tdf[w_col] == w] if w_col in tdf.columns else tdf.iloc[0:0]
