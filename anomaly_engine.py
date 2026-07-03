@@ -504,37 +504,22 @@ def classify_specout_pattern(out_xy, all_xy, radius_of=None, rules=None, options
 
 
 def _parse_defect_modes(text):
-    """ANOMALY_KNOWLEDGE.md의 '불량 모드 판정표'(DEFECT_MODE_TABLE 마커 사이) 파싱.
+    """AI Final의 불량 모드 판정 검증용 목록을 '통합 판정 규칙'(ANOMALY_RULES 마커)에서 도출.
 
-    블록 형식: `N. MODE: 모드명` + `WHEN:/COMMENT:/LINK:`(LINK는 선택).
-    반환: [{'num','mode','when','comment','link'}, ...] (표 순서 = 우선순위).
-    AI Final의 구조화(JSON) 판정 검증용 — defect_mode/LINK가 표에 있는 값인지 대조한다.
+    ▶ 통합 관리: 별도 'DEFECT_MODE_TABLE' 섹션을 없애고 ANOMALY_RULES 하나로 관리한다.
+      각 RULE의 label=모드명, NOTE=코멘트, LINK=링크, WHEN=조건, 규칙 '순서'=우선순위.
+      단, 산포 억제 전용(SUPPRESS_DISP만) 규칙은 불량 모드가 아니므로 제외한다.
+    반환: [{'num','mode','when','comment','link'}, ...] (규칙 순서 = 우선순위).
+    AI Final(JSON) 검증 — defect_mode/LINK가 이 목록에 있는 값인지 대조한다.
     """
-    import re
     out = []
     if not text:
         return out
-    _s = text.find('DEFECT_MODE_TABLE:start')
-    _e = text.find('DEFECT_MODE_TABLE:end')
-    if _s == -1 or _e == -1 or _e <= _s:
-        return out
-    cur = None
-    for line in text[_s:_e].splitlines():
-        m = re.match(r'\s*([\d][\d\-.]*)\.?\s*MODE\s*[:：]\s*(.+)$', line)
-        if m:
-            if cur:
-                out.append(cur)
-            cur = {'num': m.group(1).rstrip('.'), 'mode': m.group(2).strip(),
-                   'when': '', 'comment': '', 'link': ''}
-            continue
-        if cur is None:
-            continue
-        m = re.match(r'\s*(WHEN|COMMENT|NOTE|LINK)\s*[:：]\s*(.+)$', line, re.IGNORECASE)
-        if m:
-            k = m.group(1).lower()
-            cur['comment' if k == 'note' else k] = m.group(2).strip()
-    if cur:
-        out.append(cur)
+    for _i, _r in enumerate(_parse_knowledge_rules(text), start=1):
+        if _r.get('suppress_disp') and not _r.get('note'):
+            continue   # 산포 억제 전용 규칙은 불량 모드 목록에서 제외
+        out.append({'num': str(_i), 'mode': _r.get('label', ''), 'when': _r.get('when', ''),
+                    'comment': _r.get('note', ''), 'link': _r.get('link', '')})
     return out
 
 
@@ -1908,23 +1893,23 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
             "**[지식베이스]와 관찰된 데이터(finding·항목 통계)에 있는 내용만** 사용하세요. "
             "**[지식베이스]에 적혀있지 않은 반도체 공정 지식·원인·조치(예: '산화막 두께', "
             "'식각 균일성' 등 md에 없는 도메인 지식)를 임의로 판단하거나 추가하지 마세요.** "
-            "[지식베이스]의 '불량 모드 판정표'(DEFECT_MODE_TABLE 마커 사이)를 이용해 "
-            "spec-out Index 조합으로부터 불량 모드를 판정하세요. Index명은 원 이름과 표시명 "
-            "어느 쪽으로 적혀 있어도 같은 항목으로 인식하고, 판정표의 CAT2 조건은 finding의 "
-            "cat2와 대조합니다. 표는 위에서부터 우선순위가 높고 여러 모드가 동시 매칭되면 "
+            "[지식베이스]의 '판정 규칙'(ANOMALY_RULES 마커 사이의 RULE 목록)을 이용해 "
+            "spec-out Index 조합으로부터 불량 모드를 판정하세요(각 RULE의 이름=불량 모드). "
+            "Index명은 원 이름과 표시명 어느 쪽으로 적혀 있어도 같은 항목으로 인식하고, RULE의 "
+            "CAT2 조건은 finding의 cat2와 대조합니다. 규칙은 위에서부터 우선순위가 높고 여러 모드가 동시 매칭되면 "
             "**번호가 가장 작은(가장 위)** 모드 하나로 판정합니다(1-1, 1-2 세부도 위가 우선). "
             "측정 의심(PCHK 동일 shot 겹침)이 있으면 [지식베이스]의 '측정이상 추정 규칙'을 적용해 "
             "겹친 wafer·좌표·PGM(pt)를 명시하고 불량 단정 전 재측정 권고를 우선하며, "
             "해당 site를 제외한 나머지 spec-out만으로 불량 모드를 판정하세요. "
             "항목명은 표시명(display_name) 기준으로 서술합니다. "
             "**출력은 아래 형식의 JSON 객체 하나만**(코드펜스·설명문·HTML 금지): "
-            '{"defect_mode": "<판정표의 MODE명 그대로. 매칭 없으면 null>", '
+            '{"defect_mode": "<매칭된 RULE 이름(=불량 모드) 그대로. 매칭 없으면 null>", '
             '"basis_items": ["<근거가 된 Index 표시명>", ...], '
             '"summary": "<종합 판단 1~2문장 — finding·지식베이스에 근거한 판단만>", '
             '"phenomenon": "<핵심 현상 — 관찰된 사실만. 어느 Index가 어느 wafer/특이맵 패턴·PGM(pt)에서 어떻게 spec-out/이탈했는지. 원인 추측 금지>", '
-            '"actions": "<권고 조치 — 지식베이스·판정표 COMMENT에 명시된 것만. 없으면 \'지식베이스 미기재\'>", '
+            '"actions": "<권고 조치 — 지식베이스·RULE의 NOTE에 명시된 것만. 없으면 \'지식베이스 미기재\'>", '
             '"meas_suspect": "<측정이상 추정 서술(겹친 wafer·좌표·PGM(pt) 명시) 또는 null>"} '
-            "URL/링크는 출력하지 마세요 — 코드가 판정표의 LINK를 자동 첨부합니다(LINK 없는 모드도 있음)."
+            "URL/링크는 출력하지 마세요 — 코드가 매칭 RULE의 LINK를 자동 첨부합니다(LINK 없는 모드도 있음)."
             f"{_examples_block}\n"
             f"[지식베이스]\n{knowledge_text or '(지식베이스 없음)'}")
         _spec_line = f"[spec-out Index 조합]\n{', '.join(spec_items) if spec_items else '(없음)'}"

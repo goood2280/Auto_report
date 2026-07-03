@@ -7,8 +7,9 @@
 > ⚠️ 단, **통계 임계값(σ·배수 등 숫자)** 은 여기 두지 말고 `My_config.py`에서 관리하세요.
 > 무거운 통계 계산 로직은 코드(`anomaly_engine.analyze_commonality`)가 담당합니다.
 > 이 파일에는 코드가 산출한 **신호(사실)를 사람이 어떻게 해석·판정할지**의 규칙만 서술합니다.
-> **불량 모드 판정표는 이 파일의 'DEFECT_MODE_TABLE' 섹션에서 관리**합니다(AI가 직접 참조 —
-> README의 표는 참고 사본). 새 불량 모드 추가 = 표에 블록 하나 추가(코드 수정 불필요).
+> **판정 규칙·불량 모드는 이 파일의 'ANOMALY_RULES' 섹션 하나로 통합 관리**합니다.
+> 하나의 RULE이 (1) 코드의 '지식 기반 판정' finding과 (2) AI의 불량 모드 판정에 모두 쓰입니다.
+> 새 규칙/불량 모드 추가 = ANOMALY_RULES 마커 사이에 RULE 블록 하나 추가(코드 수정 불필요).
 
 ---
 
@@ -61,19 +62,21 @@
 
 ### PCHK 종류별 '검증 대상 ITEM' 매핑
 
-> **PCHK 종류별로 검증하는 ITEM 군이 다릅니다.** 누설(Lkg) 체크는 누설에 민감한 항목군을,
-> 접촉저항(Res) 체크는 저항/구동 항목군을 검증합니다. 각 PCHK가 **자기 대상 ITEM들과
-> 동일 PGM(pt)·동일 shot에서 함께 spec-out**일 때만 그 항목들을 측정이상으로 봅니다.
-> (여러 대상 항목이 겹칠수록 확신↑.)
+> **PCHK 종류별로 검증하는 ITEM 군을 '따로' 관리합니다.** 누설 체크(**PCHK_LKG**)는 누설에
+> 민감한 항목군을, 접촉저항 체크(**PCHK_RES**)는 저항/구동 항목군을 각각 검증합니다.
+> 각 PCHK가 **자기 대상 ITEM들과 동일 PGM(pt)·동일 shot에서 함께 spec-out**일 때만
+> 그 항목들을 측정이상으로 봅니다. (여러 대상 항목이 겹칠수록 확신↑.)
 >
-> - 아래 매핑을 **엔지니어가 편집**하면 코드가 그대로 반영합니다(마커 사이만 파싱).
+> - 아래 매핑을 **PCHK별로 한 줄씩** 편집하면 코드가 그대로 반영합니다(마커 사이만 파싱).
+>   PCHK_LKG와 PCHK_RES는 **서로 다른 ITEM 군**을 가질 수 있습니다(분리 관리).
 > - 형식: `- <PCHK 표시명>: ITEM1, ITEM2, ...` (PCHK 표시명 = reformatter의 실제 PCHK alias/표시명).
+>   PCHK가 3종 이상이어도 줄을 추가하면 각각 별도 대상군으로 동작합니다.
 > - **ITEM 명은 Index ALIAS(원 이름)든 HTML/PPT 표시명(replace/접미·접두 제거 적용)이든 둘 다 인식**합니다.
 > - 매핑에 없는 PCHK는 (하위호환) 모든 spec-out 항목과 대조합니다.
 
 <!-- PCHK_ITEM_MAP:start -->
-- PCHK_TYPE1: ITEM_A, ITEM_B
-- PCHK_TYPE2: ITEM_C, ITEM_D
+- PCHK_LKG: ITEM_A, ITEM_B, ITEM_C
+- PCHK_RES: ITEM_D, ITEM_E, ITEM_F
 <!-- PCHK_ITEM_MAP:end -->
 
 - 코드가 실제 사용한 대상/겹침 결과는 `RUN/TEMP/anomaly_basis_<lot>.json`의
@@ -94,45 +97,17 @@
 > 참고 해석(일반론): 줄성→스캐너/프로브카드 열, Edge ring→엣지 공정(베벨/링), Center→중심
 > 균일도, k시 방향→노치 기준 국소 클러스터(설비 국소 이슈). 단정하지 말고 확인 포인트로만.
 
-## 불량 모드 판정표 (Defect Mode Table) — AI가 spec-out 조합으로 판정
+## 판정 규칙 · 불량 모드 (Knowledge Rules / Defect Modes) — 하나로 통합 관리
 
-> AI 최종 단계(③ Final)가 **spec-out Index 조합**을 아래 표와 대조해 불량 모드를 판정합니다.
-> **표는 위에서부터 우선순위** — 여러 모드가 동시 매칭되면 번호가 가장 작은(가장 위) 모드
-> 하나로 판정합니다(1-1, 1-2 세부도 위가 우선). 매칭이 없으면 '특정 불량 모드 미매칭(수동 검토)'.
+> 아래 **ANOMALY_RULES 하나의 섹션**이 두 용도로 함께 쓰입니다(중복 관리 불필요):
+> 1. **코드 '지식 기반 판정'**: `anomaly_engine`이 직접 파싱해 `analyze_commonality`의 통계 판정
+>    (항목별 **이상/주의** 등급·wafer 산포 배수 등)과 **매칭**해 finding을 산출(AI 없이도 동작).
+> 2. **AI 불량 모드 판정**: 각 `RULE`의 이름이 **불량 모드**가 되어, AI Final이 spec-out Index 조합을
+>    이 규칙들과 대조해 불량 모드를 고릅니다(규칙 순서=우선순위, NOTE=코멘트, LINK=대시보드).
 >
-> **새 불량 모드 추가 = 아래 마커 사이에 블록 하나 추가**(코드 수정 불필요). 블록 문법:
-> - `MODE:` 모드명 — 판정 결과 `[불량 모드 판정]`에 그대로 표기됩니다. 번호(`1.`/`2-1.`)로 우선순위 표현.
-> - `WHEN:` 매칭 조건 — spec-out Index 조합을 AND/OR/정상 조건으로 서술.
->   **Index명은 원 이름(ALIAS)·표시명 둘 다 인식**되며, `CAT2=...` 형태로 카테고리 조건도 가능합니다.
-> - `COMMENT:` 매칭 시 권고 조치/확인 포인트 — AI가 `[권고 조치]`에 **그대로 인용**합니다
->   (여기 적힌 범위 내에서만 코멘트 제공 → 예상 밖 조치 생성 방지).
-> - `LINK:` 관련 대시보드/문서 URL — **선택 사항(없어도 됨)**. AI가 아니라 **코드가**
->   매칭된 모드의 LINK를 `<a href>`로 첨부합니다(AI 출력의 URL은 무시 — 할루시네이션 차단).
->
-> 사내 이식 시 실제 Index명/대시보드 URL로 교체하세요. (아래는 예시)
-
-<!-- DEFECT_MODE_TABLE:start -->
-1. MODE: (예시) A_불량모드
-   WHEN: ITEM_A 또는 ITEM_B spec-out
-   COMMENT: (매칭 시 권고 조치·확인 포인트 — 실제 내용으로 교체)
-   LINK: https://example.com/mode_a
-
-2-1. MODE: (예시) B_연동 불량 (두 항목 동시)
-   WHEN: ITEM_C AND ITEM_D 동시 spec-out
-   COMMENT: (매칭 시 권고 조치·확인 포인트 — 실제 내용으로 교체)
-   LINK: https://example.com/mode_b
-
-2-2. MODE: (예시) C_단독 불량
-   WHEN: ITEM_C spec-out AND ITEM_D 정상
-   COMMENT: (매칭 시 권고 조치·확인 포인트 — 실제 내용으로 교체)
-<!-- DEFECT_MODE_TABLE:end -->
-
-## 판정 로직 규칙 (Knowledge Rules) — 코드가 파싱하여 통계 결과와 매칭
-
-> 아래 규칙은 `anomaly_engine`이 **직접 파싱**해 `analyze_commonality`의 통계 판정
-> (항목별 **이상/주의** 등급, wafer 산포 배수 등)과 **매칭**하여 '지식 기반 판정'을 산출합니다.
-> AI 없이도 동작하며, 매칭된 판정은 리포트 Anomaly 요약/상세에 표기됩니다.
->
+> - **새 불량 모드/판정 규칙 추가 = 아래 마커 사이에 RULE 블록 하나 추가**(코드 수정 불필요).
+> - `RULE`의 이름이 곧 불량 모드명, `NOTE`가 권고 코멘트, `LINK`가 대시보드 URL(선택).
+>   위에서부터 우선순위가 높습니다(여러 규칙이 동시 매칭되면 위 규칙 채택).
 > - 여기서 **"이상/주의"는 `analyze_commonality` 기준과 동일**합니다
 >   (이상 = spec 이탈 point 존재 / 주의 = 해당 wafer 산포가 보통 wafer 대비 임계배수 초과).
 > - **항목명(ITEM)은 Index ALIAS(원 이름)든, replace/접미·접두가 제거된 표시명이든 둘 다 인식**합니다.
