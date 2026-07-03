@@ -143,6 +143,76 @@ def _slide_title(slide):
     return ""
 
 
+def _save_rule_check_log(ai_dir, lot_id, dc_step, rule_trace, findings):
+    """전체 anomaly rule 체크 결과를 RUN/AI 폴더에 파일로 저장.
+
+    모든 규칙(지식/불량모드/[RULE] 체이닝)을 순회한 매칭/해당없음 전량을 기록하고,
+    사람이 읽는 .txt(요약+표)와 기계용 .json(rule_trace 원본) 2개를 남긴다.
+    파일명: anomaly_rule_check_{lot}_{step}.(txt|json)  (AI 인풋 폴더 = 사이클 정리 대상 아님).
+    """
+    import json as _json
+    try:
+        os.makedirs(ai_dir, exist_ok=True)
+    except Exception:
+        pass
+    _safe = lambda s: re.sub(r'[^0-9A-Za-z가-힣._-]+', '_', str(s or 'NA'))
+    base = f"anomaly_rule_check_{_safe(lot_id)}_{_safe(dc_step)}"
+    trace = rule_trace or []
+    n_all = len(trace)
+    n_hit = sum(1 for t in trace if t.get('matched'))
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    lines = []
+    lines.append("=" * 78)
+    lines.append(f"Anomaly Rule Check 결과  (LOT={lot_id}  STEP={dc_step})")
+    lines.append(f"생성시각: {ts}")
+    lines.append(f"전체 규칙 {n_all}개 체크 — 매칭 {n_hit}건 / 해당없음 {n_all - n_hit}건")
+    lines.append("=" * 78)
+    if trace:
+        lines.append("")
+        lines.append("[매칭된 규칙]")
+        _hit = [t for t in trace if t.get('matched')]
+        if _hit:
+            for t in _hit:
+                lines.append(f"  ● [{t.get('kind','')}] {t.get('name','')}")
+                lines.append(f"       조건: {t.get('cond','')}")
+                lines.append(f"       결과: {t.get('result','')}")
+                if t.get('note'):
+                    lines.append(f"       비고: {t.get('note','')}")
+        else:
+            lines.append("  (매칭된 규칙 없음)")
+        lines.append("")
+        lines.append("[해당없음(미매칭) 규칙]")
+        _miss = [t for t in trace if not t.get('matched')]
+        if _miss:
+            for t in _miss:
+                lines.append(f"  · [{t.get('kind','')}] {t.get('name','')} — {t.get('result','')}  |  조건: {t.get('cond','')}")
+        else:
+            lines.append("  (미매칭 규칙 없음)")
+    else:
+        lines.append("")
+        lines.append("정의된 anomaly rule 없음(체크 대상 0개).")
+    # 최종 finding 요약(참고)
+    lines.append("")
+    lines.append("-" * 78)
+    lines.append(f"[최종 Finding 요약] 총 {len(findings or [])}건")
+    for f in (findings or []):
+        lines.append(f"  · [{f.get('severity','')}/{f.get('type','')}] {f.get('title','')}")
+
+    txt_path = os.path.join(ai_dir, base + '.txt')
+    json_path = os.path.join(ai_dir, base + '.json')
+    with open(txt_path, 'w', encoding='utf-8') as fh:
+        fh.write("\n".join(lines) + "\n")
+    with open(json_path, 'w', encoding='utf-8') as jf:
+        _json.dump({'lot_id': lot_id, 'dc_step': dc_step, 'generated': ts,
+                    'n_rules': n_all, 'n_matched': n_hit, 'rule_trace': trace,
+                    'findings': [{'severity': f.get('severity'), 'type': f.get('type'),
+                                  'title': f.get('title'), 'item': f.get('item')}
+                                 for f in (findings or [])]},
+                   jf, ensure_ascii=False, indent=2)
+    print(f"[RULE CHECK] 결과 저장: RUN/AI/{base}.txt (+.json) — 규칙 {n_all}개(매칭 {n_hit})")
+
+
 def _move_aggregation_after_scoreboard(prs):
     """Index Aggregation Table(통계표) 슬라이드를 Score Board 슬라이드 바로 뒤로 이동
     → 'Score Board → 통계표' 순서로 인접 배치."""
@@ -862,15 +932,23 @@ def main():
                         # 1-3b. 코드 통계 분석(findings) — HTML [0]와 PPT 상세 페이지에 공용 사용
                         code_findings = []
                         anomaly_item_stats = {}   # 항목별 통계 요약 — AI 해석 [항목 통계] 입력
+                        anomaly_rule_trace = []   # 전체 anomaly rule 체크 결과(매칭/해당없음) — RUN/AI 저장·PPT 반영
                         try:
                             code_findings = analyze_commonality(
                                 merged_df, target_lot_id, metrics_dict, spec_data,
                                 main_vehicle=vehicle, config=GLOBAL_CONFIG, reformatter=reformatter,
                                 knowledge_text=_ANOMALY_KNOWLEDGE_TEXT,
-                                item_stats_out=anomaly_item_stats)
+                                item_stats_out=anomaly_item_stats,
+                                rule_trace_out=anomaly_rule_trace)
                             print(f"[INFO] commonality 분석: {len(code_findings)}건 finding")
                         except Exception as ce:
                             print(f"[WARN] commonality 분석 스킵 (오류): {ce}")
+                        # 전체 anomaly rule 체크 결과를 RUN/AI 폴더에 파일로 저장(매칭·해당없음 전량 기록)
+                        try:
+                            _save_rule_check_log(_ai_dir, target_lot_id, target_DC_step,
+                                                 anomaly_rule_trace, code_findings)
+                        except Exception as _rce:
+                            print(f"[WARN] rule 체크 결과 저장 스킵 (오류): {_rce}")
                         # Score Board 바로 뒤에 'Anomaly 상세(통계)' 페이지 삽입
                         try:
                             _sb_pages = (len(VIP_group) - 1) // 30 + 1
@@ -878,7 +956,8 @@ def main():
                                 prs_low_qual, code_findings, after_index=1 + _sb_pages,
                                 main_vehicle=vehicle,
                                 radius_zones=GLOBAL_CONFIG.get('radius_zones', [60, 100]),
-                                item_slide_map=item_slide_map)
+                                item_slide_map=item_slide_map,
+                                rule_trace=anomaly_rule_trace)
                         except Exception as fe:
                             print(f"[WARN] Anomaly 상세 페이지 삽입 스킵: {fe}")
 

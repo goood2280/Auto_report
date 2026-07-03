@@ -908,7 +908,7 @@ def _parse_chain_rules(text):
 
 def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         main_vehicle=None, config=None, reformatter=None,
-                        knowledge_text="", item_stats_out=None):
+                        knowledge_text="", item_stats_out=None, rule_trace_out=None):
     """코드 기반 다중 detector로 이상/commonality Finding 리스트를 산출.
 
     AI 사용 여부와 무관하게 항상 코드로 동작합니다. 각 detector는 독립적으로
@@ -924,6 +924,9 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     config : object             임계값/룰셋(My_config). 없으면 기본값
     item_stats_out : dict|None  전달 시 항목별 통계 요약({item: {...}})을 채워 반환
                                 (AI 해석의 [항목 통계] 입력 — interpret_with_ai로 전달)
+    rule_trace_out : list|None  전달 시 '전체 anomaly rule 체크 결과' 추적 리스트를 채워 반환.
+                                각 원소 {kind, name, cond, matched(bool), result, note} —
+                                모든 규칙(지식/불량모드/[RULE] 체이닝)을 순회한 매칭/해당없음 기록.
 
     Returns
     -------
@@ -952,7 +955,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         r_center_max, r_middle_max = 60.0, 100.0
 
     findings = []
+    _rule_trace = []   # 전체 anomaly rule 체크 추적(매칭/해당없음) — rule_trace_out으로 반환
     if merged_df is None or len(merged_df) == 0 or not metrics_dict:
+        if isinstance(rule_trace_out, list):
+            rule_trace_out.extend(_rule_trace)
         return findings
 
     col_lot = _pick_col(merged_df, 'FAB_LOT_ID', 'fab_lot_id')
@@ -2008,6 +2014,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                                 _ri = _resolve_item(_n)
                                 if _ri:
                                     _suppress_disp_items.add(_ri)
+                        _rule_trace.append({'kind': '지식(산포억제)', 'name': _r.get('label', ''),
+                                            'cond': _when, 'matched': bool(_when_ok),
+                                            'result': '적용' if _when_ok else '해당없음',
+                                            'note': ('산포 언급 억제: ' + ', '.join(_r['suppress_disp'])) if _when_ok else ''})
                         continue
                     # (2) 산포 그룹 비교: WHEN 참일 때 두 그룹 산포 비교 코멘트 생성
                     if _r.get('compare_disp'):
@@ -2025,15 +2035,24 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                                 _det += f"  참고: {_r['link']}"
                             findings.append(_finding(_lvl, 'KNOWLEDGE', _r['label'],
                                                      f"[지식 판정] {_r['label']}", _det.strip()))
+                        _rule_trace.append({'kind': '지식(산포비교)', 'name': _r.get('label', ''),
+                                            'cond': _when, 'matched': bool(_when_ok),
+                                            'result': '매칭' if _when_ok else '해당없음',
+                                            'note': (_cmp if _when_ok else '')})
                         continue
                     # (3) 일반 판정: WHEN 참이면 finding 생성
-                    if _when and _eval_when(_when):
+                    _gen_ok = bool(_when and _eval_when(_when))
+                    if _gen_ok:
                         _lvl = 'CRITICAL' if str(_r.get('level', '주의')).strip() == '이상' else 'WARNING'
                         _det = _r.get('note', '') or ''
                         if _r.get('link'):
                             _det = (_det + '  ' if _det else '') + f"참고: {_r['link']}"
                         findings.append(_finding(_lvl, 'KNOWLEDGE', _r['label'],
                                                  f"[지식 판정] {_r['label']}", _det.strip()))
+                    _rule_trace.append({'kind': '지식(판정)', 'name': _r.get('label', ''),
+                                        'cond': _when, 'matched': _gen_ok,
+                                        'result': ('매칭 → ' + str(_r.get('level', '주의'))) if _gen_ok else '해당없음',
+                                        'note': (_r.get('note', '') or '') if _gen_ok else ''})
                 except Exception:
                     continue
             # 억제 적용: 지정 항목의 DISPERSION(주의) finding 제거 (spec-out=이상은 유지)
@@ -2046,11 +2065,16 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             #   '첫' 규칙 하나만 채택하고 멈춘다(중복 판정 방지, 먼저 매칭된 규칙 우선).
             _dm_hit = False
             for _tr in _tree:
-                if _dm_hit:
-                    break
                 try:
                     _conds = _tr.get('conds') or []
-                    if _conds and all(_eval_when(_c) for _c in _conds):
+                    _cond_txt = ' AND '.join(_conds)
+                    if _dm_hit:
+                        _rule_trace.append({'kind': '불량모드(tree)', 'name': _tr.get('mode', ''),
+                                            'cond': _cond_txt, 'matched': False,
+                                            'result': '스킵(이전 매칭)', 'note': ''})
+                        continue
+                    _tr_ok = bool(_conds and all(_eval_when(_c) for _c in _conds))
+                    if _tr_ok:
                         _lvl = 'CRITICAL' if str(_tr.get('level', '이상')).strip() == '이상' else 'WARNING'
                         _det = _tr.get('note', '') or ''
                         if _tr.get('link'):
@@ -2058,6 +2082,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         findings.append(_finding(_lvl, 'DEFECT_MODE', _tr['mode'],
                                                  f"[불량 모드] {_tr['mode']}", _det.strip()))
                         _dm_hit = True
+                    _rule_trace.append({'kind': '불량모드(tree)', 'name': _tr.get('mode', ''),
+                                        'cond': _cond_txt, 'matched': _tr_ok,
+                                        'result': '매칭(불량모드)' if _tr_ok else '해당없음',
+                                        'note': (_tr.get('note', '') or '') if _tr_ok else ''})
                 except Exception:
                     continue
 
@@ -2067,10 +2095,16 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             for _cr in _chain:
                 try:
                     _tname = _cr.get('trigger', '')
+                    _rname = f"[RULE] {_tname}" if _tname else '[RULE]'
+                    _gate = _cr.get('when') or ''
                     _tctx = _find_ctx(_tname) if _tname else None
-                    if _cr.get('when') and not _eval_chain_cond(_cr['when'], _tctx):
+                    if _gate and not _eval_chain_cond(_gate, _tctx):
+                        _rule_trace.append({'kind': 'RULE(체이닝)', 'name': _rname,
+                                            'cond': f"when: {_gate}", 'matched': False,
+                                            'result': '게이트 미충족', 'note': ''})
                         continue   # 게이트 미충족 → 규칙 스킵
-                    for _br in _cr.get('branches', []):
+                    _hit_note = None; _hit_idx = None; _hit_link = ''
+                    for _bi, _br in enumerate(_cr.get('branches', [])):
                         _cond = _br.get('cond')
                         if _cond is None or _eval_chain_cond(_cond, _tctx):
                             _note = (_br.get('note') or '').strip()
@@ -2085,11 +2119,40 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                                 f"[불량 모드] {_note}", _det,
                                 cat2=cat2_map.get(_tk, '') if _tk else '',
                                 display_name=_disp(_tname) if _tname else ''))
+                            _hit_note = _note; _hit_idx = _bi + 1; _hit_link = _br.get('link') or ''
                             break   # 최초 매칭 분기 1개만
+                    if _hit_note:
+                        _bcond = _cr.get('branches', [])[_hit_idx - 1].get('cond')
+                        _rule_trace.append({'kind': 'RULE(체이닝)', 'name': _rname,
+                                            'cond': (f"when:{_gate} → " + (f"분기{_hit_idx}({_bcond})" if _bcond else '기본(else)')),
+                                            'matched': True,
+                                            'result': f"매칭 → 분기{_hit_idx}: [불량 모드] {_hit_note}",
+                                            'note': (f"참고: {_hit_link}" if _hit_link else '')})
+                    else:
+                        _rule_trace.append({'kind': 'RULE(체이닝)', 'name': _rname,
+                                            'cond': f"when:{_gate} (게이트 통과)", 'matched': False,
+                                            'result': '게이트 통과·분기 무매칭', 'note': ''})
                 except Exception:
                     continue
     except Exception as _ke:
         print(f"[WARN] 지식 규칙/불량모드 평가 실패: {_ke}")
+
+    # ── 전체 rule 체크 결과 터미널 출력(진행 상황 + 요약) ──
+    try:
+        _n_all = len(_rule_trace)
+        _n_hit = sum(1 for _t in _rule_trace if _t.get('matched'))
+        if _n_all:
+            print(f"[RULE CHECK] anomaly rule {_n_all}개 체크 — 매칭 {_n_hit}, 해당없음 {_n_all - _n_hit}")
+            for _t in _rule_trace:
+                _mk = 'O' if _t.get('matched') else '.'
+                print(f"  [{_mk}] {_t.get('kind','')} · {_t.get('name','')} → {_t.get('result','')}")
+        else:
+            print("[RULE CHECK] 정의된 anomaly rule 없음(체크 대상 0개)")
+    except Exception:
+        pass
+    # 호출자(Main)로 전체 rule 체크 결과 반환 — RUN/AI 파일 저장·PPT 반영에 사용
+    if isinstance(rule_trace_out, list):
+        rule_trace_out.extend(_rule_trace)
 
     # ── Priority(우선순위) 명시적 수식 — 값이 클수록 우선(위에 정렬) ──
     #   이상(SPEC_OUT) : P = 20000 + 100·R_max + N_wf/100

@@ -821,12 +821,14 @@ def _add_internal_slide_link(run, source_slide, target_slide):
 
 
 def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세 (통계 자동 분석)",
-                         main_vehicle=None, radius_zones=(60, 100), item_slide_map=None):
+                         main_vehicle=None, radius_zones=(60, 100), item_slide_map=None,
+                         rule_trace=None):
     """코드 통계 분석 Finding 전체를 1개 슬라이드로 만들어 Score Board 뒤에 삽입.
 
     HTML [0]에는 우선순위 상위 N건만 보이고, 전체 상세는 이 PPT 페이지를 참조.
     after_index 위치(보통 1=title + Score Board 페이지수)로 슬라이드를 이동시킨다.
     상단에는 비교 기준·robust 산포 계산법·radius zone 정의를 '참고사항'으로 1회만 안내한다.
+    rule_trace 전달 시 맨 뒤에 '전체 anomaly rule 체크 결과'(매칭/해당없음) 요약 블록을 덧붙인다.
     """
     from pptx.util import Inches, Pt
     from pptx.dml.color import RGBColor
@@ -889,6 +891,17 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         _blocks.append(('H', _c))
         for _f in _by_cat[_c]:
             _blocks.append(('F', _f))
+    # 전체 anomaly rule 체크 결과(매칭/해당없음) — Finding 뒤에 요약 블록으로 덧붙임
+    _rt = list(rule_trace or [])
+    if _rt:
+        _rt_hit = sum(1 for _t in _rt if _t.get('matched'))
+        _blocks.append(('H', f"Rule Check 결과 (전체 {len(_rt)}개 · 매칭 {_rt_hit} · 해당없음 {len(_rt) - _rt_hit})"))
+        for _t in _rt:   # 매칭 먼저, 그다음 해당없음
+            if _t.get('matched'):
+                _blocks.append(('R', _t))
+        for _t in _rt:
+            if not _t.get('matched'):
+                _blocks.append(('R', _t))
     # 블록(헤더+finding)이 많으면 페이지 분할
     PER_PAGE = 26
     _pages = [_blocks[i:i + PER_PAGE] for i in range(0, len(_blocks), PER_PAGE)] or [[]]
@@ -938,18 +951,40 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
                 _nr.font.color.rgb = RGBColor(0x6B, 0x72, 0x80); _nr.font.name = FONT
             _spp = tf.add_paragraph(); _spp.text = ""
 
-        if not findings:
+        if not findings and not _rt:
             p = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
             p.text = "유의미한 통계 이상 없음"; p.font.size = Pt(12); p.font.name = FONT
         else:
+            if not findings and _pi == 0:   # finding은 없지만 rule 체크 결과는 표시
+                p = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
+                p.text = "유의미한 통계 이상 없음 (아래는 전체 rule 체크 내역)"
+                p.font.size = Pt(11); p.font.name = FONT; p.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
             # 페이지가 카테고리 중간(finding)부터 시작하면 해당 카테고리 헤더를 상단에 재표기
             if _chunk and _chunk[0][0] == 'F':
                 _hp2 = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
                 _render_cat_header(_hp2, _fcat(_chunk[0][1]) + " (계속)")
+            elif _chunk and _chunk[0][0] == 'R':   # Rule Check 섹션이 다음 페이지로 이어짐
+                _hp2 = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
+                _render_cat_header(_hp2, "Rule Check 결과 (계속)")
             for _bk, _bv in _chunk:
                 if _bk == 'H':   # 카테고리 헤더
                     p = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
                     _render_cat_header(p, _bv)
+                    continue
+                if _bk == 'R':   # Rule Check 한 줄(매칭 O / 해당없음 ·)
+                    _t = _bv
+                    p = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
+                    p.space_before = Pt(1)
+                    _ok = bool(_t.get('matched'))
+                    _mr = p.add_run(); _mr.text = ("● " if _ok else "○ ")
+                    _mr.font.bold = True; _mr.font.size = Pt(10); _mr.font.name = FONT
+                    _mr.font.color.rgb = (RGBColor(0xD6, 0x27, 0x28) if _ok else RGBColor(0x9A, 0xA0, 0xA6))
+                    _nm = p.add_run(); _nm.text = f"[{_t.get('kind','')}] {_t.get('name','')}"
+                    _nm.font.bold = True; _nm.font.size = Pt(10); _nm.font.name = FONT
+                    _nm.font.color.rgb = (RGBColor(0x1A, 0x1A, 0x1A) if _ok else RGBColor(0x6B, 0x72, 0x80))
+                    _rs = p.add_run(); _rs.text = f"  —  {_t.get('result','')}"
+                    _rs.font.size = Pt(9); _rs.font.name = FONT
+                    _rs.font.color.rgb = (RGBColor(0x55, 0x55, 0x55) if _ok else RGBColor(0x9A, 0xA0, 0xA6))
                     continue
                 f = _bv
                 p = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
