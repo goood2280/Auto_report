@@ -31,12 +31,15 @@
 - 각 항목은 `<li><b>[머리말]</b> 내용</li>` 형태의 짧은 문장으로 구성합니다.
 - 권장 머리말 순서: `[종합 판단]` → `[핵심 현상·추정 원인]` → `[권고 조치]`.
 - 한 항목은 1~2줄을 넘기지 않습니다. 표/코드블록은 사용하지 않습니다.
-- 한국어로 작성합니다. 영문 약어(VTH, IDSAT, PCHK 등)는 그대로 둡니다.
+- 한국어로 작성합니다. 항목명·영문 약어(PCHK 등)는 **finding 데이터에 나온 표기 그대로** 씁니다.
 
 ## 금지/주의 (Guardrails)
 
 - 근거 없는 원인 확정, 대시보드 URL·사내 링크의 임의 생성 금지.
 - 데이터에 없는 wafer/lot/수치를 지어내지 않습니다.
+- ⚠️ **이 파일(지식베이스)의 예시 항목명(`ITEM_A` 등 템플릿)은 실제 데이터가 아닙니다 — 절대 언급/참조하지 마세요.**
+  finding 데이터에 **실제로 존재하는 항목만** 언급하고, **데이터에 없는 항목에 대해 '정상범위/미매칭' 등
+  어떤 서술도 하지 않습니다.** (데이터에 없는 항목을 "정상범위/미매칭"으로 평가·언급하지 말 것)
 - 본 해석은 **보조 참고용**임을 전제로 하며, 최종 판정은 엔지니어의 검토를 따릅니다.
 
 ## 판정 지식 — 측정이상 추정 규칙 (Interpretation Rules)
@@ -50,7 +53,7 @@
 - **PCHK LKG**(프로브 누설전류 체크)가 **동일 PGM(pt)에서 동일 shot(같은 CHIP_X/Y·wafer)** 에
   spec-out이면, 그 site의 측정값은 **측정이상**(프로브 접촉 불량/누설 경로)으로 **추정**합니다.
   → 실제 소자 불량으로 단정하기 전에 **재측정으로 재현성 확인**을 우선 권고합니다.
-- **동일 shot에서 측정Item(VTH_N, VTH_P, IDSAT_N 등)이 함께 spec-out**이면
+- **동일 shot에서 해당 PCHK의 검증 대상 측정Item이 함께 spec-out**이면
   측정이상일 가능성이 **더 높습니다**. 즉 **여러 측정Item이 동일하게 spec-out될수록 측정이상 확신도가 올라갑니다.**
 - 반대로 **PCHK는 정상인데 측정Item만 spec-out**이면 측정이상보다는 **실제 공정/소자 불량** 쪽에 무게를 둡니다.
 - 코드는 이 신호를 finding `type=MEAS_SUSPECT`(신호등 🟡 "측정이상 추정")로 표기하고,
@@ -69,8 +72,8 @@
 > - 매핑에 없는 PCHK는 (하위호환) 모든 spec-out 항목과 대조합니다.
 
 <!-- PCHK_ITEM_MAP:start -->
-- RMAX(PCHK Lkg): VTH_N, VTH_P, VTH_AVG
-- RMAX(PCHK Res): IDSAT_N, IDSAT_P, IDSAT_RATIO
+- PCHK_TYPE1: ITEM_A, ITEM_B
+- PCHK_TYPE2: ITEM_C, ITEM_D
 <!-- PCHK_ITEM_MAP:end -->
 
 - 코드가 실제 사용한 대상/겹침 결과는 `RUN/TEMP/anomaly_basis_<lot>.json`의
@@ -109,23 +112,19 @@
 > 사내 이식 시 실제 Index명/대시보드 URL로 교체하세요. (아래는 예시)
 
 <!-- DEFECT_MODE_TABLE:start -->
-1. MODE: Contact 미오픈 불량
-   WHEN: RCNT_N 또는 RCNT_P spec-out
-   COMMENT: Contact 저항 초과 — 식각 미오픈/폴리머 잔류 여부를 인라인 SEM/CD로 확인.
-   LINK: https://example.com/contact_open
+1. MODE: (예시) A_불량모드
+   WHEN: ITEM_A 또는 ITEM_B spec-out
+   COMMENT: (매칭 시 권고 조치·확인 포인트 — 실제 내용으로 교체)
+   LINK: https://example.com/mode_a
 
-2-1. MODE: Gate 모듈 불량 (VTH N·P 연동)
-   WHEN: VTH_N AND VTH_P 동시 spec-out
-   COMMENT: Gate CD 미달/Gate Oxide 산포 후보 — Gate CD·Oxide 인라인 계측과 대조.
-   LINK: https://example.com/gate_module
+2-1. MODE: (예시) B_연동 불량 (두 항목 동시)
+   WHEN: ITEM_C AND ITEM_D 동시 spec-out
+   COMMENT: (매칭 시 권고 조치·확인 포인트 — 실제 내용으로 교체)
+   LINK: https://example.com/mode_b
 
-2-2. MODE: N-MOS 단독 VTH 불량
-   WHEN: VTH_N spec-out AND VTH_P 정상
-   COMMENT: N-Well 이온주입/채널 도핑 산포 후보 — 해당 Implant SPC 확인.
-
-3. MODE: 구동전류(IDSAT) 불량
-   WHEN: IDSAT_N, IDSAT_P, IDSAT_RATIO, IDSAT_SUM 중 하나 이상 spec-out
-   COMMENT: 이동도·CD·접합/콘택 저항 후보. VTH 동반 여부로 Gate vs 구동 구분, RATIO 이동 시 N/P 비대칭 확인.
+2-2. MODE: (예시) C_단독 불량
+   WHEN: ITEM_C spec-out AND ITEM_D 정상
+   COMMENT: (매칭 시 권고 조치·확인 포인트 — 실제 내용으로 교체)
 <!-- DEFECT_MODE_TABLE:end -->
 
 ## 판정 로직 규칙 (Knowledge Rules) — 코드가 파싱하여 통계 결과와 매칭
@@ -137,7 +136,7 @@
 > - 여기서 **"이상/주의"는 `analyze_commonality` 기준과 동일**합니다
 >   (이상 = spec 이탈 point 존재 / 주의 = 해당 wafer 산포가 보통 wafer 대비 임계배수 초과).
 > - **항목명(ITEM)은 Index ALIAS(원 이름)든, replace/접미·접두가 제거된 표시명이든 둘 다 인식**합니다.
->   실제 컬럼명(예: `RMAX_VTH`, 파생 `MAWIN_new`, 표시명 등)을 그대로 적으면 됩니다.
+>   실제 컬럼명(원 ALIAS·파생 컬럼·표시명 등)을 그대로 적으면 됩니다. (아래 `ITEM_A` 등은 교체용 템플릿)
 > - `trend_tkout_agg`(P10 등)로 집계되는 항목은 이상/주의도 **집계값 기준**으로 판정됩니다.
 
 ### 규칙 (아래 `ANOMALY_RULES` 마커 사이만 파싱·관리)
@@ -163,20 +162,20 @@
 > (실사용 시 `A_EXAMPLE` 등을 실제 항목명으로 바꾸세요.)
 
 <!-- ANOMALY_RULES:start -->
-RULE: Gate 모듈 불량 (VTH N·P 연동)
-WHEN: all_sev(VTH_N, VTH_P)>=이상
+RULE: (예시) A·B 연동 불량
+WHEN: all_sev(ITEM_A, ITEM_B)>=이상
 LEVEL: 이상
-LINK: https://example.com/gate_module
-NOTE: VTH_N·VTH_P가 동일하게 spec-out → Gate CD 미달/Gate Oxide 산포 후보. Gate CD·Oxide 인라인 계측과 대조.
+LINK: https://example.com/mode_ab
+NOTE: (매칭 시 코멘트 — 실제 확인 포인트로 교체)
 
-RULE: IDSAT_P 타겟 저하 (모집단 대비 median 하위)
-WHEN: median_pctile(IDSAT_P)<=15
+RULE: (예시) C 타겟 저하 (모집단 대비 median 하위)
+WHEN: median_pctile(ITEM_C)<=15
 LEVEL: 주의
-NOTE: IDSAT_P median이 모집단 하위 15% 이내 — 직전 공정 타겟 시프트/이동도 저하 가능. Trend로 drift 확인.
+NOTE: (매칭 시 코멘트 — 실제 확인 포인트로 교체)
 
-RULE: PCHK 정상 시 산포 언급 억제(예시)
-WHEN: sev(PCHK_LKG)<주의
-SUPPRESS_DISP: IDSAT_P
+RULE: (예시) PCHK 정상 시 산포 언급 억제
+WHEN: sev(PCHK_TYPE1)<주의
+SUPPRESS_DISP: ITEM_C
 <!-- ANOMALY_RULES:end -->
 
 ## 출력 예시 (형식만 참고 — 내용은 실제 데이터 기반으로 작성)

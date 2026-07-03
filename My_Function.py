@@ -871,10 +871,35 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         "   - 이상: P = 20000 + 100·R_max + N_wf/100      - 주의: P = 10000 + 100·D      (동점 시 REPORT ORDER 오름차순)",
     ]
 
-    # findings가 25개 넘으면 다음 페이지로 분할
-    PER_PAGE = 25
-    _pages = [findings[i:i + PER_PAGE] for i in range(0, len(findings), PER_PAGE)] or [[]]
+    # ── 카테고리(cat2)별 그룹핑 — 우선순위 상 '첫 등장' 순으로 카테고리 배열, 카테고리 내는 우선순위 유지 ──
+    def _fcat(_f):
+        _c = str(_f.get('cat2', '') or '').strip()
+        if _c:
+            return _c
+        return '지식 판정(규칙)' if _f.get('type') == 'KNOWLEDGE' else '기타'
+    _cat_order, _by_cat = [], {}
+    for _f in findings:
+        _c = _fcat(_f)
+        if _c not in _by_cat:
+            _by_cat[_c] = []; _cat_order.append(_c)
+        _by_cat[_c].append(_f)
+    # 렌더 블록: 카테고리 헤더('H') + 그 카테고리 finding('F')들 → 카테고리별로 구분되어 보임
+    _blocks = []
+    for _c in _cat_order:
+        _blocks.append(('H', _c))
+        for _f in _by_cat[_c]:
+            _blocks.append(('F', _f))
+    # 블록(헤더+finding)이 많으면 페이지 분할
+    PER_PAGE = 26
+    _pages = [_blocks[i:i + PER_PAGE] for i in range(0, len(_blocks), PER_PAGE)] or [[]]
     _total = len(_pages)
+
+    def _render_cat_header(_p, _txt):
+        """카테고리 구분 헤더(진한 남색 볼드) — finding 그룹 앞에 배치."""
+        _p.space_before = Pt(7)
+        _hr = _p.add_run(); _hr.text = f"▍ {_txt}"
+        _hr.font.bold = True; _hr.font.size = Pt(12)
+        _hr.font.color.rgb = NAVY; _hr.font.name = FONT
     _created = []
     for _pi, _chunk in enumerate(_pages):
         slide = prs.slides.add_slide(prs.slide_layouts[6])
@@ -917,8 +942,18 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
             p = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
             p.text = "유의미한 통계 이상 없음"; p.font.size = Pt(12); p.font.name = FONT
         else:
-            for f in _chunk:
+            # 페이지가 카테고리 중간(finding)부터 시작하면 해당 카테고리 헤더를 상단에 재표기
+            if _chunk and _chunk[0][0] == 'F':
+                _hp2 = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
+                _render_cat_header(_hp2, _fcat(_chunk[0][1]) + " (계속)")
+            for _bk, _bv in _chunk:
+                if _bk == 'H':   # 카테고리 헤더
+                    p = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
+                    _render_cat_header(p, _bv)
+                    continue
+                f = _bv
                 p = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
+                p.space_before = Pt(2)   # finding 간 약간의 간격
                 sev = f.get("severity", "INFO")
                 r0 = p.add_run(); r0.text = "● "
                 r0.font.bold = True; r0.font.size = Pt(11)
