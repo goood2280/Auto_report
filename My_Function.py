@@ -2379,7 +2379,8 @@ def _render_item_charts(task):
                 _yv = [v for v in _yv if pd.notna(v)]
                 if _yv:
                     _ylo, _yhi = min(_yv), max(_yv)
-                    _pad = (_yhi - _ylo) * 0.08 if _yhi > _ylo else (abs(_yhi) * 0.05 or 1.0)
+                    # 데이터/ spec 범위 위아래로 12% 여유(spec 초과 값도 빡빡하지 않게)
+                    _pad = (_yhi - _ylo) * 0.12 if _yhi > _ylo else (abs(_yhi) * 0.12 or 1.0)
                     ax.set_ylim(_ylo - _pad, _yhi + _pad)
             ax.set_title("")
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
