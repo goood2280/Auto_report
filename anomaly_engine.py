@@ -503,6 +503,96 @@ def classify_specout_pattern(out_xy, all_xy, radius_of=None, rules=None, options
     return (label or '산발(특정 패턴 없음)'), stats
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 측정 순서(Measurement-Order) 기반 spec-out 패턴 — My_config.anomaly_mseq_enabled=True 시 동작
+#   측정 순서 = WF MAP 좌상단 기준 chip_x 먼저 증가 → chip_y 증가
+#     (1,1)→(2,1)→(3,1)→…→(1,2)→(2,2)→… . wafer별로 이 순서의 spec-out 시퀀스를 MSEQ_RULES와 매칭.
+# ──────────────────────────────────────────────────────────────────────
+def _parse_mseq_rules(text):
+    """ANOMALY_KNOWLEDGE.md의 측정순서 패턴 규칙(MSEQ_RULES 마커 사이) 파싱.
+
+    한 규칙 = `MSEQ:`(이름) + `TYPE:`(consecutive_run|mostly_dead|front_loaded) + type별 파라미터
+              + [LEVEL/NOTE/LINK]. 반환: [{'name','type','level','note','link', <파라미터...>}, ...]
+    """
+    import re
+    rules = []
+    if not text:
+        return rules
+    _s = text.find('MSEQ_RULES:start')
+    _e = text.find('MSEQ_RULES:end')
+    if _s == -1 or _e == -1 or _e <= _s:
+        return rules
+    _numkeys = {'MIN_RUN', 'MIN_DEAD_FRAC', 'FRONT_FRAC', 'FRONT_MIN_SHARE', 'BACK_MAX_SHARE'}
+    cur = None
+    for line in text[_s:_e].splitlines():
+        if 'MSEQ_RULES' in line:      # 마커(:start/:end) 라인 제외
+            continue
+        m = re.match(r'\s*(MSEQ|TYPE|LEVEL|NOTE|LINK|MIN_RUN|MIN_DEAD_FRAC|FRONT_FRAC|'
+                     r'FRONT_MIN_SHARE|BACK_MAX_SHARE)\s*[:：]\s*(.*)$', line, re.IGNORECASE)
+        if not m:
+            continue
+        key = m.group(1).upper(); val = m.group(2).strip()
+        if key == 'MSEQ':
+            if cur and cur.get('type'):
+                rules.append(cur)
+            cur = {'name': val, 'type': '', 'level': '주의', 'note': '', 'link': ''}
+        elif cur is not None:
+            if key == 'TYPE':
+                cur['type'] = val.lower()
+            elif key == 'LEVEL':
+                cur['level'] = val
+            elif key == 'NOTE':
+                cur['note'] = val
+            elif key == 'LINK':
+                cur['link'] = val
+            elif key in _numkeys:
+                try:
+                    cur[key.lower()] = float(val)
+                except ValueError:
+                    pass
+    if cur and cur.get('type'):
+        rules.append(cur)
+    return rules
+
+
+def _classify_mseq_pattern(seq_flags, rules):
+    """측정순서 spec-out 불리언 시퀀스(seq_flags: 측정순서대로 True=spec-out)를 규칙과 매칭.
+
+    - consecutive_run : 연속 spec-out 최대 길이 ≥ MIN_RUN
+    - mostly_dead     : spec-out 비율 ≥ MIN_DEAD_FRAC (거의 다 이탈)
+    - front_loaded    : 앞부분(FRONT_FRAC) spec-out 비율 ≥ FRONT_MIN_SHARE 이고
+                        뒷부분 spec-out 비율 ≤ BACK_MAX_SHARE (전반부 집중 이탈)
+    반환: [{'name','level','note','link'}, ...] (매칭된 규칙들).
+    """
+    out = []
+    n = len(seq_flags)
+    if n == 0 or not rules:
+        return out
+    total_out = sum(1 for f in seq_flags if f)
+    max_run = 0; cur_run = 0
+    for f in seq_flags:
+        cur_run = cur_run + 1 if f else 0
+        if cur_run > max_run:
+            max_run = cur_run
+    for r in rules:
+        t = r.get('type'); ok = False
+        if t == 'consecutive_run':
+            ok = max_run >= int(r.get('min_run', 5))
+        elif t == 'mostly_dead':
+            ok = (total_out / n) >= float(r.get('min_dead_frac', 0.8))
+        elif t == 'front_loaded':
+            _k = max(1, int(round(n * float(r.get('front_frac', 0.5)))))
+            _front, _back = seq_flags[:_k], seq_flags[_k:]
+            _fs = (sum(1 for f in _front if f) / len(_front)) if _front else 0.0
+            _bs = (sum(1 for f in _back if f) / len(_back)) if _back else 0.0
+            ok = (_fs >= float(r.get('front_min_share', 0.6))
+                  and _bs <= float(r.get('back_max_share', 0.2)))
+        if ok:
+            out.append({'name': r.get('name', ''), 'level': r.get('level', '주의'),
+                        'note': r.get('note', ''), 'link': r.get('link', '')})
+    return out
+
+
 def _parse_defect_modes(text):
     """AI Final의 불량 모드 판정 검증용 목록을 '통합 판정 규칙'(ANOMALY_RULES 마커)에서 도출.
 
@@ -797,6 +887,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             _pat_all_xy = []
     _pat_rules = cfg('anomaly_pattern_rules', None) or None   # None/빈 → 특이맵 판정 안 함(하드코딩 기본 없음)
     _pat_opt = cfg('anomaly_pattern_thresholds', {}) or {}    # 전역 옵션(min_pts, y_positive_up)
+    # 측정 순서 기반 패턴(MSEQ) — anomaly_mseq_enabled=True + MSEQ_RULES 있을 때만 판정
+    _mseq_enabled = bool(cfg('anomaly_mseq_enabled', False))
+    _mseq_opt = cfg('anomaly_mseq_thresholds', {}) or {}      # min_pts(시퀀스 최소 pt), min_wafers
+    _mseq_rules = _parse_mseq_rules(knowledge_text) if _mseq_enabled else []
 
     # spec dict {alias: (low, high)} — 차트 항목은 spec_data, PCHK 등 비차트 항목은 reformatter에서 보강
     spec = {}
@@ -953,17 +1047,17 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         """
         cols = [c for c in [col_waf, col_x, col_y, col_pgm, it] if c and c in tgt.columns]
         if it not in tgt.columns or not cols:
-            return [], {}, [], '', {}, ''
+            return [], {}, [], '', {}, '', ''
         _sub = tgt[cols].dropna(subset=[it])
         if len(_sub) == 0:
-            return [], {}, [], '', {}, ''
+            return [], {}, [], '', {}, '', ''
         _v = pd.to_numeric(_sub[it], errors='coerce')
         _om = pd.Series(False, index=_sub.index)
         if lo is not None: _om = _om | (_v < lo)
         if hi is not None: _om = _om | (_v > hi)
         _so = _sub[_om.values]
         if len(_so) == 0:
-            return [], {}, [], '', {}, ''
+            return [], {}, [], '', {}, '', ''
         # PGM(pt) 뒤 Duplicate_Count 기본값('_1.0'/'_1') 접미사는 불필요 → 제거(중복>1은 유지)
         def _pgm_clean(p):
             return re.sub(r'_1(?:\.0+)?$', '', str(p))
@@ -1049,7 +1143,40 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         pattern_stats['commonality'] = commonality
             except Exception as _pe:
                 print(f"[anomaly] 특이맵 분류 실패({it}): {_pe}")
-        return pgms, zones, positions, pattern, pattern_stats, commonality
+
+        # ── 측정 순서(Measurement-Order) 기반 패턴 (anomaly_mseq_enabled) ──
+        #   wafer별로 측정순서(chip_x 먼저↑ → chip_y↑) spec-out 시퀀스를 만들어 MSEQ_RULES와 매칭.
+        mseq_label = ''
+        if (_mseq_enabled and _mseq_rules and col_x and col_y and col_waf
+                and col_x in _sub.columns and col_y in _sub.columns and col_waf in _sub.columns):
+            try:
+                _mseq_min_pts = int(_mseq_opt.get('min_pts', 10))
+                _mseq_min_wf = int(_mseq_opt.get('min_wafers', 1))
+                _hit = {}   # 규칙명 -> {'level','note','link','wafers':set}
+                _seqdf = _sub[[col_waf, col_x, col_y]].copy()
+                _seqdf['_out'] = _om.values
+                for _w, _wrows in _seqdf.groupby(col_waf):
+                    if len(_wrows) < _mseq_min_pts:
+                        continue
+                    # 측정 순서: chip_x 먼저 증가 → chip_y 증가 = (chip_y, chip_x) 오름차순 정렬
+                    _ordered = _wrows.sort_values([col_y, col_x], kind='stable')
+                    _flags = list(_ordered['_out'].astype(bool))
+                    for _mm in _classify_mseq_pattern(_flags, _mseq_rules):
+                        _wi = _waf_int(_w)
+                        _h = _hit.setdefault(_mm['name'], {'level': _mm['level'], 'note': _mm['note'],
+                                                           'link': _mm['link'], 'wafers': set()})
+                        _h['wafers'].add(_wi if _wi is not None else _w)
+                _labels = []
+                for _nm, _h in _hit.items():
+                    if len(_h['wafers']) >= _mseq_min_wf:
+                        _wl = ', '.join('#' + str(w) for w in sorted(
+                            _h['wafers'], key=lambda z: (isinstance(z, str), z)))
+                        _labels.append(f"{_nm}({_wl})")
+                if _labels:
+                    mseq_label = '측정순서: ' + ' / '.join(_labels)
+            except Exception as _me:
+                print(f"[anomaly] 측정순서 패턴 분류 실패({it}): {_me}")
+        return pgms, zones, positions, pattern, pattern_stats, commonality, mseq_label
 
     # PCHK 계열도 '동일한 index 항목'으로 같은 루프에서 함께 분석하고, 판정도 동일하게 적용한다.
     #   - 비차트(REPORT ORDER 없음)라 metrics_dict엔 없지만 merged_df엔 컬럼으로 존재 → items에 합류.
@@ -1310,13 +1437,13 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         specout_txt, n_out, specout_map = ('', 0, {})
         so_max_ratio, so_n_wafers = 0.0, 0
         so_pgms, so_zones, so_positions = [], {}, []
-        so_pattern, so_pattern_stats, so_commonality = '', {}, ''
+        so_pattern, so_pattern_stats, so_commonality, so_mseq = '', {}, '', ''
         if tgt_it is not None and (lo is not None or hi is not None):
             specout_txt, n_out, specout_map, so_max_ratio, so_n_wafers = \
                 _specout_by_wafer(tgt_it, col_waf, it, lo, hi)
             if n_out > 0:
                 (so_pgms, so_zones, so_positions, so_pattern,
-                 so_pattern_stats, so_commonality) = _specout_extra(it, lo, hi)
+                 so_pattern_stats, so_commonality, so_mseq) = _specout_extra(it, lo, hi)
         # agg 판정 항목은 raw metrics 폴백을 쓰지 않는다(집계값 기준 유지)
         if n_out == 0 and it not in _agg_item_set:
             n_out = int(metrics_dict.get(it, {}).get('spec_out_count', 0) or 0)
@@ -1348,6 +1475,9 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         # wafer간 반복성(동일 shot/유사 위치) 코멘트 — 3개 wafer 이상 발생 시(요청사항)
         if so_commonality:
             _bits.append(so_commonality)
+        # 측정 순서 기반 패턴(MSEQ) — 매칭 시 상세에 표기
+        if so_mseq:
+            _bits.append(so_mseq)
         # radius zone 분포(위치: Center N ...)는 표시하지 않음(요청). so_zones는 basis에만 기록.
         # median 이탈(dev_txt)은 판정 기준에서 제외됨 → 상세에도 표시하지 않음. 산포(disp_txt)만.
         if disp_txt:
@@ -1423,6 +1553,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'spec_out_zone': so_zones,              # {Center/Middle/Edge: 개수}
             'spec_out_positions': so_positions,     # 이상 pt 위치 [{wafer,x,y,pgm}, ...] (상한 적용)
             'spec_out_pattern': so_pattern,         # 특이맵 라벨(Edge ring/줄성/k시 방향 등)
+            'spec_out_mseq': so_mseq,               # 측정순서 패턴 라벨(연속/대량/전반부 이탈)
             'spec_out_pattern_stats': so_pattern_stats,   # 패턴 판정 수치/게이트 사유
             'spec_out_commonality': so_commonality, # wafer간 반복성(동일 shot/유사 위치) 코멘트
             'target_median': _tmed,

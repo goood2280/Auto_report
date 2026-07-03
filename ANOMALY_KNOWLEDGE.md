@@ -99,6 +99,46 @@
 > 참고 해석(일반론): 줄성→스캐너/프로브카드 열, Edge ring→엣지 공정(베벨/링), Center→중심
 > 균일도, k시 방향→노치 기준 국소 클러스터(설비 국소 이슈). 단정하지 말고 확인 포인트로만.
 
+## 측정 순서 기반 패턴 (Measurement-Order Patterns) — My_config.anomaly_mseq_enabled=True 시 동작
+
+> **측정 순서** = WF MAP 좌상단 기준 **chip_x가 먼저 증가 → chip_y가 증가**하는 순서:
+> `(1,1)→(2,1)→(3,1)→ … →(1,2)→(2,2)→ …`. 코드가 각 wafer의 이 순서대로 spec-out 시퀀스를
+> 만들어 아래 `MSEQ_RULES`와 매칭합니다(프로브 접촉 불량·측정 중단·워밍업/드리프트 등 '측정계' 이상 탐지).
+> `My_config.anomaly_mseq_enabled=True` 이고 아래 규칙이 있을 때만 동작하며, 매칭 시 finding 상세에
+> `측정순서: <패턴명>(#wafer…)`로 표기됩니다(전역 옵션 `anomaly_mseq_thresholds`: min_pts·min_wafers).
+>
+> **규칙 문법**(MSEQ_RULES 마커 사이):
+> - `MSEQ:` 패턴 이름(=판정 라벨)
+> - `TYPE:` `consecutive_run` | `mostly_dead` | `front_loaded`
+> - type별 파라미터:
+>   - `consecutive_run` : `MIN_RUN`(연속 spec-out 최소 길이) — 순서대로 연속 N pt 이상 이탈(죽은 구간)
+>   - `mostly_dead`     : `MIN_DEAD_FRAC`(0~1) — 전체 대비 spec-out 비율 ≥ 값(거의 다 이탈, 소수만 정상)
+>   - `front_loaded`    : `FRONT_FRAC`(앞부분 비율 0~1), `FRONT_MIN_SHARE`(앞부분 spec-out 비율 하한),
+>                         `BACK_MAX_SHARE`(뒷부분 spec-out 비율 상한) — 전반부 집중·후반부 양호
+> - `LEVEL:` 이상|주의 (기본 주의) / `NOTE:` 코멘트 / `LINK:` URL(선택)
+
+<!-- MSEQ_RULES:start -->
+MSEQ: 측정 순서 연속 이탈
+TYPE: consecutive_run
+MIN_RUN: 5
+LEVEL: 주의
+NOTE: 측정 순서상 연속으로 spec-out — 프로브 접촉 불량/측정 중단 의심. 재측정으로 재현성 확인.
+
+MSEQ: 측정 초반 대량 이탈
+TYPE: mostly_dead
+MIN_DEAD_FRAC: 0.8
+LEVEL: 주의
+NOTE: 측정 대부분이 spec-out(소수만 정상) — 측정계 이상/프로브 손상 의심. 재측정 우선.
+
+MSEQ: 측정 순서 전반부 집중 이탈
+TYPE: front_loaded
+FRONT_FRAC: 0.5
+FRONT_MIN_SHARE: 0.6
+BACK_MAX_SHARE: 0.2
+LEVEL: 주의
+NOTE: 측정 전반부에 spec-out 집중·후반부 양호 — 측정 워밍업/드리프트 의심.
+<!-- MSEQ_RULES:end -->
+
 ## 판정 규칙 · 불량 모드 (Knowledge Rules / Defect Modes) — 하나로 통합 관리
 
 > 아래 **ANOMALY_RULES 하나의 섹션**이 두 용도로 함께 쓰입니다(중복 관리 불필요):

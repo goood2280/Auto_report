@@ -600,6 +600,15 @@ class Config:
         #                                 2개 wafer 이상 겹치면 '유사 위치 반복' 코멘트
         self.anomaly_pattern_thresholds = {}
 
+        # ── 측정 순서(Measurement-Order) 기반 spec-out 패턴 탐지 on/off ──
+        #   측정 순서 = WF MAP 좌상단 기준 chip_x 먼저 증가 → chip_y 증가
+        #     (1,1)→(2,1)→(3,1)→…→(1,2)→(2,2)→… . wafer별로 이 순서의 spec-out 시퀀스를 만들어
+        #     ANOMALY_KNOWLEDGE.md의 MSEQ_RULES(연속 이탈/대량 이탈/전반부 집중 이탈)와 매칭한다.
+        #   True + MSEQ_RULES가 있을 때만 동작. False(기본)면 측정순서 패턴 판정을 하지 않는다.
+        self.anomaly_mseq_enabled = False
+        #   전역 옵션(dict): min_pts(시퀀스 최소 측정 pt 수, 기본 10), min_wafers(패턴 인정 최소 wafer 수, 기본 1)
+        self.anomaly_mseq_thresholds = {}
+
         # ── AI 판정 예시(few-shot) — RUN/EXAMPLE/*.md (없어도 동작) ──
         #   후행적으로 불량 모드가 확정된 사례를 md 파일로 넣으면 AI Final 판정에 예시로 주입된다.
         #   파일명이 '_'로 시작하면(_TEMPLATE.md 등) 스킵. 작성법은 README 'AI 판정 예시' 참조.
