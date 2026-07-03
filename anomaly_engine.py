@@ -752,6 +752,11 @@ def _parse_knowledge_rules(text):
     for line in body.splitlines():
         if 'ANOMALY_RULES' in line:      # 마커 라인 제외
             continue
+        if re.match(r'\s*\[RULE\]\s*$', line):   # 신규 [RULE] 체이닝 블록 시작 → 구(old) 규칙 파싱 중단(분리)
+            if _has_action(cur):
+                rules.append(cur)
+            cur = None
+            continue
         m = re.match(r'\s*(RULE|WHEN|LEVEL|LINK|NOTE|SUPPRESS_DISP|COMPARE_DISP)\s*[:：]\s*(.*)$',
                      line, re.IGNORECASE)
         if not m:
@@ -828,6 +833,76 @@ def _parse_defect_tree(text):
                 cur['link'] = val
     if cur and cur.get('conds'):
         out.append(cur)
+    return out
+
+
+def _parse_chain_rules(text):
+    """ANOMALY_RULES 마커 안의 '[RULE] 통합 체이닝(decision tree) 규칙' 파싱.
+
+    측정순서 함수·CAT2 조건·다단계 분기·다중 note/link를 '하나의 룰 포맷'으로 표현한다.
+    한 규칙은 `[RULE]` 헤더로 시작하고 아래 키(대소문자 무시)를 가진다:
+      - `trigger:` 대상 항목(함수 spec_out/seq_*의 주체 & finding item)
+      - `sev:`     critical|warning|이상|주의 (finding 심각도, 기본 critical)
+      - `when:`    게이트 조건(참일 때만 규칙 활성)
+      - `when2:`, `when3:`, ... : 연쇄 분기 조건(when 만족 시 위에서부터 순차 평가)
+      - `whenN_else:` : 가독성용 구분자(무시)
+      - `note:`, `note2:`, ... / `link:`, `link2:`, ... : 분기별 코멘트/링크(여러 개 가능)
+    분기 매핑: branch i(1-base) = 조건 `when{i+1}`(없으면 else) → `note{i}`/`link{i}`.
+      즉 when2→note/link, when3→note2/link2, (else)→note3/link3. 조건식 함수는
+      spec_out<op>n · seq_out(n) · seq_front_heavy · seq_mostly_dead(f) · all_sev(그룹...,level) ·
+      sev(ITEM,level) · disp_asc/desc(...) · *_cat2(...) 등(ANOMALY_RULES WHEN 원자와 공용).
+    반환: [{'trigger','sev','when','branches':[{'cond'(None=else),'note','link'}, ...]}, ...].
+    """
+    import re
+    out = []
+    if not text:
+        return out
+    _s = text.find('ANOMALY_RULES:start')
+    _e = text.find('ANOMALY_RULES:end')
+    if _s == -1 or _e == -1 or _e <= _s:
+        return out
+    _blocks = re.split(r'(?im)^\s*\[RULE\]\s*$', text[_s:_e])
+    for _blk in _blocks[1:]:      # 첫 조각은 [RULE] 이전(무시)
+        cur = {'trigger': '', 'sev': 'critical', 'when': '',
+               'whens': {}, 'notes': {}, 'links': {}}
+        for line in _blk.splitlines():
+            if 'ANOMALY_RULES' in line:
+                continue
+            m = re.match(r'\s*([A-Za-z_]+[0-9]*)\s*[:：]\s*(.*)$', line)
+            if not m:
+                continue
+            key = m.group(1).lower()
+            val = m.group(2).strip().strip('"').strip("'").strip()
+            if key == 'trigger':
+                cur['trigger'] = val
+            elif key == 'sev':
+                cur['sev'] = val.lower()
+            elif key == 'when':
+                cur['when'] = val
+            elif re.match(r'when\d+_else$', key):
+                continue
+            elif re.match(r'when\d+$', key):
+                cur['whens'][int(key[4:])] = val
+            elif key == 'note':
+                cur['notes'][1] = val
+            elif re.match(r'note\d+$', key):
+                cur['notes'][int(key[4:])] = val
+            elif key == 'link':
+                cur['links'][1] = val
+            elif re.match(r'link\d+$', key):
+                cur['links'][int(key[4:])] = val
+        if not (cur['trigger'] or cur['when'] or cur['notes']):
+            continue
+        _max = max(list(cur['notes'].keys()) + [0])
+        branches = []
+        for i in range(1, _max + 1):
+            branches.append({'cond': cur['whens'].get(i + 1),
+                             'note': cur['notes'].get(i, ''),
+                             'link': cur['links'].get(i, '')})
+        if not branches and cur['when']:
+            branches = [{'cond': None, 'note': '', 'link': ''}]
+        out.append({'trigger': cur['trigger'], 'sev': cur['sev'],
+                    'when': cur['when'], 'branches': branches})
     return out
 
 
@@ -1432,8 +1507,46 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
 
     _basis = []      # 판단 근거 중간 데이터 (RUN/TEMP 저장용) — 전 Index 통합
     _rankinfo = {}   # 항목별 정렬 지표 (spec-out 비율/wafer 수/이탈 크기/REPORT ORDER)
-    _item_ctx = {}   # 규칙 평가용 항목별 컨텍스트 {level, disp, tmed, pmed, pspread, tmed_pctile}
+    _item_ctx = {}   # 규칙 평가용 항목별 컨텍스트 {level, disp, tmed, pmed, pspread, tmed_pctile, spec_out_pt, seq}
     _item_stats = {} # AI 해석용 항목별 통계 요약(전 항목) — item_stats_out으로 반환
+
+    def _seq_metrics(it, lo, hi):
+        """항목의 wafer별 측정순서(chip_y,chip_x) spec-out 시퀀스 집계 지표(seq_* 규칙 함수용).
+        반환 {run: 최대 연속 spec-out 길이(전 wafer 최댓값), dead: 최대 spec-out 비율,
+              front: 앞 절반 spec-out 비율 최댓값, back: 뒤 절반 spec-out 비율 최솟값}."""
+        _m = {'run': 0, 'dead': 0.0, 'front': 0.0, 'back': 1.0}
+        if (lo is None and hi is None) or it not in tgt.columns or not (col_x and col_y and col_waf):
+            return _m
+        if not (col_x in tgt.columns and col_y in tgt.columns and col_waf in tgt.columns):
+            return _m
+        _sub = tgt[[col_waf, col_x, col_y, it]].dropna(subset=[it])
+        if len(_sub) == 0:
+            return _m
+        _v = pd.to_numeric(_sub[it], errors='coerce')
+        _out = pd.Series(False, index=_sub.index)
+        if lo is not None: _out = _out | (_v < lo)
+        if hi is not None: _out = _out | (_v > hi)
+        _sub = _sub.assign(_out=_out.values)
+        _back_min, _any = 1.0, False
+        for _w, _wr in _sub.groupby(col_waf):
+            if len(_wr) < 5:
+                continue
+            _any = True
+            _ord = _wr.sort_values([col_y, col_x], kind='stable')['_out'].astype(bool).tolist()
+            _n = len(_ord); _no = sum(1 for f in _ord if f)
+            _run = _cur = 0
+            for f in _ord:
+                _cur = _cur + 1 if f else 0
+                if _cur > _run:
+                    _run = _cur
+            _m['run'] = max(_m['run'], _run)
+            _m['dead'] = max(_m['dead'], _no / _n if _n else 0.0)
+            _k = max(1, _n // 2)
+            _m['front'] = max(_m['front'], sum(1 for f in _ord[:_k] if f) / _k)
+            _back_min = min(_back_min, sum(1 for f in _ord[_k:] if f) / max(1, _n - _k))
+        _m['back'] = _back_min if _any else 1.0
+        return _m
+
     for it in items:
         is_pchk = it in pchk_set
         lo, hi = spec.get(it, (None, None))
@@ -1561,6 +1674,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'disp': float(worst_disp_ratio) if worst_disp_ratio else 0.0,
             'tmed': _tmed, 'pmed': pop_med, 'pspread': pop_spread,
             'tmed_pctile': _tmed_pct,
+            'spec_out_pt': int(n_out),           # spec_out(n) 규칙 함수용
+            'seq': _seq_metrics(it, lo, hi),     # seq_out/seq_front_heavy/seq_mostly_dead 규칙 함수용
         }
 
         # ── AI 해석용 항목별 통계 요약(전 항목 — finding 유무 무관) ──
@@ -1706,11 +1821,13 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     #   md의 RULE을 파싱해 항목별 통계 판정(_item_ctx: 이상/주의 level·산포배수·median)과 매칭.
     try:
         _kn_rules = _parse_knowledge_rules(knowledge_text)
-        _tree = _parse_defect_tree(knowledge_text)   # 불량 모드 decision tree(순서 평가·1개만)
-        if _kn_rules or _tree:
+        _tree = _parse_defect_tree(knowledge_text)     # (구) 불량 모드 decision tree
+        _chain = _parse_chain_rules(knowledge_text)    # 통합 [RULE] 체이닝 규칙
+        if _kn_rules or _tree or _chain:
             _mlow_sigma = cfg('anomaly_median_low_sigma', 2.0)
 
             _LV = {'이상': 2, '주의': 1, '참고': 0}
+            _LVL_KW = {'critical': 2, '이상': 2, 'warning': 1, '주의': 1, '참고': 0, 'info': 0}
 
             def _find_ctx(name):
                 _nf = _name_forms(name)
@@ -1831,6 +1948,54 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         return True
                 return False
 
+            # ── 통합 [RULE] 체이닝용 원자 평가 (측정순서 함수·spec_out·all_sev(그룹,level) 등) ──
+            def _eval_chain_atom(atom, tctx):
+                atom = atom.strip()
+                _sq = (tctx or {}).get('seq', {})
+                # spec_out <op> n : trigger의 spec-out pt 수
+                m = re.match(r'spec_out\s*(>=|<=|==|<|>)\s*([\d.]+)$', atom)
+                if m:
+                    v = (tctx or {}).get('spec_out_pt', 0); t = float(m.group(2)); op = m.group(1)
+                    return {'>=': v >= t, '<=': v <= t, '==': v == t, '<': v < t, '>': v > t}[op]
+                # seq_out(n) : trigger 측정순서 최대 연속 spec-out ≥ n
+                m = re.match(r'seq_out\(\s*([\d.]+)\s*\)$', atom)
+                if m:
+                    return float(_sq.get('run', 0)) >= float(m.group(1))
+                # seq_mostly_dead(frac) : trigger 측정순서 spec-out 비율 ≥ frac
+                m = re.match(r'seq_mostly_dead\(\s*([\d.]+)\s*\)$', atom)
+                if m:
+                    return float(_sq.get('dead', 0.0)) >= float(m.group(1))
+                # seq_front_heavy : 앞 절반 이탈 많고(≥0.6) 뒤 절반 양호(≤0.2)
+                if atom == 'seq_front_heavy':
+                    return float(_sq.get('front', 0.0)) >= 0.6 and float(_sq.get('back', 1.0)) <= 0.2
+                # all_sev(그룹..., level) : 나열 그룹(CAT2 또는 항목) '모두' ≥ level
+                m = re.match(r'all_sev\(([^)]+)\)$', atom)
+                if m:
+                    _args = [t.strip() for t in m.group(1).split(',') if t.strip()]
+                    if len(_args) >= 2 and _args[-1].lower() in _LVL_KW:
+                        need = _LVL_KW[_args[-1].lower()]
+                        for g in _args[:-1]:
+                            cc = _cat2_ctx(g) or _find_ctx(g)
+                            if not cc or cc.get('level', 0) < need:
+                                return False
+                        return True
+                # sev(ITEM, level) : 항목 등급(신규 시그니처)
+                m = re.match(r'sev\(([^,]+),\s*(critical|warning|이상|주의|참고|info)\)$', atom)
+                if m:
+                    cc = _find_ctx(m.group(1).strip())
+                    return bool(cc) and cc.get('level', 0) >= _LVL_KW[m.group(2).lower()]
+                # 그 외는 기존 원자 평가로 폴백 (sev()연산자·disp_desc/asc·median_*·*_cat2 등)
+                return _eval_atom(atom)
+
+            def _eval_chain_cond(expr, tctx):
+                if not expr:
+                    return True
+                for _grp in re.split(r'\s+OR\s+', expr):
+                    _atoms = [a for a in re.split(r'\s+AND\s+', _grp) if a.strip()]
+                    if _atoms and all(_eval_chain_atom(a, tctx) for a in _atoms):
+                        return True
+                return False
+
             _suppress_disp_items = set()   # DISPERSION(주의) finding을 억제할 항목(실제 키)
             for _r in _kn_rules:
                 try:
@@ -1893,6 +2058,34 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         findings.append(_finding(_lvl, 'DEFECT_MODE', _tr['mode'],
                                                  f"[불량 모드] {_tr['mode']}", _det.strip()))
                         _dm_hit = True
+                except Exception:
+                    continue
+
+            # ── 통합 [RULE] 체이닝 규칙 — 규칙별 gate(when) 후 분기, 최초 매칭 branch 1개만 finding ──
+            #   trigger 항목 컨텍스트로 spec_out/seq_* 함수를 평가하고, when→when2→when3… 순으로
+            #   따라가 '먼저 만족한' 분기의 note/link 하나만 채택(중복 없음).
+            for _cr in _chain:
+                try:
+                    _tname = _cr.get('trigger', '')
+                    _tctx = _find_ctx(_tname) if _tname else None
+                    if _cr.get('when') and not _eval_chain_cond(_cr['when'], _tctx):
+                        continue   # 게이트 미충족 → 규칙 스킵
+                    for _br in _cr.get('branches', []):
+                        _cond = _br.get('cond')
+                        if _cond is None or _eval_chain_cond(_cond, _tctx):
+                            _note = (_br.get('note') or '').strip()
+                            if not _note:
+                                break   # 코멘트 없는 분기 → finding 없이 종료(첫 매칭만)
+                            _lvl = ('CRITICAL' if str(_cr.get('sev', 'critical')).lower()
+                                    in ('critical', '이상') else 'WARNING')
+                            _det = f"참고: {_br['link']}" if _br.get('link') else ''
+                            _tk = _resolve_item(_tname) if _tname else None
+                            findings.append(_finding(
+                                _lvl, 'DEFECT_MODE', _tname or _note,
+                                f"[불량 모드] {_note}", _det,
+                                cat2=cat2_map.get(_tk, '') if _tk else '',
+                                display_name=_disp(_tname) if _tname else ''))
+                            break   # 최초 매칭 분기 1개만
                 except Exception:
                     continue
     except Exception as _ke:

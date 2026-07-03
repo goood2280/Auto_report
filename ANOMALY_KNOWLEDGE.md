@@ -99,45 +99,16 @@
 > 참고 해석(일반론): 줄성→스캐너/프로브카드 열, Edge ring→엣지 공정(베벨/링), Center→중심
 > 균일도, k시 방향→노치 기준 국소 클러스터(설비 국소 이슈). 단정하지 말고 확인 포인트로만.
 
-## 측정 순서 기반 패턴 (Measurement-Order Patterns) — My_config.anomaly_mseq_enabled=True 시 동작
+## 측정 순서 기반 패턴 (Measurement-Order) — ★ 통합 `[RULE]` 함수로 사용
 
 > **측정 순서** = WF MAP 좌상단 기준 **chip_x가 먼저 증가 → chip_y가 증가**하는 순서:
-> `(1,1)→(2,1)→(3,1)→ … →(1,2)→(2,2)→ …`. 코드가 각 wafer의 이 순서대로 spec-out 시퀀스를
-> 만들어 아래 `MSEQ_RULES`와 매칭합니다(프로브 접촉 불량·측정 중단·워밍업/드리프트 등 '측정계' 이상 탐지).
-> `My_config.anomaly_mseq_enabled=True` 이고 아래 규칙이 있을 때만 동작하며, 매칭 시 finding 상세에
-> `측정순서: <패턴명>(#wafer…)`로 표기됩니다(전역 옵션 `anomaly_mseq_thresholds`: min_pts·min_wafers).
->
-> **규칙 문법**(MSEQ_RULES 마커 사이):
-> - `MSEQ:` 패턴 이름(=판정 라벨)
-> - `TYPE:` `consecutive_run` | `mostly_dead` | `front_loaded`
-> - type별 파라미터:
->   - `consecutive_run` : `MIN_RUN`(연속 spec-out 최소 길이) — 순서대로 연속 N pt 이상 이탈(죽은 구간)
->   - `mostly_dead`     : `MIN_DEAD_FRAC`(0~1) — 전체 대비 spec-out 비율 ≥ 값(거의 다 이탈, 소수만 정상)
->   - `front_loaded`    : `FRONT_FRAC`(앞부분 비율 0~1), `FRONT_MIN_SHARE`(앞부분 spec-out 비율 하한),
->                         `BACK_MAX_SHARE`(뒷부분 spec-out 비율 상한) — 전반부 집중·후반부 양호
-> - `LEVEL:` 이상|주의 (기본 주의) / `NOTE:` 코멘트 / `LINK:` URL(선택)
-
-<!-- MSEQ_RULES:start -->
-MSEQ: 측정 순서 연속 이탈
-TYPE: consecutive_run
-MIN_RUN: 5
-LEVEL: 주의
-NOTE: 측정 순서상 연속으로 spec-out — 프로브 접촉 불량/측정 중단 의심. 재측정으로 재현성 확인.
-
-MSEQ: 측정 초반 대량 이탈
-TYPE: mostly_dead
-MIN_DEAD_FRAC: 0.8
-LEVEL: 주의
-NOTE: 측정 대부분이 spec-out(소수만 정상) — 측정계 이상/프로브 손상 의심. 재측정 우선.
-
-MSEQ: 측정 순서 전반부 집중 이탈
-TYPE: front_loaded
-FRONT_FRAC: 0.5
-FRONT_MIN_SHARE: 0.6
-BACK_MAX_SHARE: 0.2
-LEVEL: 주의
-NOTE: 측정 전반부에 spec-out 집중·후반부 양호 — 측정 워밍업/드리프트 의심.
-<!-- MSEQ_RULES:end -->
+> `(1,1)→(2,1)→(3,1)→ … →(1,2)→(2,2)→ …`. 이 순서의 spec-out 시퀀스를 아래 **`ANOMALY_RULES`의
+> `[RULE]` 조건 함수**로 직접 쓸 수 있습니다(별도 섹션·on/off 불필요 — 판정 규칙과 하나로 통합):
+> - `seq_out(n)`         — 측정 순서상 **연속 spec-out ≥ n**(죽은 구간). 프로브 접촉 불량/측정 중단 의심.
+> - `seq_mostly_dead(f)` — 전체 대비 **spec-out 비율 ≥ f**(0~1, 거의 다 이탈·소수만 정상). 측정계 이상.
+> - `seq_front_heavy`    — **앞 절반 이탈 많고(≥60%) 뒤 절반 양호(≤20%)**. 측정 워밍업/드리프트 의심.
+> 지표는 trigger 항목의 wafer별 시퀀스에서 **최악값으로 집계**해 평가합니다.
+> 예: `[RULE]`에서 `when3: seq_out(5)` → 그 분기의 note로 "측정 순서 연속 이탈" 판정.
 
 ## 판정 규칙 · 불량 모드 (Knowledge Rules / Defect Modes) — 하나로 통합 관리
 
@@ -156,7 +127,40 @@ NOTE: 측정 전반부에 spec-out 집중·후반부 양호 — 측정 워밍업
 >   실제 컬럼명(원 ALIAS·파생 컬럼·표시명 등)을 그대로 적으면 됩니다. (아래 `ITEM_A` 등은 교체용 템플릿)
 > - `trend_tkout_agg`(P10 등)로 집계되는 항목은 이상/주의도 **집계값 기준**으로 판정됩니다.
 
-### 규칙 (아래 `ANOMALY_RULES` 마커 사이만 파싱·관리)
+### ★ 통합 `[RULE]` 체이닝 포맷 (측정순서·CAT2·decision tree·다중 note/link를 하나로)
+
+> `ANOMALY_RULES` 마커 안에서 `[RULE]` 블록을 쓰면 **측정순서 함수·CAT2 조건·다단계 분기(decision
+> tree)·여러 note/link**를 **한 규칙 포맷**으로 표현합니다(별도 MSEQ/DEFECT_TREE 섹션 불필요 — 통합).
+> 코드가 규칙별로 `when`(게이트) 후 `when2→when3…` 순서로 따라가 **먼저 만족한 분기 1개**의 note/link만
+> 채택합니다(중복 없음, `[불량 모드]` finding으로 최상단 표기). `[RULE]` 블록과 (구) `RULE:` 규칙은 함께 둘 수 있습니다.
+>
+> **키**(대소문자 무시):
+> - `trigger:` 대상 항목(함수 `spec_out`/`seq_*`의 주체 & finding item) · `sev:` critical|warning
+> - `when:` 게이트(참일 때만 활성) · `when2:`,`when3:`,… 연쇄 분기 조건 · `whenN_else:` 구분자(무시)
+> - `note:`,`note2:`,… / `link:`,`link2:`,… 분기별 코멘트/링크(여러 개). 매핑: **`when{i+1}`→`note{i}`/`link{i}`**
+>   (즉 `when2`→`note`/`link`, `when3`→`note2`/`link2`, else→마지막 `noteN`).
+> - **조건 함수**: `spec_out <연산자> n` · `seq_out(n)`(측정순서 연속 이탈 ≥ n) ·
+>   `seq_mostly_dead(frac)` · `seq_front_heavy` · `all_sev(그룹…, level)`(나열 그룹=CAT2/항목 **모두** ≥ level) ·
+>   `sev(ITEM, level)` · `disp_asc/desc(...)` · 위 ANOMALY_RULES WHEN 원자(`sev()>=` `median_pctile()` `*_cat2()` 등)도 그대로 사용.
+>
+> 예시(시작 `spec_out>=3` 공통, 후속 분기로 서로 다른 불량모드 — 먼저 매칭된 하나만 출력):
+> ```
+> [RULE]
+> trigger: ITEM_A
+> sev: critical
+> when: spec_out >= 3
+> when2: all_sev(CAT2_B, critical)
+> note: "AAA 불량 의심"
+> link: "https://example.com/aaa"
+> when2_else:
+> when3: disp_asc(ITEM_C, ITEM_B, ITEM_A)
+> note2: "BBB 불량 의심"
+> link2: "https://example.com/bbb"
+> when3_else:
+> note3: "단순 이탈"
+> ```
+
+### (구) 규칙 포맷 (아래 `ANOMALY_RULES` 마커 사이 — `[RULE]`과 함께 사용 가능)
 
 > **문법**: 한 규칙 = `RULE:`(출력 문구/설명, 필수) + 아래 액션/조건.
 > 규칙끼리는 빈 줄로 구분. `LEVEL`(이상|주의, 기본 주의)은 판정 결과의 심각도.
@@ -184,6 +188,20 @@ NOTE: 측정 전반부에 spec-out 집중·후반부 양호 — 측정 워밍업
 > (실사용 시 `A_EXAMPLE` 등을 실제 항목명으로 바꾸세요.)
 
 <!-- ANOMALY_RULES:start -->
+[RULE]
+trigger: ITEM_A
+sev: critical
+when: spec_out >= 3
+when2: all_sev(CAT2_B, critical)
+note: "(예시) AAA 불량 의심 — 실제 코멘트로 교체"
+link: "https://example.com/aaa"
+when2_else:
+when3: disp_asc(ITEM_C, ITEM_B, ITEM_A)
+note2: "(예시) BBB 불량 의심 — 실제 코멘트로 교체"
+link2: "https://example.com/bbb"
+when3_else:
+note3: "(예시) 단순 이탈"
+
 RULE: (예시) A·B 연동 불량
 WHEN: all_sev(ITEM_A, ITEM_B)>=이상
 LEVEL: 이상
@@ -200,36 +218,9 @@ WHEN: sev(PCHK_TYPE1)<주의
 SUPPRESS_DISP: ITEM_C
 <!-- ANOMALY_RULES:end -->
 
-## 불량 모드 Decision Tree (연쇄 판정) — 코드가 순서대로 평가, 최종 '하나'만 출력
-
-> 시작 조건은 같아도(예: `A 이상`) **후속 확인 로직에 따라 서로 다른 불량 모드로 분기**하는
-> decision tree를 규칙으로 표현합니다. 코드가 **위에서부터 순서대로** 평가해 **모든 조건을 만족한
-> '첫' 규칙 하나만** 최종 불량 모드로 채택합니다(중복 판정 없음, 먼저 매칭된 규칙 우선).
-> 매칭 시 `[불량 모드] <MODE명>` finding이 최상단에 표기됩니다.
->
-> **규칙 문법**(DEFECT_TREE 마커 사이):
-> - `MODE:` 불량 모드 이름(=판정 라벨)
-> - `WHEN:` / `STEP:` 조건식 — **여러 줄이면 순차 AND**(트리의 경로를 따라 연속 확인). 조건식 문법은
->   위 ANOMALY_RULES의 WHEN 원자(sev/all_sev/disp_desc/median_pctile/**sev_cat2/all_sev_cat2/disp_*_cat2** 등)와 동일.
-> - `LEVEL:` 이상|주의 (기본 이상) / `NOTE:` 코멘트 / `LINK:` URL(선택)
->
-> 예: 아래 두 규칙은 시작(`A 이상`)은 같지만 STEP이 달라 각각 AAA/BBB로 분기하며, 둘 다 만족하면
-> 위(AAA)가 먼저 매칭되어 AAA 하나만 출력됩니다.
-
-<!-- DEFECT_TREE:start -->
-MODE: (예시) AAA 불량 (A,B,C 모두 이상)
-WHEN: sev(ITEM_A)>=이상
-STEP: all_sev(ITEM_A, ITEM_B, ITEM_C)>=이상
-LEVEL: 이상
-NOTE: (A 이상 → A·B·C 모두 이상 → 조치/확인 포인트로 교체)
-LINK: https://example.com/mode_aaa
-
-MODE: (예시) BBB 불량 (A→C로 갈수록 산포 열화)
-WHEN: sev(ITEM_A)>=이상
-STEP: disp_desc(ITEM_C, ITEM_B, ITEM_A)
-LEVEL: 이상
-NOTE: (A 이상 → C,B,A 순 산포 열화 → 조치/확인 포인트로 교체)
-<!-- DEFECT_TREE:end -->
+> **불량 모드 decision tree(연쇄 판정)** 는 위 `[RULE]` 체이닝 포맷으로 표현합니다(별도 섹션 없음 — 통합):
+> 같은 `when`(시작) 아래 `when2→when3…` 후속 분기로 서로 다른 불량 모드(note)로 나뉘며, 코드가
+> 순서대로 평가해 **먼저 매칭된 분기 하나만** `[불량 모드]` finding으로 최상단에 출력합니다(중복 없음).
 
 ## 출력 예시 (형식만 참고 — 내용은 실제 데이터 기반으로 작성)
 
