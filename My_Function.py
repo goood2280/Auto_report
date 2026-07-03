@@ -630,7 +630,7 @@ def make_title_page(vehicle, lot_id, step_merged):
     return prs
 
 
-def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=None):
+def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=None, item_link_cells=None):
     """Pass Rate Score Board (PPT). 컬럼이 (lot, wafer) MultiIndex이면 lot별로 분리 표기.
        (단일 레벨 wafer 컬럼도 하위호환 동작 — 모두 lot_id 한 그룹으로 처리)."""
     from pptx.util import Inches, Pt
@@ -747,6 +747,8 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
             r = i + 2
             base = RGBColor(245, 247, 250) if i % 2 == 1 else WHITE
             _style(tbl.cell(r, 0), display_name(str(idx)), base, BLACK, False, 7)   # 표시명 후처리, 45자 한 줄 수용 위해 폰트 7pt
+            if item_link_cells is not None:   # Item명 → 차트 슬라이드 내부 링크(insert_plots 후 연결)
+                item_link_cells[str(idx)] = (slide, tbl.cell(r, 0))
             tbl.cell(r, 0).text_frame.paragraphs[0].alignment = PP_ALIGN.LEFT
             tbl.cell(r, 0).text_frame.word_wrap = False   # ITEM명 한 줄(줄바꿈 방지)
             for jj, (_oc, _lot, _waf) in enumerate(order):
@@ -766,6 +768,32 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
                 _style(cell, txt, bg, fg, False, 7)
 
     return prs
+
+
+def link_scoreboard_items(item_link_cells, item_slide_map):
+    """Score Board의 Item명 셀을 해당 아이템 차트 슬라이드로 내부 링크(파랑·밑줄).
+
+    insert_score_board가 insert_plots보다 먼저 실행되므로(차트 슬라이드 미생성),
+    insert_plots가 item_slide_map을 반환한 뒤 이 함수로 링크를 건다.
+    item_link_cells = {item_name: (score_board_slide, item_cell)}.
+    """
+    if not item_link_cells or not item_slide_map:
+        return
+    from pptx.dml.color import RGBColor as _RGB
+    for _it, _pair in item_link_cells.items():
+        _tgt = item_slide_map.get(_it)
+        if _tgt is None:
+            continue
+        try:
+            _sl, _cell = _pair
+            _runs = _cell.text_frame.paragraphs[0].runs
+            if not _runs:
+                continue
+            _run = _runs[0]
+            _run.font.color.rgb = _RGB(0x00, 0x33, 0xCC); _run.font.underline = True
+            _add_internal_slide_link(_run, _sl, _tgt)
+        except Exception:
+            continue
 
 
 def _add_internal_slide_link(run, source_slide, target_slide):
@@ -940,13 +968,15 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
 
 
 def _wafer_circle_params(df, x_col, y_col, rad_col=None, wafer_radius_mm=150.0):
-    """WF MAP 배경 wafer 원(경계) 파라미터 (cx, cy, r)를 '플롯 좌표계' 단위로 산출.
+    """WF MAP wafer 경계 파라미터 (cx, cy, semi_x, semi_y, aspect)를 '플롯 좌표계' 단위로 산출.
 
-    Data Extractor의 radius(mm) 컬럼이 '각 shot 중점 ~ wafer 중점 거리(mm)'라는 전제로,
-    좌표(x,y)와 radius(r)의 관계 (x-cx)^2+(y-cy)^2 = (r/k)^2 를 선형 최소자승으로 fit해
-    중심(cx,cy)과 스케일 k를 구하고, wafer_radius_mm(=150) 원의 반경을 좌표계 단위로 환산한다.
-      선형화: a*x + b*y + e + f*r^2 = x^2+y^2  (a=2cx, b=2cy, f=1/k^2) → r_plot = 150*sqrt(f)
-    radius가 없거나 fit이 비합리적이면 데이터 bounding 원(centroid·최대거리)로 폴백. 무효면 None.
+    shot 격자의 x/y 물리 피치가 1:1이 아니면 등방 원을 그리면 찌그러진다. Chip_Radius(mm)와
+    좌표 관계 r^2 = A*(x-cx)^2 + B*(y-cy)^2 (A=kx^2, B=ky^2)를 선형 최소자승으로 fit해 x/y
+    스케일 kx, ky를 각각 구한다.
+      - wafer_radius_mm(=150) 경계의 x/y 반축: semi_x = 150/kx, semi_y = 150/ky
+      - aspect = ky/kx (matplotlib set_aspect 값). 이 aspect로 그리면 정원(true circle)로 보인다.
+    선형화: r^2 = A*x^2 + B*y^2 + p*x + q*y + C (cx=-p/2A, cy=-q/2B).
+    radius가 없거나 fit이 비합리적이면 등방 bounding 원(semi_x=semi_y, aspect=1.0)로 폴백. 무효면 None.
     """
     try:
         import numpy as _np
@@ -955,59 +985,79 @@ def _wafer_circle_params(df, x_col, y_col, rad_col=None, wafer_radius_mm=150.0):
         x = pd.to_numeric(df[x_col], errors='coerce')
         y = pd.to_numeric(df[y_col], errors='coerce')
         m0 = x.notna() & y.notna()
-        if int(m0.sum()) < 4:
+        if int(m0.sum()) < 6:
             return None
         x = x[m0].to_numpy(dtype=float); y = y[m0].to_numpy(dtype=float)
         cxg = float(x.mean()); cyg = float(y.mean())
+        _dx = float(x.max() - x.min()); _dy = float(y.max() - y.min())
         max_dist = float(_np.sqrt((x - cxg) ** 2 + (y - cyg) ** 2).max())
         if rad_col and rad_col in df.columns:
             r = pd.to_numeric(df[rad_col], errors='coerce')[m0].to_numpy(dtype=float)
             fin = _np.isfinite(r)
-            if int(fin.sum()) >= 4 and float(_np.nanstd(r[fin])) > 0:
+            if int(fin.sum()) >= 6 and float(_np.nanstd(r[fin])) > 0:
                 xx = x[fin]; yy = y[fin]; rr = r[fin]
-                A = _np.column_stack([xx, yy, _np.ones_like(xx), rr ** 2])
+                # r^2 = A*x^2 + B*y^2 + p*x + q*y + C  (x/y 스케일 분리 fit)
+                M = _np.column_stack([xx ** 2, yy ** 2, xx, yy, _np.ones_like(xx)])
                 try:
-                    sol, *_ = _np.linalg.lstsq(A, xx ** 2 + yy ** 2, rcond=None)
-                    a, b, e, f = [float(v) for v in sol]
-                    if _np.isfinite(f) and f > 0:
-                        cx = a / 2.0; cy = b / 2.0
-                        r_plot = wafer_radius_mm * (f ** 0.5)
-                        # fit된 원이 데이터 범위와 크게 어긋나면(단위 불일치 등) 폴백
-                        if _np.isfinite(r_plot) and (max_dist * 0.5) <= r_plot <= (max_dist * 3.0):
-                            return (cx, cy, r_plot)
+                    sol, *_ = _np.linalg.lstsq(M, rr ** 2, rcond=None)
+                    A, B, p, q, C = [float(v) for v in sol]
+                    if _np.isfinite(A) and _np.isfinite(B) and A > 0 and B > 0:
+                        cx = -p / (2.0 * A); cy = -q / (2.0 * B)
+                        kx = A ** 0.5; ky = B ** 0.5
+                        semi_x = wafer_radius_mm / kx; semi_y = wafer_radius_mm / ky
+                        aspect = ky / kx
+                        _okx = (_dx * 0.25) <= 2 * semi_x <= (_dx * 4.0) if _dx > 0 else True
+                        _oky = (_dy * 0.25) <= 2 * semi_y <= (_dy * 4.0) if _dy > 0 else True
+                        if (_np.isfinite([semi_x, semi_y, aspect, cx, cy]).all()
+                                and semi_x > 0 and semi_y > 0 and _okx and _oky
+                                and 0.2 <= aspect <= 5.0):
+                            return (cx, cy, semi_x, semi_y, aspect)
                 except Exception:
                     pass
         if max_dist > 0:
-            return (cxg, cyg, max_dist * 1.03)   # 폴백: 데이터 bounding 원
+            _r = max_dist * 1.03
+            return (cxg, cyg, _r, _r, 1.0)   # 폴백: 등방 bounding 원
         return None
     except Exception:
         return None
 
 
+def _wfmap_aspect(params):
+    """set_aspect에 넘길 값 — params가 있으면 ky/kx, 없으면 'equal'."""
+    try:
+        return params[4] if params else 'equal'
+    except Exception:
+        return 'equal'
+
+
 def _add_wafer_circle(ax, params, color='#9aa4b0', lw=0.7, zorder=0):
-    """_wafer_circle_params 결과를 ax에 배경 wafer 원(테두리)으로 추가(칩 산점 뒤)."""
+    """_wafer_circle_params 결과(타원 반축)를 ax에 wafer 경계로 추가(칩 산점 뒤).
+
+    호출부에서 ax.set_aspect(_wfmap_aspect(params))로 aspect를 맞추면 정원(true circle)로 보인다.
+    """
     if not params:
         return
     try:
-        from matplotlib.patches import Circle
-        ax.add_patch(Circle((params[0], params[1]), params[2], fill=False,
+        from matplotlib.patches import Ellipse
+        cx, cy, sx, sy = params[0], params[1], params[2], params[3]
+        ax.add_patch(Ellipse((cx, cy), width=2.0 * sx, height=2.0 * sy, fill=False,
                              edgecolor=color, linewidth=lw, zorder=zorder))
     except Exception:
         pass
 
 
 def _wfmap_axis_limits(gx0, gx1, gy0, gy1, xpad, ypad, circ, margin_frac=0.08):
-    """WF MAP 축 범위 = 데이터 범위 + wafer 원(circ)을 '모두' 포함하는 (xlo,xhi,ylo,yhi).
+    """WF MAP 축 범위 = 데이터 범위 + wafer 경계(타원)를 '모두' 포함하는 (xlo,xhi,ylo,yhi).
 
-    원이 데이터 바깥으로 나가도 잘리지 않도록 원 반경 기준 작은 여백(margin_frac)을 둔다.
+    경계가 데이터 바깥으로 나가도 잘리지 않도록 반축 기준 작은 여백(margin_frac)을 둔다.
     """
     xlo, xhi = gx0 - xpad, gx1 + xpad
     ylo, yhi = gy0 - ypad, gy1 + ypad
     if circ:
-        _cx, _cy, _cr = circ
-        _m = abs(_cr) * margin_frac
-        xlo = min(xlo, _cx - _cr - _m); xhi = max(xhi, _cx + _cr + _m)
-        ylo = min(ylo, _cy - _cr - _m); yhi = max(yhi, _cy + _cr + _m)
+        _cx, _cy, _sx, _sy = circ[0], circ[1], circ[2], circ[3]
+        _mx = abs(_sx) * margin_frac; _my = abs(_sy) * margin_frac
+        xlo = min(xlo, _cx - _sx - _mx); xhi = max(xhi, _cx + _sx + _mx)
+        ylo = min(ylo, _cy - _sy - _my); yhi = max(yhi, _cy + _sy + _my)
     return xlo, xhi, ylo, yhi
 
 
@@ -1123,8 +1173,9 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
         # 원 테두리: radius 기반 원점·150mm 원을 '진한 검정'으로. 내부 배경색 없음(흰색)
         #  — 칩(shot) 컬러가 내부를 채우므로 별도 배경 fill 불필요.
         _add_wafer_circle(ax, _circ, color='#000000', lw=1.0)
-        ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal', adjustable='box'); ax.set_facecolor('white')
-        # chip x 정방향(chip #1=왼쪽, 큰 번호=오른쪽): xlim 역순 + 원까지 포함(원 안 잘리게)
+        # aspect=ky/kx로 맞춰 wafer 경계가 정원으로 보이게(찌그러짐 방지)
+        ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect(_wfmap_aspect(_circ), adjustable='box'); ax.set_facecolor('white')
+        # chip x 정방향(chip #1=왼쪽, 큰 번호=오른쪽): xlim 역순 + 경계까지 포함(안 잘리게)
         _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(_gx0, _gx1, _gy0, _gy1, _xpad, _ypad, _circ)
         ax.set_xlim(_xhi, _xlo)
         ax.set_ylim(_ylo, _yhi)
@@ -1252,9 +1303,9 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
         ax.scatter(g[cx].astype(float), g[cy].astype(float), c=colors,
                    s=s, marker='s', linewidths=0)
         _add_wafer_circle(ax, _circ, color='#000000', lw=1.0)
-        # 흰 배경(회색 격자 제거) + 눈금/스파인 없음 → 원 + shot map만 표시
-        ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal', adjustable='box'); ax.set_facecolor('white')
-        # chip x 정방향(chip #1=왼쪽): xlim 역순 + 원까지 포함(원 안 잘리게)
+        # 흰 배경(회색 격자 제거) + 눈금/스파인 없음 → 경계 + shot map만 표시. aspect로 정원 유지
+        ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect(_wfmap_aspect(_circ), adjustable='box'); ax.set_facecolor('white')
+        # chip x 정방향(chip #1=왼쪽): xlim 역순 + 경계까지 포함(안 잘리게)
         _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(gx0, gx1, gy0, gy1, xpad, ypad, _circ)
         ax.set_xlim(_xhi, _xlo)
         ax.set_ylim(_ylo, _yhi)
@@ -1397,9 +1448,9 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
                cmap=cmap or _wfmap_cmap(direction), vmin=vmin, vmax=vmax,
                s=s, marker='s', linewidths=0)
     _add_wafer_circle(ax, _circ, color='#000000', lw=1.0)
-    ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal')
+    ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect(_wfmap_aspect(_circ), adjustable='box')
     ax.set_facecolor('white')
-    # 원까지 포함하도록 축 범위 지정(원 안 잘리게) — chip #1 왼쪽(역순)
+    # 경계까지 포함하도록 축 범위 지정(안 잘리게) — chip #1 왼쪽(역순)
     _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(_gx0, _gx1, _gy0, _gy1, _xpad, _ypad, _circ)
     ax.set_xlim(_xhi, _xlo)
     ax.set_ylim(_ylo, _yhi)
@@ -2106,8 +2157,16 @@ def _render_item_charts(task):
 
         # ---- WF MAP 공유 컬러 스케일 (spec line 기준 diverging, HTML과 동일 규칙) ----
         wfmap_norm = _wfmap_norm(direction, wfmap_spec_low, wfmap_spec_high, item_df[item_name])
-        # 배경 wafer 원(150mm) — radius(mm) 기반 중심·스케일 fit (모든 셀 공통)
+        # 배경 wafer 원(150mm) — radius(mm) 기반 중심·x/y 스케일 fit (모든 셀 공통)
         _circ_ppt = _wafer_circle_params(item_df, map_x, map_y, col_rad)
+        # 셀 공통 축범위: 데이터(패딩) + wafer 경계(타원)를 모두 포함(경계 안 잘리게)
+        _px_lo, _px_hi = global_x_min, global_x_max
+        _py_lo, _py_hi = global_y_min, global_y_max
+        if _circ_ppt:
+            _ccx, _ccy, _csx, _csy = _circ_ppt[0], _circ_ppt[1], _circ_ppt[2], _circ_ppt[3]
+            _mx = abs(_csx) * 0.08; _my = abs(_csy) * 0.08
+            _px_lo = min(_px_lo, _ccx - _csx - _mx); _px_hi = max(_px_hi, _ccx + _csx + _mx)
+            _py_lo = min(_py_lo, _ccy - _csy - _my); _py_hi = max(_py_hi, _ccy + _csy + _my)
 
         # 칩 격자 차원(예: 13x13)
         nx = max(int(item_df[map_x].nunique()), 1)
@@ -2158,12 +2217,12 @@ def _render_item_charts(task):
                     _pl = re.sub(r'(\d+)\s*pt\)', r'\1)', _pl)  # "(137pt)" → "(137)"
                     ax.set_ylabel(_pl, fontsize=4, rotation=90, labelpad=4, color=C_NEUTRAL)
                 ax.set_xticks([]); ax.set_yticks([])
-                ax.set_aspect('equal', adjustable='box')   # 웨이퍼 정원형 유지
+                ax.set_aspect(_wfmap_aspect(_circ_ppt), adjustable='box')   # aspect=ky/kx → 정원 유지
                 for spine in ax.spines.values():
                     spine.set_visible(False)
-                # chip x 정방향(chip #1=왼쪽, 13=오른쪽): HTML WF MAP과 동일하게 xlim 역순으로 방향 교정
-                ax.set_xlim(global_x_max, global_x_min)
-                ax.set_ylim(global_y_min, global_y_max)
+                # chip x 정방향(chip #1=왼쪽, 13=오른쪽): HTML WF MAP과 동일하게 xlim 역순 + 경계 포함
+                ax.set_xlim(_px_hi, _px_lo)
+                ax.set_ylim(_py_lo, _py_hi)
 
         fig_map.subplots_adjust(left=0.02, right=0.99, top=0.97, bottom=0.06)
         # 칩 격자가 선명하도록 해상도 상향
@@ -3131,7 +3190,9 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                     for _j, (_lot, _w) in enumerate(order_lw):
                         _vals = _slw.get((_lot, _w))
                         _txt = _vals[_r] if (_vals and _r < len(_vals)) else "-"
-                        _stat_style(table_shape.cell(_rr, 1 + _j), _txt, _bg, _BK, False, 8)
+                        # 값이 8자 이상이면 6pt, 그 외 7pt
+                        _stat_style(table_shape.cell(_rr, 1 + _j), _txt, _bg, _BK, False,
+                                    6 if len(str(_txt)) >= 8 else 7)
             else:
                 # (fallback) fab_lot_id 없을 때: 기존 wafer #1~25 고정 26칸 표
                 cols = 26
@@ -3148,7 +3209,8 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                         _v = vals[r_idx - 1] if (vals and r_idx - 1 < len(vals)) else "-"
                         _bg = RGBColor(240, 240, 240) if vals is None else (
                             RGBColor(245, 247, 250) if r_idx % 2 == 1 else _WH)
-                        _stat_style(table_shape.cell(r_idx, w_idx), _v, _bg, _BK, False, 7)
+                        _stat_style(table_shape.cell(r_idx, w_idx), _v, _bg, _BK, False,
+                                    6 if len(str(_v)) >= 8 else 7)
                 for r_idx in range(1, 5):
                     _bg = RGBColor(245, 247, 250) if r_idx % 2 == 1 else _WH
                     _stat_style(table_shape.cell(r_idx, 0), _stat_rows[r_idx - 1] if r_idx - 1 < len(_stat_rows) else "",

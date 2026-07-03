@@ -850,10 +850,14 @@ def main():
                         prs_low_qual = make_title_page(vehicle, target_lot_id, target_step_merged)
 
                         # 1-2. Scoreboard 투입 (lot_id 분리 — HTML과 동일하게 (lot,wafer) 컬럼)
-                        prs_low_qual = insert_score_board(VIP_group_lw, prs_low_qual, target_lot_id, ' / '.join([target_lot_id, target_step_merged]), spec_data=spec_data, config=GLOBAL_CONFIG)
+                        _sb_item_cells = {}   # Score Board Item명 셀 → 차트 슬라이드 링크용(insert_plots 후 연결)
+                        prs_low_qual = insert_score_board(VIP_group_lw, prs_low_qual, target_lot_id, ' / '.join([target_lot_id, target_step_merged]), spec_data=spec_data, config=GLOBAL_CONFIG, item_link_cells=_sb_item_cells)
 
                         # 1-3. BoxPlot 투입 - 메일링 버전 (description dict는 랏 루프 밖에서 1회 파싱)
                         prs_low_qual, metrics_dict, item_slide_map = insert_plots(merged_df, prs_low_qual, description_image_info_dict_low_qual, target_lot_id, target_root_lot_id, target_DC_step, target_DC_step_id, spec_data, img_quality = 12, ref=False, reformatter=reformatter, dpi=GLOBAL_CONFIG.ppt_chart_dpi)
+
+                        # Score Board Item명 → 해당 차트 슬라이드 내부 하이퍼링크 연결(차트 슬라이드 생성 후)
+                        link_scoreboard_items(_sb_item_cells, item_slide_map)
 
                         # 1-3b. 코드 통계 분석(findings) — HTML [0]와 PPT 상세 페이지에 공용 사용
                         code_findings = []
