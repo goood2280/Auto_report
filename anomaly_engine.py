@@ -787,6 +787,50 @@ def _parse_knowledge_rules(text):
     return rules
 
 
+def _parse_defect_tree(text):
+    """ANOMALY_KNOWLEDGE.md의 '연쇄(decision tree) 불량 모드 규칙'(DEFECT_TREE 마커 사이) 파싱.
+
+    한 규칙 = `MODE:`(불량 모드 이름) + `WHEN:`/`STEP:`(조건식; 여러 줄이면 순차 AND = 트리 경로를
+    따라가는 연속 확인) + [`LEVEL`(이상|주의, 기본 이상)/`NOTE`/`LINK`].
+    반환: [{'mode','conds':[조건식,...],'level','note','link'}, ...] — **순서=우선순위**(먼저 매칭 우선).
+    같은 시작 조건이라도 후속 STEP이 다르면 서로 다른 MODE로 분기하고, 코드는 순서대로 평가해
+    '최초로 모든 조건을 만족한' 규칙 하나만 최종 불량 모드로 채택한다(중복 판정 방지).
+    """
+    import re
+    out = []
+    if not text:
+        return out
+    _s = text.find('DEFECT_TREE:start')
+    _e = text.find('DEFECT_TREE:end')
+    if _s == -1 or _e == -1 or _e <= _s:
+        return out
+    cur = None
+    for line in text[_s:_e].splitlines():
+        if 'DEFECT_TREE' in line:      # 마커(:start/:end) 라인 제외
+            continue
+        m = re.match(r'\s*(MODE|WHEN|STEP|LEVEL|NOTE|LINK)\s*[:：]\s*(.*)$', line, re.IGNORECASE)
+        if not m:
+            continue
+        key = m.group(1).upper(); val = m.group(2).strip()
+        if key == 'MODE':
+            if cur and cur.get('conds'):
+                out.append(cur)
+            cur = {'mode': val, 'conds': [], 'level': '이상', 'note': '', 'link': ''}
+        elif cur is not None:
+            if key in ('WHEN', 'STEP'):
+                if val:
+                    cur['conds'].append(val)
+            elif key == 'LEVEL':
+                cur['level'] = val
+            elif key == 'NOTE':
+                cur['note'] = val
+            elif key == 'LINK':
+                cur['link'] = val
+    if cur and cur.get('conds'):
+        out.append(cur)
+    return out
+
+
 def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         main_vehicle=None, config=None, reformatter=None,
                         knowledge_text="", item_stats_out=None):
@@ -1662,7 +1706,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     #   md의 RULE을 파싱해 항목별 통계 판정(_item_ctx: 이상/주의 level·산포배수·median)과 매칭.
     try:
         _kn_rules = _parse_knowledge_rules(knowledge_text)
-        if _kn_rules:
+        _tree = _parse_defect_tree(knowledge_text)   # 불량 모드 decision tree(순서 평가·1개만)
+        if _kn_rules or _tree:
             _mlow_sigma = cfg('anomaly_median_low_sigma', 2.0)
 
             _LV = {'이상': 2, '주의': 1, '참고': 0}
@@ -1687,8 +1732,52 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 _vs = [(_find_ctx(n) or {}).get('disp', 0.0) for n in names]
                 return max(_vs) if _vs else 0.0
 
+            def _cat2_ctx(cat2_name):
+                """CAT2 그룹의 대표 컨텍스트 = 그 CAT2에 속한 항목들의 '최대 level·최대 disp'.
+                해당 CAT2에 항목이 하나도 없으면 None."""
+                _nf = _name_forms(cat2_name)
+                _lv, _dsp, _found = 0, 0.0, False
+                for _cit, _cx in _item_ctx.items():
+                    _c2 = cat2_map.get(_cit, '')
+                    if _c2 and (_name_forms(_c2) & _nf):
+                        _found = True
+                        _lv = max(_lv, _cx.get('level', 0))
+                        _dsp = max(_dsp, _cx.get('disp', 0.0) or 0.0)
+                return {'level': _lv, 'disp': _dsp} if _found else None
+
             def _eval_atom(atom):
                 atom = atom.strip()
+                # ── CAT2 그룹 기반 원자 (항목 원자보다 먼저 — 접미 _cat2로 구분) ──
+                # sev_cat2(CAT2) 연산자 등급 : 그 CAT2의 최대 item level과 비교
+                m = re.match(r'sev_cat2\(([^)]+)\)\s*(>=|<=|==|<|>)\s*(이상|주의|참고)$', atom)
+                if m:
+                    cc = _cat2_ctx(m.group(1).strip())
+                    lv = cc['level'] if cc else 0
+                    need = _LV[m.group(3)]; op = m.group(2)
+                    return {'>=': lv >= need, '<=': lv <= need, '==': lv == need,
+                            '<': lv < need, '>': lv > need}[op]
+                # all_sev_cat2(A,B,C)>=이상 : 나열 CAT2 '모두' 해당 등급 이상(각 CAT2에 그 등급 항목 존재)
+                m = re.match(r'all_sev_cat2\(([^)]+)\)\s*>=\s*(이상|주의)$', atom)
+                if m:
+                    need = 2 if m.group(2) == '이상' else 1
+                    _ns = [t.strip() for t in m.group(1).split(',') if t.strip()]
+                    _cs = [_cat2_ctx(n) for n in _ns]
+                    return bool(_cs) and all(c and c['level'] >= need for c in _cs)
+                # disp_desc_cat2(A,B,C)/disp_asc_cat2 : CAT2별 최대 산포배수가 순서대로 감소/증가
+                m = re.match(r'disp_(desc|asc)_cat2\(([^)]+)\)$', atom)
+                if m:
+                    _ns = [t.strip() for t in m.group(2).split(',') if t.strip()]
+                    _vs = []
+                    for n in _ns:
+                        c = _cat2_ctx(n)
+                        if not c:
+                            return False
+                        _vs.append(c['disp'])
+                    if len(_vs) < 2:
+                        return False
+                    if m.group(1) == 'desc':
+                        return all(_vs[i] > _vs[i + 1] for i in range(len(_vs) - 1))
+                    return all(_vs[i] < _vs[i + 1] for i in range(len(_vs) - 1))
                 # sev(ITEM) 연산자: >= <= == < > , 등급 이상/주의/참고 (미측정 항목은 참고=0으로 간주)
                 m = re.match(r'sev\(([^)]+)\)\s*(>=|<=|==|<|>)\s*(이상|주의|참고)$', atom)
                 if m:
@@ -1786,8 +1875,28 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             if _suppress_disp_items:
                 findings[:] = [f for f in findings
                                if not (f.get('type') == 'DISPERSION' and f.get('item') in _suppress_disp_items)]
+
+            # ── 불량 모드 decision tree (DEFECT_TREE) — 순서대로 평가, 최초 매칭 '1개'만 finding ──
+            #   각 규칙의 조건(WHEN/STEP; 여러 개면 순차 AND, 즉 트리의 경로를 따라감)이 모두 참인
+            #   '첫' 규칙 하나만 채택하고 멈춘다(중복 판정 방지, 먼저 매칭된 규칙 우선).
+            _dm_hit = False
+            for _tr in _tree:
+                if _dm_hit:
+                    break
+                try:
+                    _conds = _tr.get('conds') or []
+                    if _conds and all(_eval_when(_c) for _c in _conds):
+                        _lvl = 'CRITICAL' if str(_tr.get('level', '이상')).strip() == '이상' else 'WARNING'
+                        _det = _tr.get('note', '') or ''
+                        if _tr.get('link'):
+                            _det = (_det + '  ' if _det else '') + f"참고: {_tr['link']}"
+                        findings.append(_finding(_lvl, 'DEFECT_MODE', _tr['mode'],
+                                                 f"[불량 모드] {_tr['mode']}", _det.strip()))
+                        _dm_hit = True
+                except Exception:
+                    continue
     except Exception as _ke:
-        print(f"[WARN] 지식 규칙 평가 실패: {_ke}")
+        print(f"[WARN] 지식 규칙/불량모드 평가 실패: {_ke}")
 
     # ── Priority(우선순위) 명시적 수식 — 값이 클수록 우선(위에 정렬) ──
     #   이상(SPEC_OUT) : P = 20000 + 100·R_max + N_wf/100
@@ -1800,6 +1909,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     def _priority(f):
         ri = _rankinfo.get(f.get('item', ''), {})
         t = f.get('type')
+        if t == 'DEFECT_MODE':   # 최종 불량 모드(decision tree) — 종합 결론 → 최상단
+            return 40000.0 + (100.0 if f.get('severity') == 'CRITICAL' else 0.0)
         if t == 'KNOWLEDGE':   # 지식 기반 판정(불량모드/risk 등)은 종합 결론 → 최상단
             return 30000.0 + (100.0 if f.get('severity') == 'CRITICAL' else 0.0)
         if t == 'SPEC_OUT':

@@ -170,7 +170,12 @@ NOTE: 측정 전반부에 spec-out 집중·후반부 양호 — 측정 워밍업
 >   예1(하위 5%): `WHEN: sev(A)>=주의 AND median_pctile(B)<=5`
 >   예2(상위 10%): `WHEN: sev(A)>=주의 AND median_pctile(B)>=90`
 >   예3(중앙 근처 확인): `WHEN: median_pctile(C)>=40 AND median_pctile(C)<=60`
-> - 조건은 ` AND ` / ` OR ` 로 연결(‘OR로 묶인 AND 그룹’). 항목명은 ALIAS/표시명 모두 가능.
+> - **CAT2(카테고리) 그룹 단위 원자** — 해당 CAT2에 속한 항목들의 '최대 level·최대 산포'로 판정:
+>   - `sev_cat2(CAT2) <연산자> <이상|주의|참고>` — 그 CAT2의 최대 item 등급과 비교(≥이상=그 CAT2에 이상 항목 존재)
+>   - `all_sev_cat2(CAT2_A, CAT2_B, ...)>=이상` — 나열 **CAT2 모두**에서 해당 등급(예: 이상)이 나옴
+>   - `disp_desc_cat2(A,B,C)` / `disp_asc_cat2(...)` — CAT2별 최대 산포배수가 순서대로 감소/증가
+>   - 예: `WHEN: all_sev_cat2(CAT2_A, CAT2_B, CAT2_C)>=이상` (세 카테고리 모두 이상 → '측정이상 추정' 등)
+> - 조건은 ` AND ` / ` OR ` 로 연결(‘OR로 묶인 AND 그룹’). 항목명·CAT2명은 ALIAS/표시명 모두 가능.
 > **액션(RULE 종류)**:
 > - (기본) `WHEN` 참이면 `RULE:` 문구를 '지식 판정'으로 출력(`LINK`/`NOTE` 첨부).
 > - `SUPPRESS_DISP: A,B,...` — 나열 항목의 **산포(주의) 언급을 억제**(해당 항목 spec-out=이상은 유지).
@@ -194,6 +199,37 @@ RULE: (예시) PCHK 정상 시 산포 언급 억제
 WHEN: sev(PCHK_TYPE1)<주의
 SUPPRESS_DISP: ITEM_C
 <!-- ANOMALY_RULES:end -->
+
+## 불량 모드 Decision Tree (연쇄 판정) — 코드가 순서대로 평가, 최종 '하나'만 출력
+
+> 시작 조건은 같아도(예: `A 이상`) **후속 확인 로직에 따라 서로 다른 불량 모드로 분기**하는
+> decision tree를 규칙으로 표현합니다. 코드가 **위에서부터 순서대로** 평가해 **모든 조건을 만족한
+> '첫' 규칙 하나만** 최종 불량 모드로 채택합니다(중복 판정 없음, 먼저 매칭된 규칙 우선).
+> 매칭 시 `[불량 모드] <MODE명>` finding이 최상단에 표기됩니다.
+>
+> **규칙 문법**(DEFECT_TREE 마커 사이):
+> - `MODE:` 불량 모드 이름(=판정 라벨)
+> - `WHEN:` / `STEP:` 조건식 — **여러 줄이면 순차 AND**(트리의 경로를 따라 연속 확인). 조건식 문법은
+>   위 ANOMALY_RULES의 WHEN 원자(sev/all_sev/disp_desc/median_pctile/**sev_cat2/all_sev_cat2/disp_*_cat2** 등)와 동일.
+> - `LEVEL:` 이상|주의 (기본 이상) / `NOTE:` 코멘트 / `LINK:` URL(선택)
+>
+> 예: 아래 두 규칙은 시작(`A 이상`)은 같지만 STEP이 달라 각각 AAA/BBB로 분기하며, 둘 다 만족하면
+> 위(AAA)가 먼저 매칭되어 AAA 하나만 출력됩니다.
+
+<!-- DEFECT_TREE:start -->
+MODE: (예시) AAA 불량 (A,B,C 모두 이상)
+WHEN: sev(ITEM_A)>=이상
+STEP: all_sev(ITEM_A, ITEM_B, ITEM_C)>=이상
+LEVEL: 이상
+NOTE: (A 이상 → A·B·C 모두 이상 → 조치/확인 포인트로 교체)
+LINK: https://example.com/mode_aaa
+
+MODE: (예시) BBB 불량 (A→C로 갈수록 산포 열화)
+WHEN: sev(ITEM_A)>=이상
+STEP: disp_desc(ITEM_C, ITEM_B, ITEM_A)
+LEVEL: 이상
+NOTE: (A 이상 → C,B,A 순 산포 열화 → 조치/확인 포인트로 교체)
+<!-- DEFECT_TREE:end -->
 
 ## 출력 예시 (형식만 참고 — 내용은 실제 데이터 기반으로 작성)
 
