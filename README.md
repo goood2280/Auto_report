@@ -1,7 +1,7 @@
-# HOL Auto Report System
+# ET Auto Report System
 
-> 반도체 HOL(Head-Of-Line) DC 측정 결과 **자동 분석 · 리포팅 시스템**
-> ET 측정 데이터 → 통계 자동 해석 → PPT/HTML 리포트 → 메일 발송까지 한 번에.
+> 반도체 **DC(ET) 측정 결과 자동 분석 → 자동 리포트 → 불량 해석**까지 한 번에 이어지는 시스템
+> ET(Electrical Test) 측정 데이터 → 통계 자동 해석 → 불량(Anomaly)·원인 해석 → PPT/HTML 리포트 → 메일 발송.
 
 ---
 
@@ -14,6 +14,7 @@
 - [아키텍처](#아키텍처)
 - [불량 통계 자동 분석 (핵심)](#불량-통계-자동-분석-핵심)
   - [analyze_commonality — 코드 단독 동작](#analyze_commonality--코드-단독-동작)
+  - [지식 규칙 엔진 — 코드 조합 판정](#지식-규칙-엔진--코드-조합-판정)
   - [지표(metrics) 계산식](#지표metrics-계산식)
   - [신호등 3색 등급](#신호등-3색-등급)
   - [Anomaly Trend Chart & spec-out WF MAP](#anomaly-trend-chart--spec-out-wf-map)
@@ -37,7 +38,8 @@
 
 ## 개요
 
-Python 기반 반도체 HOL DC 측정 데이터 자동 분석 · 리포트 생성 시스템입니다.
+Python 기반 반도체 **DC(ET) 측정 데이터 자동 분석 · 리포트 생성 · 불량 해석** 시스템입니다.
+DC 측정 결과를 자동으로 통계 분석하고, 리포트를 자동 생성하며, 불량(Anomaly) 해석까지 한 흐름으로 이어집니다.
 
 - **ET(Electrical Test) 데이터 쿼리** → Hive 파티셔닝 Parquet 저장
 - **DuckDB** 기반 고속 인메모리 처리 (Scale Factor / ADDP 파생 연산 / 피벗)
@@ -170,7 +172,7 @@ python setup.py -o DIR       # DIR에 추출
 ### 4) 설정 (My_config.py)
 
 - **AI 토글**: `use_gpt_summary`(마스터), `use_gpt_multistep`(3단계).
-- **분석 민감도**: `anomaly_lot_median_sigma`, `anomaly_lot_dispersion_ratio` (↑=덜 민감). **통계 우선순위 제외**: `anomaly_exclude_items`(와일드카드). → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
+- **분석 민감도**: `anomaly_lot_dispersion_ratio`(↑=덜 민감), 지식 규칙용 `anomaly_median_low_sigma`. **통계 우선순위 제외**: `anomaly_exclude_items`(와일드카드). → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
 - **WF MAP**: `scoreboard_wfmap_min_pts`(=50), `wfmap_exclude_keywords`(예: `['PCHK']`).
 - **이미지 해상도**: PPT `ppt_chart_dpi`/`ppt_map_jpg_quality`, HTML `html_chart_dpi`/`html_wfmap_dpi`(독립 조정).
 - **색상**: `score_color_scale`(Score Board 연속 색), `score_color_scale_by_item`(ITEM별 override).
@@ -196,7 +198,7 @@ python Main.py _TRIGGER_<vehicle>_<lot>_<step> # 특정 LOT 즉시 강제 발행
 
 | 경로 | 내용 |
 |---|---|
-| `RUN/Report/<vehicle>/HTML/<날짜>-<prod>-<lot>-HOL_<step>_Report_v13.html` | HTML 리포트([0] 요약·Score Board·Inline·상세) |
+| `RUN/Report/<vehicle>/HTML/<날짜>-<prod>-<lot>-HOL_<step>_Report.html` | HTML 리포트([0] 요약·Score Board·Inline·상세) |
 | `RUN/Report/<vehicle>/Mail/<...>.pptx` | 메일용 PPT (표지·Score Board·항목별 차트·Index Aggregation·Anomaly 상세) |
 | `RUN/TEMP/<alias>.png` | HTML이 재참조하는 Trend PNG(해상도 `html_chart_dpi`) |
 | `RUN/TEMP/anomaly_basis_<lot>.json/.csv` | Anomaly 판단 근거(device·PCHK 통합: spec-out wafer·robust 산포·이탈도 + PCHK `meas_overlap_*` 동일 shot 겹침) |
@@ -249,15 +251,21 @@ auto report/
 
 ### analyze_commonality — 코드 단독 동작
 
-`anomaly_engine.analyze_commonality()`는 **각 측정 Index(항목)마다 '한 개'의 Finding**만 산출합니다.
-**모든 판정은 target lot의 '각 wafer'를 제품 전체의 'wafer별' 기준과 비교**하는 방식이며(PCHK 포함 전 항목 동일),
-판정 우선순위는 다음과 같습니다(위에서 매칭되면 그 항목은 더 보지 않음).
+`anomaly_engine.analyze_commonality()`는 **각 측정 Index(항목)마다 한 개의 Finding**을 산출하고,
+그 위에 **지식 규칙(`KNOWLEDGE`)으로 여러 항목을 조합한 판정**을 추가로 얹습니다.
+**항목 단위 판정은 target lot의 '각 wafer'를 제품 전체의 'wafer별' 기준과 비교**하는 방식이며(PCHK 포함 전 항목 동일),
+finding type과 우선순위(값이 클수록 위에 정렬)는 다음과 같습니다.
 
-| 우선 | type | severity | 조건 | 코멘트 |
+| 우선(priority) | type | severity | 조건 | 코멘트 |
 |---|---|---|---|---|
-| 1 | `SPEC_OUT` | 🔴 CRITICAL (이상) | 타깃 lot에서 spec(SPECLOW~SPECHIGH) 이탈 측정점 ≥ 1 | wafer별 (이탈 pt/측정 pt) 비율, 위치(radius zone)·PGM(pt) |
-| 2 | `MEDIAN_SHIFT` | 🟠 WARNING (주의) | spec 미초과 + **어떤 wafer의 median 이탈** `> anomaly_lot_median_sigma` σ | worst wafer의 median이 제품 wafer median 분포에서 몇 σ |
-| 3 | `DISPERSION` | 🟠 WARNING (주의) | spec 미초과 + **어떤 wafer의 산포** `> anomaly_lot_dispersion_ratio` 배 | worst wafer 내부 산포가 '보통 wafer 산포'의 몇 배 |
+| **30000+** | `KNOWLEDGE` | 🔴 이상 / 🟠 주의 | `ANOMALY_KNOWLEDGE.md`의 **`ANOMALY_RULES` 마커(WHEN 조건)** 충족 → 여러 항목 조합 판정 | 지식 기반 판정(불량모드/risk). 라벨 + 근거 + LINK. → [지식 규칙 엔진](#지식-규칙-엔진--코드-조합-판정) |
+| **20000+** | `SPEC_OUT` | 🔴 CRITICAL (이상) | 타깃 lot에서 spec(SPECLOW~SPECHIGH) 이탈 측정점 ≥ 1 | wafer별 (이탈 pt/측정 pt) 비율, 위치(radius zone)·PGM(pt) |
+| **10000+** | `DISPERSION` | 🟠 WARNING (주의) | spec 미초과 + **어떤 wafer의 산포** `> anomaly_lot_dispersion_ratio` 배 | worst wafer 내부 산포가 '보통 wafer 산포'의 몇 배 |
+| **하위(참고)** | `MEAS_SUSPECT` | 🟡 NOTICE (측정이상 추정) | **판정 제외(`wfmap_exclude_keywords`) PCHK**가 spec-out | 동일 shot 겹침 신호만 산출 → AI 측정이상 추정 입력 |
+
+> **median 이탈은 더 이상 finding을 만들지 않습니다.** 각 wafer median이 제품 wafer 분포에서 몇 σ 떨어졌는지는
+> **detail 문구·`anomaly_basis_<lot>.json`(`worst_wafer_median_sigma`)에 기록만** 하고, 이상/주의 판정 대상에서는 뺐습니다
+> (median 기반 판정은 지식 규칙의 `median_low()`/`median_pctile()` 원자로 이전).
 
 **wafer 단위 비교 기준** (제품=main vehicle 전체를 (lot, wafer) 단위로 계산):
 
@@ -268,16 +276,51 @@ auto report/
 | 산포 배수 | `wafer 내부 robust 산포 / 보통 wafer 산포(=제품 각 wafer 내부 산포의 중앙값)` |
 | robust 산포 | `1.4826 × MAD` (0이면 IQR/1.349 → std) — 이상치에 둔감 |
 
-- **정렬(`_rank`)**: `이상 > 주의` 순. 이상은 `(−최고 이탈 비율, −spec-out wafer 수, REPORT ORDER)`, 주의는 `(−임계 대비 초과 배수, REPORT ORDER)`.
+- **정렬**: `_priority(f)` 수식값 내림차순 → 동점 시 `REPORT ORDER` 오름차순. `KNOWLEDGE(30000+) > SPEC_OUT(20000+) > DISPERSION(10000+) > MEAS_SUSPECT(하위)` 순이 항상 보장됩니다. priority 값은 투명성을 위해 각 finding에 `priority` 필드로 부착됩니다.
 - **각 detector는 항목 단위 try/except**라 한 항목이 실패해도 나머지 분석은 계속됩니다.
 - **spec-out 분류는 리포팅 대상 `target_lot_id`에만 한정**합니다. 같은 root의 형제 lot은 이상으로 분류하지 않습니다.
 - spec-out 판정은 reformatter의 `REPORT DIRECTION`(UPPER/LOWER/BOTH)을 따릅니다.
-  예) `LOWER` 항목은 상한 초과를 불량으로 보지 않으므로, 상한을 넘어도 spec-out이 아니라 *median 이탈(🟠)* 로 잡힐 수 있습니다.
-- **PCHK도 일반 Index와 동일 판정**(spec-out → 이상). 단 PCHK spec-out site에서 **동일 shot(wafer·PGM(pt)·CHIP_X/Y)에 다른 항목도 함께 spec-out**인 '겹침 신호'는 `anomaly_basis_<lot>.json`의 `meas_overlap_*`에만 기록되어 **AI의 '측정이상 추정'** 판단 재료로 넘어갑니다(코드는 겹침 사실만 산출).
+  예) `LOWER` 항목은 상한 초과를 불량으로 보지 않으므로, 상한을 넘어도 spec-out으로 잡지 않습니다(median 이탈은 detail·basis에만 기록).
+- **PCHK도 일반 Index와 동일 판정**(spec-out → 이상). 단 PCHK spec-out site에서 **동일 shot(wafer·PGM(pt)·CHIP_X/Y)에 다른 항목도 함께 spec-out**인 '겹침 신호'는 `anomaly_basis_<lot>.json`의 `meas_overlap_*`에 기록되고 finding에도 실려 **AI의 '측정이상 추정'** 판단 재료로 넘어갑니다. PCHK가 `wfmap_exclude_keywords`에 걸리면 이상 판정 대신 `MEAS_SUSPECT`(🟡 측정이상 추정) 신호로만 산출합니다.
 - 통계 우선순위에서 특정 항목을 빼려면 → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
 
-> **불량 모드(여러 Index 조합 해석)는 코드가 하지 않습니다.**
-> 코드는 위 단일 이상만 산출하고, 조합→불량모드 판정은 **AI 연결 시에만** `ANOMALY_KNOWLEDGE.md`의 '불량 모드 판정표'로 수행합니다([AI 다단계 해석](#ai-다단계-해석-선택) 참고).
+> **여러 Index 조합→불량 모드 판정을 이제 코드도 수행**합니다(지식 규칙 엔진). `ANOMALY_KNOWLEDGE.md`의
+> `ANOMALY_RULES` 마커에 `RULE/WHEN/LEVEL/LINK/NOTE`로 조건식을 쓰면 코드가 파싱·평가해 `KNOWLEDGE` finding을
+> 만듭니다 — **AI가 없어도** 동작합니다. AI가 켜져 있으면 그 위에 자연어 종합 판정을 추가로 얹습니다.
+> → [지식 규칙 엔진](#지식-규칙-엔진--코드-조합-판정).
+
+### 지식 규칙 엔진 — 코드 조합 판정
+
+여러 항목을 조합한 **불량 모드/risk 판정**을 **AI 없이 코드가** 수행하는 경량 규칙 엔진입니다
+(`analyze_commonality` 내부, `_parse_knowledge_rules`). `ANOMALY_KNOWLEDGE.md`의 **`ANOMALY_RULES:start … ANOMALY_RULES:end`** 마커 사이에 규칙을 텍스트로 적으면, 코드가 파싱해 항목별 통계 컨텍스트에 대입·평가하고 통과한 규칙만 `KNOWLEDGE` finding으로 올립니다(최상단 priority).
+
+**규칙 한 개 = `RULE`(라벨) + `WHEN`(조건식) + 선택 `LEVEL/LINK/NOTE`** (혹은 `SUPPRESS_DISP`/`COMPARE_DISP`):
+
+```
+ANOMALY_RULES:start
+RULE: Gate 모듈 불량 (VTH N·P 연동)
+WHEN: all_sev(VTH_N, VTH_P) >= 이상
+LEVEL: 이상
+LINK: http://<사내 위키>/gate-cd
+NOTE: VTH N·P 동시 spec-out → Gate CD/Oxide 확인
+ANOMALY_RULES:end
+```
+
+**`WHEN` 조건식** — `AND`/`OR`로 원자(atom)를 결합합니다(대소문자 무시). 지원 원자:
+
+| 원자 | 의미 |
+|---|---|
+| `sev(ITEM) >= 이상\|주의\|참고` | 항목 severity 등급 비교(`>= <= == < >`). 미측정 항목은 참고(0) |
+| `all_sev(A, B, …) >= 이상\|주의` | 나열 항목이 **모두** 해당 등급 이상 |
+| `disp_desc(A,B,…)` / `disp_asc(…)` | 산포배수가 나열 순서로 단조 감소/증가 |
+| `median_low(ITEM)` | target median이 제품 대비 `anomaly_median_low_sigma`(2.0)σ 이상 낮음 |
+| `median_pctile(ITEM) <= 5` | target median이 모집단 분포의 하위 5% 이내(`>=95`면 상위 5%) |
+
+- **`LEVEL`** = `이상`(CRITICAL) / `주의`(WARNING, 기본). **`LINK`/`NOTE`** 는 detail에 근거·참고 링크로 덧붙습니다.
+- **`SUPPRESS_DISP: A, B`** — 해당 항목의 `DISPERSION`(주의) finding을 억제(WHEN 있으면 조건 참일 때만). spec-out(이상)은 유지.
+- **`COMPARE_DISP: A,B | D,E`** — 두 그룹의 최대 산포배수를 비교하는 코멘트 finding 생성(WHEN 참일 때).
+- 규칙 평가는 전체가 try/except로 감싸져 **하나가 깨져도 나머지 분석은 계속**됩니다.
+- **엔지니어가 `ANOMALY_KNOWLEDGE.md`만 편집**하면 코드 수정 없이 조합 판정 로직을 추가/수정할 수 있습니다.
 
 ### 지표(metrics) 계산식
 
@@ -298,12 +341,12 @@ auto report/
 
 | 신호등 | severity | 라벨 | 요약 head 표기 | 현재 산출 detector |
 |---|---|---|---|---|
-| 🔴 빨강 | `CRITICAL` | 이상 | 이상 | `SPEC_OUT` (PCHK 포함) |
-| 🟠 주황 | `WARNING` | 주의 | 주의 | `MEDIAN_SHIFT`, `DISPERSION` (wafer 단위) |
+| 🔴 빨강 | `CRITICAL` | 이상 | 이상 | `SPEC_OUT`(PCHK 포함), `KNOWLEDGE`(LEVEL=이상) |
+| 🟠 주황 | `WARNING` | 주의 | 주의 | `DISPERSION`(wafer 단위), `KNOWLEDGE`(LEVEL=주의) |
+| 🟡 노랑 | `NOTICE` | 주의 | (미집계) | `MEAS_SUSPECT`(판정 제외 PCHK spec-out — 측정이상 추정) |
 | ⚫ 회색 | `INFO` | 참고 | (미표기) | — |
 
-- **코드 findings는 이상/주의 2등급만** 산출하므로 HTML·PPT 요약 head도 `● 이상 N | ● 주의 X` 두 칸만 표시합니다(예전 '측정이상 추정' 칸 제거). '측정이상 추정'은 코드 판정이 아니라 **AI가 basis 겹침 신호로 판단**하는 영역입니다.
-- `NOTICE`(🟡) 신호등 인프라(`_SEV_*`)는 코드에 남아있으나 현재 detector가 사용하지 않습니다.
+- **요약 head 건수(`● 이상 N | ● 주의 X`)는 `CRITICAL`/`WARNING`만 집계**합니다. `NOTICE`(측정이상 추정)는 finding·상세에는 나오지만 head 건수에는 넣지 않습니다.
 - 색/라벨은 `anomaly_engine.py`의 **`_SEV_COLOR` / `_SEV_LABEL` / `_SEV_HEAD` 한 곳**에서 관리합니다.
   PPT 상세 페이지는 `My_Function.insert_findings_page`가 같은 색을 미러링합니다.
 - 어떤 Finding을 어느 등급으로 둘지는 그 detector의 `_finding("CRITICAL"|"WARNING", ...)` 첫 인자로 결정됩니다.
@@ -448,10 +491,12 @@ interpret_with_ai(findings, metrics, knowledge_text, _LLM_FN, ...)
 
 | 변수 | 기본값 | 무엇을 바꾸나 | ↑ 올리면 | ↓ 내리면 |
 |------|--------|------|------|------|
-| `anomaly_lot_median_sigma` | `2.0` | **주의(median)** 임계 σ — target wafer median이 제품 wafer median 분포에서 이 σ 초과 이탈 시 주의 | 확실한 이동만 주의 | 작은 이동도 주의 |
 | `anomaly_lot_dispersion_ratio` | `1.5` | **주의(산포)** 임계 배수 — target wafer 내부 산포가 '보통 wafer 산포'의 이 배수 초과 시 주의 | 큰 산포만 주의 | 약한 산포도 주의 |
+| `anomaly_median_low_sigma` | `2.0` | 지식 규칙 `median_low(ITEM)` 원자의 임계 σ — target median이 제품 대비 이 σ 이상 낮을 때 참(True) | 확실한 하락만 매칭 | 작은 하락도 매칭 |
 | `anomaly_trend_chart_top_n` | `5` | [0] Anomaly Trend Chart / HTML 요약에 **보여줄 상위 항목 수** | 더 많이 표시 | 핵심만 표시 |
 | `anomaly_deviation_sigma` | `1.5` | Trend chart 항목이 top_n에 못 미칠 때 **`metrics_dict`로 보충 선정**하는 σ(판정 아님) | 보충 적게 | 보충 많이 |
+
+> `anomaly_lot_median_sigma`(`2.0`)는 예전 median 주의 detector용 값이었으나, **median 이탈이 finding 판정에서 빠지면서 현재는 사용되지 않습니다**(median은 detail·basis 기록 + 지식 규칙 `median_low`/`median_pctile`로만 반영).
 
 > **이상(spec-out)** 은 별도 임계가 없습니다 — spec(LCL/UCL) 이탈이면 무조건 이상입니다. spec 자체는 `reformatter/<vehicle>_reformatter.csv`의 `SPECLOW/SPECHIGH/REPORT DIRECTION`으로 정합니다.
 
@@ -473,7 +518,7 @@ self.anomaly_exclude_items = [
 - 판정은 `anomaly_engine.item_excluded(name, patterns)` 한 함수가 담당 → `analyze_commonality`(finding·basis)와 `Main.py`(Trend chart 보충 선정) **양쪽에서 동일 적용**.
 - 제외된 항목은 `RUN/TEMP/anomaly_basis_<lot>.json`에도 나타나지 않습니다.
 
-> `anomaly_trend_slope_sigma` · `anomaly_split_separation` · `anomaly_site_recurrence_min_lots` · `anomaly_pchk_check` 키는 과거 detector의 잔여 설정으로 **현재 `analyze_commonality` 동작에는 영향을 주지 않습니다**(불량 모드/측정 의심/drift/split 해석은 AI + 지식베이스로 이전됨).
+> `anomaly_trend_slope_sigma` · `anomaly_split_separation` · `anomaly_site_recurrence_min_lots` · `anomaly_pchk_check` · `anomaly_lot_median_sigma` 키는 과거 detector의 잔여 설정으로 **현재 `analyze_commonality` 동작에는 영향을 주지 않습니다**(불량 모드/측정 의심/median 해석은 [지식 규칙 엔진](#지식-규칙-엔진--코드-조합-판정)과 AI로 이전됨).
 
 ### Anomaly Trend Chart / WF MAP
 
@@ -566,7 +611,8 @@ self.anomaly_exclude_items = [
 | 확장 대상 | 위치 | 방법 |
 |---|---|---|
 | **새 이상 detector** | `anomaly_engine.analyze_commonality()` | 항목 루프 안에 `findings.append(_finding(sev, type, item, title, detail))` 한 줄 추가. 각 detector는 try/except로 독립 → 하나 실패해도 나머지 계속 |
-| **판정 임계값** | `My_config.py` | `anomaly_lot_median_sigma`, `anomaly_lot_dispersion_ratio` 등 상수만 조정 (코드 불변) → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝) |
+| **판정 임계값** | `My_config.py` | `anomaly_lot_dispersion_ratio`, `anomaly_median_low_sigma` 등 상수만 조정 (코드 불변) → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝) |
+| **조합 판정 규칙(불량모드/risk)** | `ANOMALY_KNOWLEDGE.md` `ANOMALY_RULES` | `RULE/WHEN/LEVEL/LINK/NOTE`로 조건식 작성 → 코드가 `KNOWLEDGE` finding 생성(AI 무관). → [지식 규칙 엔진](#지식-규칙-엔진--코드-조합-판정) |
 | **통계 분석 제외 항목** | `My_config.anomaly_exclude_items` | 파생/마진 컬럼 등을 우선순위에서 제외(와일드카드). `item_excluded`가 finding·Trend 양쪽 적용 |
 | **AI 해석 톤/형식** | `ANOMALY_KNOWLEDGE.md` | 페르소나·스타일 텍스트 편집 (로직 아님) |
 | **AI 다단계 프롬프트** | `anomaly_engine.interpret_with_ai()` | triage→root-cause→final 각 단계 프롬프트 문자열 수정 |
@@ -575,14 +621,14 @@ self.anomaly_exclude_items = [
 | **리포트 섹션** | `Main.py` HTML 조립부(`target0~N`) + `My_config._REPORT_HTML_TEMPLATE` | 새 `<div id="targetN">` 자리표시자 + 채우는 코드 추가 |
 | **근거 데이터 산출물** | `analyze_commonality` → `RUN/TEMP/anomaly_basis_<lot>.json/.csv` | 판단 근거(spec-out wafer/robust 산포/이탈도)를 파일로 축적 (후처리·감사용) |
 
-**설계 원칙**: 통계 계산은 `insert_plots`(→`metrics_dict`)와 `analyze_commonality`(robust MAD/IQR)로 나뉘고, **불량 모드 조합 해석은 코드가 아니라 AI + 아래 참고 지식**에 위임합니다. 코드 detector는 "항목 단위 단일 이상"만 산출해 단순·견고하게 유지합니다.
+**설계 원칙**: 통계 계산은 `insert_plots`(→`metrics_dict`)와 `analyze_commonality`(robust MAD/IQR)로 나뉩니다. 코드 detector는 "항목 단위 단일 이상"을 산출하고, **여러 항목 조합→불량 모드 판정은 지식 규칙 엔진(`ANOMALY_RULES`)이 코드에서, AI 연결 시엔 자연어 종합 판정이 그 위에** 얹힙니다. 무거운 통계 로직을 코드에, 조합 판정 룰을 텍스트(MD)에 두어 단순·견고하게 유지합니다.
 
 ### 넣을 수 있는 분석 로직 (아이디어)
 
 현재 코드 detector로 구현됐거나, detector로 **추가 가능한** 분석들:
 
 - **spec-out 판정** *(구현됨)* — 방향(`REPORT DIRECTION`) 반영, wafer별 (이탈 pt/측정 pt) 비율로 순위(→ wafer 수 → REPORT ORDER).
-- **median 이탈 (wafer 단위, robust)** *(구현됨)* — target lot **각 wafer**의 median이 **제품 wafer median 분포**에서 몇 σ(MAD 기준) 이탈(worst wafer 채택).
+- **median 이탈 (wafer 단위, robust)** *(계산됨 — finding 판정에는 미사용)* — target lot **각 wafer**의 median이 **제품 wafer median 분포**에서 몇 σ(MAD 기준) 이탈(worst wafer 채택). detail·basis에 기록하고, 판정은 지식 규칙 `median_low`/`median_pctile`로 처리.
 - **산포 확대 (wafer 단위, robust)** *(구현됨)* — target lot **각 wafer** 내부 산포가 '보통 wafer 산포'의 몇 배(worst wafer 채택).
 - **lot내 집단 분리(bimodality)** — 한 lot이 High/Low 두 집단으로 갈림 → 설비 챔버/슬롯 split 후보. (히스토그램 이봉성/gap 검정으로 detector화 가능)
 - **동일 site spec-out 재발** — 같은 chip(X,Y)가 여러 lot에서 반복 이탈 → systematic(레티클/척/프로브핀). (위치별 재발 카운트로 detector화 가능)
@@ -688,8 +734,8 @@ print(label); print(stats['rules'])   # 규칙별 평가 trace
 
 ### 불량 모드 판정표 (참고 지식)
 
-> **코드는 단일 이상만 산출**하고, 여러 Index 조합→불량 모드 판정은 **AI 연결 시** 수행합니다(위가 우선).
-> ⚠️ **AI가 실제 참조하는 판정표는 `ANOMALY_KNOWLEDGE.md`의 `DEFECT_MODE_TABLE` 마커 섹션**입니다
+> 여러 Index 조합→불량 모드 판정은 **두 경로**로 이뤄집니다: ① 코드 [지식 규칙 엔진](#지식-규칙-엔진--코드-조합-판정)이 `ANOMALY_RULES`로 `KNOWLEDGE` finding 생성(AI 무관), ② AI 연결 시 `DEFECT_MODE_TABLE` 기반 자연어 종합 판정(그 위에 얹힘).
+> ⚠️ **AI가 실제 참조하는 판정표는 `ANOMALY_KNOWLEDGE.md`의 `DEFECT_MODE_TABLE` 마커 섹션**, 코드 규칙은 같은 파일의 `ANOMALY_RULES` 마커 섹션입니다
 > (AI에는 ANOMALY_KNOWLEDGE.md만 전달됨 — README는 전달되지 않음). 새 불량 모드 추가/링크·코멘트
 > 관리도 그쪽에서 하세요. 아래는 이해를 돕는 참고 사본(예시)입니다.
 
@@ -742,7 +788,8 @@ print(label); print(stats['rules'])   # 규칙별 평가 trace
 ### anomaly_engine.py
 | 함수 | 설명 |
 |------|------|
-| `analyze_commonality` | 코드 기반 Index별 단일 Finding 산출 (**AI 없이 동작**) |
+| `analyze_commonality` | 코드 기반 Index별 Finding 산출 + `ANOMALY_RULES` 지식 규칙으로 조합 판정(`KNOWLEDGE`) (**AI 없이 동작**) |
+| `_parse_knowledge_rules` | `ANOMALY_KNOWLEDGE.md`의 `ANOMALY_RULES` 마커 파싱(RULE/WHEN/LEVEL/…) |
 | `interpret_with_ai` | Finding → AI 다단계(triage→root-cause→final) 해석 HTML (LLM 교체 가능) |
 | `render_findings_html` | Finding 리스트 → HTML(상위 top_n, 신호등 색) |
 | `run_anomaly_pipeline` | (구) Z-score Trend 차트 — 하위호환용 유지 |

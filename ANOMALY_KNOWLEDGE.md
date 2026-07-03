@@ -163,37 +163,20 @@
 > (실사용 시 `A_EXAMPLE` 등을 실제 항목명으로 바꾸세요.)
 
 <!-- ANOMALY_RULES:start -->
-RULE: AA_불량모드 의심
-WHEN: sev(D_EXAMPLE)>=주의 AND disp_desc(A_EXAMPLE,B_EXAMPLE,C_EXAMPLE,D_EXAMPLE)
-LEVEL: 주의
-LINK: https://example.com/aa_failure
-
-RULE: BB_불량모드 의심
-WHEN: sev(D_EXAMPLE)>=주의 AND all_sev(A_EXAMPLE,B_EXAMPLE,C_EXAMPLE,D_EXAMPLE)>=주의
-LEVEL: 주의
-NOTE: OOO를 확인해달라
-
-RULE: ABC risk가 존재한다
-WHEN: sev(ABC_EXAMPLE)==이상
+RULE: Gate 모듈 불량 (VTH N·P 연동)
+WHEN: all_sev(VTH_N, VTH_P)>=이상
 LEVEL: 이상
-LINK: https://example.com/abc_risk
+LINK: https://example.com/gate_module
+NOTE: VTH_N·VTH_P가 동일하게 spec-out → Gate CD 미달/Gate Oxide 산포 후보. Gate CD·Oxide 인라인 계측과 대조.
 
-RULE: NNN 이상 추정
-WHEN: sev(BBB_EXAMPLE)>=주의 AND median_low(CCC_EXAMPLE)
+RULE: IDSAT_P 타겟 저하 (모집단 대비 median 하위)
+WHEN: median_pctile(IDSAT_P)<=15
 LEVEL: 주의
+NOTE: IDSAT_P median이 모집단 하위 15% 이내 — 직전 공정 타겟 시프트/이동도 저하 가능. Trend로 drift 확인.
 
-RULE: F_EXAMPLE 미이상 시 A~E 산포 미언급
-WHEN: sev(F_EXAMPLE)<주의
-SUPPRESS_DISP: A_EXAMPLE, B_EXAMPLE, C_EXAMPLE, D_EXAMPLE, E_EXAMPLE
-
-RULE: F_EXAMPLE 이상 시 산포 그룹 비교
-WHEN: sev(F_EXAMPLE)>=이상
-COMPARE_DISP: A_EXAMPLE,B_EXAMPLE | D_EXAMPLE,E_EXAMPLE
-LEVEL: 주의
-NOTE: 산포가 큰 쪽을 Trend에서 확인
-
-RULE: A_EXAMPLE·B_EXAMPLE 산포는 spec-out 없으면 미언급
-SUPPRESS_DISP: A_EXAMPLE, B_EXAMPLE
+RULE: PCHK 정상 시 산포 언급 억제(예시)
+WHEN: sev(PCHK_LKG)<주의
+SUPPRESS_DISP: IDSAT_P
 <!-- ANOMALY_RULES:end -->
 
 ## 출력 예시 (형식만 참고 — 내용은 실제 데이터 기반으로 작성)
