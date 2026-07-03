@@ -349,8 +349,9 @@ def _convert_name(x, prefixes=None, suffixes=None, repl=None):
 
 # ──────────────────────────────────────────────────────────────────────
 # spec-out 공간 패턴(특이맵) 분류 — 제품/좌표계 무관, '규칙 목록' 기반
-#   - 규칙(패턴)의 추가/삭제/순서변경/임계조정 = My_config.anomaly_pattern_rules(list)로
-#     통째 교체(코드 수정 불필요). 전역 옵션은 anomaly_pattern_thresholds(dict).
+#   - 판정 규칙은 **오직 My_config.anomaly_pattern_rules(list)** 로만 정의한다(하드코딩 기본 규칙 없음).
+#   - anomaly_pattern_rules 가 None/빈 리스트면 **특이맵(공간 패턴) 판정을 아예 하지 않는다**
+#     (spec_out_pattern 라벨 미생성). 전역 옵션은 anomaly_pattern_thresholds(dict).
 #   - 어떤 규칙이 어떤 값으로 평가·통과했는지는 stats['rules'] trace로 남는다
 #     (anomaly_basis_<lot>.json의 spec_out_pattern_stats — "왜 이 특이맵인지" 근거).
 #   - 판정식 상세·규칙 type별 파라미터는 README '특이맵(공간 패턴) 판정 기준' 참조.
@@ -359,21 +360,6 @@ _PATTERN_OPT_DEFAULT = {
     'min_pts': 3,           # 패턴 판정 최소 unique 좌표 수(미만이면 '소수 pt' 보류)
     'y_positive_up': True,  # 좌표 y+가 웨이퍼 위(12시) 방향인지(반대면 False → 상/하 반전)
 }
-
-_PATTERN_RULES_DEFAULT = [
-    # 위에서부터 평가 — '먼저 통과'한 규칙의 라벨 채택(구체적 패턴을 위에).
-    {'name': '전면성',            'type': 'global',      'min_share': 0.5},
-    {'name': '세로 줄성',         'type': 'line',        'axis': 'x', 'max_lanes': 2, 'min_pts': 4},
-    {'name': '가로 줄성',         'type': 'line',        'axis': 'y', 'max_lanes': 2, 'min_pts': 4},
-    {'name': 'Center 집중',       'type': 'radius_band', 'r_min': 0.0,  'r_max': 0.45, 'cover': 0.7},
-    {'name': 'Edge ring',         'type': 'radius_band', 'r_min': 0.85, 'r_max': 1.01, 'cover': 0.7},
-    {'name': 'Middle 환형',       'type': 'radius_band', 'r_min': 0.45, 'r_max': 0.85, 'cover': 0.7},
-    # 방향 집중도 R(단위벡터 평균 길이): 균일 60°부채꼴≈0.955, 90°(사분면)≈0.90, 반구≈0.64
-    #   → 0.92 = '사분면보다 좁은(≲75°) 클러스터'만 k시 방향으로 판정.
-    {'name': 'k시 방향 클러스터', 'type': 'clock',       'min_rnorm': 0.4, 'resultant': 0.92, 'min_frac': 0.75},
-    {'name': '사분면',            'type': 'quadrant',    'cover': 0.7},
-    {'name': '반구',              'type': 'half',        'cover': 0.75},
-]
 
 
 def classify_specout_pattern(out_xy, all_xy, radius_of=None, rules=None, options=None):
@@ -386,7 +372,7 @@ def classify_specout_pattern(out_xy, all_xy, radius_of=None, rules=None, options
                       없으면 centroid 유클리드 거리로 대체
       - 방향        = centroid 기준 시계 각도(12시=위, 3시=오른쪽)
 
-    rules(목록, 위에서부터 '먼저 통과'한 라벨 채택 — 없으면 _PATTERN_RULES_DEFAULT):
+    rules(목록, 위에서부터 '먼저 통과'한 라벨 채택 — **None/빈 리스트면 판정하지 않음**):
       type='global'      : min_share — unique out 좌표/제품 전체 좌표 ≥ → 전면성
       type='line'        : axis('x'|'y'), max_lanes, min_pts — 서로 다른 축값 개수 ≤ → 줄성
       type='radius_band' : r_min, r_max, cover — r_norm∈[r_min,r_max) 비율 ≥ cover → 환형/링/센터
@@ -404,9 +390,12 @@ def classify_specout_pattern(out_xy, all_xy, radius_of=None, rules=None, options
               "이 맵이 왜 이 특이맵으로 분류됐는지"를 basis에서 확인할 수 있다.
     """
     import math
+    # 규칙(My_config.anomaly_pattern_rules)이 없으면 특이맵 판정을 하지 않음(하드코딩 기본규칙 없음)
+    if not rules:
+        return '', {'skipped': '패턴 규칙 미설정(My_config.anomaly_pattern_rules None/빈 리스트)'}
     opt = dict(_PATTERN_OPT_DEFAULT)
     opt.update(options or {})
-    rule_list = rules if rules else _PATTERN_RULES_DEFAULT
+    rule_list = rules
     try:
         pts = sorted({(float(x), float(y)) for x, y in out_xy})
         allp = [(float(x), float(y)) for x, y in all_xy]
@@ -821,7 +810,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             _pat_all_xy = [(float(a), float(b)) for a, b in zip(_pc[col_x], _pc[col_y])]
         except Exception:
             _pat_all_xy = []
-    _pat_rules = cfg('anomaly_pattern_rules', None) or None   # None → _PATTERN_RULES_DEFAULT
+    _pat_rules = cfg('anomaly_pattern_rules', None) or None   # None/빈 → 특이맵 판정 안 함(하드코딩 기본 없음)
     _pat_opt = cfg('anomaly_pattern_thresholds', {}) or {}    # 전역 옵션(min_pts, y_positive_up)
 
     # spec dict {alias: (low, high)} — 차트 항목은 spec_data, PCHK 등 비차트 항목은 reformatter에서 보강
@@ -1029,7 +1018,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             positions.append({'note': f'외 {_n_more}pt 생략(전체는 anomaly_basis 참조)'})
         # 특이맵(공간 패턴) 분류 — wafer간 중복 좌표는 제거하고 lot 전체 관점으로 판정
         pattern, pattern_stats, commonality = '', {}, ''
-        if col_x and col_y and col_x in _so.columns and col_y in _so.columns and _pat_all_xy:
+        # _pat_rules(My_config.anomaly_pattern_rules)가 설정된 경우에만 특이맵(공간 패턴) 판정
+        if _pat_rules and col_x and col_y and col_x in _so.columns and col_y in _so.columns and _pat_all_xy:
             try:
                 _oxy = [(a, b) for a, b in zip(_so[col_x], _so[col_y])
                         if pd.notna(a) and pd.notna(b)]

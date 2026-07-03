@@ -567,20 +567,27 @@ class Config:
         #   - 불량 모드 우선순위 판정표는 ANOMALY_KNOWLEDGE.md('불량 모드 판정표')에서 관리하며,
         #     AI(use_gpt_summary)가 연결된 경우에만 상단 요약에 불량 모드를 해석/표기한다.
 
-        # ── 특이맵(spec-out 공간 패턴) 판정 — 규칙 목록 기반 ──
-        #   판정 규칙(패턴)의 **추가/삭제/순서변경/임계조정**은 anomaly_pattern_rules(list)로
-        #   기본 목록(anomaly_engine._PATTERN_RULES_DEFAULT)을 통째로 교체하면 된다(코드 수정 불필요).
-        #   None이면 기본 목록 사용. 각 규칙 = {'name','type',<type별 파라미터>} — 위에서부터
-        #   '먼저 통과'한 규칙의 라벨이 채택된다. type/파라미터·판정식은 README '특이맵' 절 참조.
-        #   예) 기본에서 반구 제거 + '베벨 근접 링' 추가:
+        # ── 특이맵(spec-out 공간 패턴) 판정 — 규칙 목록 기반, 하드코딩 기본규칙 없음 ──
+        #   판정은 **오직 아래 anomaly_pattern_rules(list)로만** 동작한다.
+        #   ⚠️ None 이거나 빈 리스트([])면 **특이맵(공간 패턴) 판정을 아예 하지 않는다**
+        #      (spec_out_pattern 라벨 미생성 — "전면성/Center 집중/Edge ring" 등 안 잡힘).
+        #   활성화하려면 아래 예시처럼 원하는 규칙만 원하는 순서로 지정한다(위에서부터 '먼저 통과'한 라벨 채택).
+        #   각 규칙 = {'name','type',<type별 파라미터>}. type/파라미터·판정식은 README '특이맵' 절 참조.
+        #   예시(전체 기본 세트 — 필요한 것만 골라 쓰거나 임계 조정):
         #   self.anomaly_pattern_rules = [
-        #       {'name': '전면성', 'type': 'global', 'min_share': 0.5},
-        #       {'name': '베벨 근접 링', 'type': 'radius_band', 'r_min': 0.93, 'r_max': 1.01, 'cover': 0.6},
-        #       ... (원하는 규칙만 원하는 순서로) ...
+        #       {'name': '전면성',            'type': 'global',      'min_share': 0.5},
+        #       {'name': '세로 줄성',         'type': 'line',        'axis': 'x', 'max_lanes': 2, 'min_pts': 4},
+        #       {'name': '가로 줄성',         'type': 'line',        'axis': 'y', 'max_lanes': 2, 'min_pts': 4},
+        #       {'name': 'Center 집중',       'type': 'radius_band', 'r_min': 0.0,  'r_max': 0.45, 'cover': 0.7},
+        #       {'name': 'Edge ring',         'type': 'radius_band', 'r_min': 0.85, 'r_max': 1.01, 'cover': 0.7},
+        #       {'name': 'Middle 환형',       'type': 'radius_band', 'r_min': 0.45, 'r_max': 0.85, 'cover': 0.7},
+        #       {'name': 'k시 방향 클러스터', 'type': 'clock',       'min_rnorm': 0.4, 'resultant': 0.92, 'min_frac': 0.75},
+        #       {'name': '사분면',            'type': 'quadrant',    'cover': 0.7},
+        #       {'name': '반구',              'type': 'half',        'cover': 0.75},
         #   ]
         #   각 규칙의 평가값·통과여부는 anomaly_basis_<lot>.json의
         #   spec_out_pattern_stats['rules']에 trace로 남아 "왜 이 특이맵인지" 확인 가능.
-        self.anomaly_pattern_rules = None
+        self.anomaly_pattern_rules = None   # 기본: 특이맵 판정 OFF (규칙 지정 시에만 동작)
         #   전역 옵션(규칙 공통) — dict로 부분 override:
         #     min_pts(3)                : 패턴 판정 최소 unique 좌표 수
         #     y_positive_up(True)       : 좌표 y+가 웨이퍼 위(12시) 방향인지
