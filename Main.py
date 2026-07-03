@@ -1333,14 +1333,15 @@ def main():
                                     _wf_max = getattr(GLOBAL_CONFIG, 'anomaly_wfmap_max_count', 25)
 
                                     def _html_table(cells, ncol, cellpad=2, cellstyle='vertical-align:top;'):
-                                        """cell HTML 리스트를 ncol개씩 table 행으로 배치(포워딩에서 flex/grid 대체)."""
+                                        """cell HTML 리스트를 ncol개씩 table 행으로 배치(포워딩에서 flex/grid 대체).
+                                        템플릿 전역 CSS(table/td 테두리)를 inline border:none로 덮어 격자/구분선 제거."""
                                         _rows = ''
                                         for _i in range(0, len(cells), ncol):
-                                            _tds = ''.join(f'<td style="{cellstyle}">{_c}</td>'
+                                            _tds = ''.join(f'<td style="border:none; {cellstyle}">{_c}</td>'
                                                            for _c in cells[_i:_i + ncol])
                                             _rows += f'<tr>{_tds}</tr>'
                                         return (f'<table cellpadding="{cellpad}" cellspacing="0" '
-                                                f'style="border-collapse:collapse;">{_rows}</table>')
+                                                f'style="border-collapse:collapse; border:none;">{_rows}</table>')
 
                                     def _trend_block(item, is_spec, img_b64, w, h):
                                         if is_spec:
@@ -1412,9 +1413,10 @@ def main():
                                                         _lab_style = ('font-size:8px; white-space:nowrap; '
                                                                       + ('color:#0033cc; font-weight:bold;' if _is_tgt else 'color:#555;'))
                                                         # WF MAP img: 고정 58px width/height inline + attribute(포워딩 호환)
+                                                        #  네모칸 테두리(box)·wafer별 구분선 제거 → 원 + shot map만 깨끗하게
                                                         _wf_cells.append(
                                                             f'<img src="data:image/png;base64,{_b}" width="58" height="58" '
-                                                            'style="width:58px; height:58px; display:block; margin:0 auto; border:1px solid #1f4e79;"/>'
+                                                            'style="width:58px; height:58px; display:block; margin:0 auto; border:none;"/>'
                                                             f'<div style="{_lab_style}">{_lab}</div>')
                                                     # flex/grid 대신 table 배치(포워딩 유지) — 2행으로 붙게
                                                     #  (WF MAP을 Trend 오른쪽에 2행만 차지하도록 열 수를 산정)
@@ -1430,9 +1432,9 @@ def main():
                                             f'{display_name(item)}</div>')
                                         _spec_rows.append(
                                             '<div style="margin-bottom:14px;">' + _item_hdr +
-                                            '<table cellpadding="0" cellspacing="0" style="border-collapse:collapse;">'
-                                            f'<tr><td style="vertical-align:top; padding-right:12px;">{_trend_block(item, True, img_b64, _tw, _th)}</td>'
-                                            f'<td style="vertical-align:top;">{_wf_block}</td></tr></table></div>')
+                                            '<table cellpadding="0" cellspacing="0" style="border-collapse:collapse; border:none;">'
+                                            f'<tr><td style="border:none; vertical-align:top; padding-right:12px;">{_trend_block(item, True, img_b64, _tw, _th)}</td>'
+                                            f'<td style="border:none; vertical-align:top;">{_wf_block}</td></tr></table></div>')
 
                                     # '이상'/'주의' 탭 라벨은 표시하지 않는다. 각 차트 좌상단의
                                     # SPEC OUT / WARNING 스티커가 상태 식별 역할을 대신한다.
