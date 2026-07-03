@@ -996,6 +996,21 @@ def _add_wafer_circle(ax, params, color='#9aa4b0', lw=0.7, zorder=0):
         pass
 
 
+def _wfmap_axis_limits(gx0, gx1, gy0, gy1, xpad, ypad, circ, margin_frac=0.08):
+    """WF MAP 축 범위 = 데이터 범위 + wafer 원(circ)을 '모두' 포함하는 (xlo,xhi,ylo,yhi).
+
+    원이 데이터 바깥으로 나가도 잘리지 않도록 원 반경 기준 작은 여백(margin_frac)을 둔다.
+    """
+    xlo, xhi = gx0 - xpad, gx1 + xpad
+    ylo, yhi = gy0 - ypad, gy1 + ypad
+    if circ:
+        _cx, _cy, _cr = circ
+        _m = abs(_cr) * margin_frac
+        xlo = min(xlo, _cx - _cr - _m); xhi = max(xhi, _cx + _cr + _m)
+        ylo = min(ylo, _cy - _cr - _m); yhi = max(yhi, _cy + _cr + _m)
+    return xlo, xhi, ylo, yhi
+
+
 def _wfmap_png_bytes(fig, dpi, colors=64):
     """WF MAP figure를 팔레트(PNG-8) 양자화+최적화로 인코딩해 PNG bytes 반환.
 
@@ -1109,9 +1124,10 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
         #  — 칩(shot) 컬러가 내부를 채우므로 별도 배경 fill 불필요.
         _add_wafer_circle(ax, _circ, color='#000000', lw=1.0)
         ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal', adjustable='box'); ax.set_facecolor('white')
-        # chip x 정방향(chip #1=왼쪽, 큰 번호=오른쪽): invert_xaxis 대신 xlim을 역순으로 두어 방향 교정
-        ax.set_xlim(_gx1 + _xpad, _gx0 - _xpad)
-        ax.set_ylim(_gy0 - _ypad, _gy1 + _ypad)
+        # chip x 정방향(chip #1=왼쪽, 큰 번호=오른쪽): xlim 역순 + 원까지 포함(원 안 잘리게)
+        _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(_gx0, _gx1, _gy0, _gy1, _xpad, _ypad, _circ)
+        ax.set_xlim(_xhi, _xlo)
+        ax.set_ylim(_ylo, _yhi)
         for sp in ax.spines.values():
             sp.set_visible(False)
         fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
@@ -1235,11 +1251,13 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
         colors = np.where(g['_specout'].values, '#d32f2f', '#bdbdbd')
         ax.scatter(g[cx].astype(float), g[cy].astype(float), c=colors,
                    s=s, marker='s', linewidths=0)
-        _add_wafer_circle(ax, _circ)
-        ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal', adjustable='box'); ax.set_facecolor('#f8f9fa')
-        # chip x 정방향(chip #1=왼쪽): xlim 역순으로 방향 교정
-        ax.set_xlim(gx1 + xpad, gx0 - xpad)
-        ax.set_ylim(gy0 - ypad, gy1 + ypad)
+        _add_wafer_circle(ax, _circ, color='#000000', lw=1.0)
+        # 흰 배경(회색 격자 제거) + 눈금/스파인 없음 → 원 + shot map만 표시
+        ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal', adjustable='box'); ax.set_facecolor('white')
+        # chip x 정방향(chip #1=왼쪽): xlim 역순 + 원까지 포함(원 안 잘리게)
+        _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(gx0, gx1, gy0, gy1, xpad, ypad, _circ)
+        ax.set_xlim(_xhi, _xlo)
+        ax.set_ylim(_ylo, _yhi)
         for sp in ax.spines.values():
             sp.set_visible(False)
         fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
@@ -1368,6 +1386,11 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
     gdim = max(int(d[cx].nunique()), int(d[cy].nunique()), 1)
     chip_pt = size_in / gdim * 72.0
     s = max(1.0, (chip_pt * 1.15) ** 2)   # 셀을 꽉 채워 칩 사이 배경(흰 격자선)이 안 보이게
+    _gx0, _gx1 = float(d[cx].min()), float(d[cx].max())
+    _gy0, _gy1 = float(d[cy].min()), float(d[cy].max())
+    _xr = (_gx1 - _gx0) or 1.0; _yr = (_gy1 - _gy0) or 1.0
+    _xpad = _xr / max(int(d[cx].nunique()) - 1, 1) * 0.7 if d[cx].nunique() > 1 else _xr * 0.1
+    _ypad = _yr / max(int(d[cy].nunique()) - 1, 1) * 0.7 if d[cy].nunique() > 1 else _yr * 0.1
 
     fig, ax = plt.subplots(figsize=(size_in, size_in))
     ax.scatter(g[cx].astype(float), g[cy].astype(float), c=g[item].astype(float),
@@ -1376,6 +1399,10 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
     _add_wafer_circle(ax, _circ, color='#000000', lw=1.0)
     ax.set_xticks([]); ax.set_yticks([]); ax.set_aspect('equal')
     ax.set_facecolor('white')
+    # 원까지 포함하도록 축 범위 지정(원 안 잘리게) — chip #1 왼쪽(역순)
+    _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(_gx0, _gx1, _gy0, _gy1, _xpad, _ypad, _circ)
+    ax.set_xlim(_xhi, _xlo)
+    ax.set_ylim(_ylo, _yhi)
     for sp in ax.spines.values():
         sp.set_visible(False)
     _png = _wfmap_png_bytes(fig, dpi)   # 팔레트 양자화(PNG-8)로 용량 최소화
