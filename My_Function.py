@@ -2149,10 +2149,10 @@ def _render_item_charts(task):
         ax_box.set_xlim(0.5, 25.5)
         ax_box.tick_params(axis='x', rotation=45, labelsize=7)
         if _tgt_wafnums:
-            # box plot '영역 안' 우하단에 '*: lot_id' 범례를 우측 정렬로 배치
-            #  (텍스트 오른쪽 끝을 box plot 우하단 코너에 맞춤)
-            ax_box.text(0.99, 0.02, f"*: {target_lot_id}", transform=ax_box.transAxes,
-                        ha='right', va='bottom', fontsize=6, color=C_NEUTRAL, fontstyle='italic')
+            # box plot '바깥 아래'(축 아래, x라벨 밑)에 '*: lot_id' 범례를 우측 정렬로 배치
+            #  (y<0 = 축 영역 밖 아래, 오른쪽 끝을 box plot 우측에 맞춤)
+            ax_box.text(1.0, -0.5, f"*: {target_lot_id}", transform=ax_box.transAxes,
+                        ha='right', va='top', fontsize=6, color=C_NEUTRAL, fontstyle='italic')
         _label_axes(ax_box, xlabel="Wafer #", ylabel=y_label)
         _remove_spines(ax_box)
         ax_box.set_axisbelow(True)
