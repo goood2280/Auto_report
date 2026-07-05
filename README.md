@@ -337,9 +337,20 @@ note3: "단순 이탈"                        # else 분기
 | `sev(ITEM, critical)` 또는 `sev(ITEM) >= 이상\|주의\|참고` | 항목 severity 등급 비교. 미측정 항목은 참고(0) |
 | `all_sev(A, B, …, critical)` 또는 `all_sev(A,B,…) >= 이상` | 나열 그룹(CAT2/항목)이 **모두** 해당 등급 이상 |
 | `disp_desc(A,B,…)` / `disp_asc(…)` | 산포배수가 나열 순서로 단조 감소/증가 |
-| `median_low(ITEM)` | target median이 제품 대비 `anomaly_median_low_sigma`(2.0)σ 이상 낮음 |
+| `median_low(ITEM)` / `median_high(ITEM)` | target median이 제품 대비 `anomaly_median_low_sigma`(2.0)σ 이상 낮음/높음 |
 | `median_pctile(ITEM) <= 5` | target median이 모집단 분포의 하위 5% 이내(`>=95`면 상위 5%) |
 | `sev_cat2(CAT2) >= 이상` · `all_sev_cat2(…)>=이상` · `disp_desc/asc_cat2(…)` | CAT2 그룹의 '최대 등급·최대 산포'로 판정 |
+| `spec_out_pt(ITEM) >= n` | 지정 항목의 spec-out pt 수(trigger 없이 임의 항목) |
+| `spec_out_wafers(ITEM) >= n` | spec-out이 발생한 wafer 수 |
+| `spec_out_ratio(ITEM) >= f` | wafer 최고 이탈 비율(out pt/측정 pt, 0~1) |
+| `disp(ITEM) >= x` / `disp_cat2(CAT2) >= x` | worst wafer 산포배수 직접 비교(항목/CAT2 최대) |
+| `median_dev_sigma(ITEM) >= x` | worst wafer median 이탈 σ(제품 wafer 기준) |
+| `pattern(ITEM, Edge ring)` | 특이맵 라벨 부분일치(특이맵 판정 활성 시에만 라벨 존재) |
+| `zone_share(ITEM, Edge) >= f` | spec-out 좌표 중 해당 zone(Edge/Middle/Center) 비율(0~1) |
+| `repeat_shot(ITEM)` / `repeat_similar(ITEM)` | wafer간 동일 shot/유사 위치 반복 코멘트 존재(특이맵 판정 활성 시) |
+| `meas_overlap(PCHK명) >= n` | PCHK와 동일 shot에서 다른 항목 동시 spec-out 겹침 수 |
+| `measured(ITEM)` | 항목이 target lot에서 측정됨(미측정 가드) |
+| `count_sev(critical) >= n` | 해당 등급 이상인 항목 '개수'(전 항목 대상) |
 
 - 측정순서 지표(`seq_*`)는 trigger 항목의 wafer별 시퀀스에서 **최악값으로 집계**해 평가합니다(별도 설정 없음).
 - 규칙 평가는 전체가 try/except로 감싸져 **하나가 깨져도 나머지 분석은 계속**됩니다.

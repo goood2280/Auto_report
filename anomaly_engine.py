@@ -787,8 +787,23 @@ RULE_FUNCTION_SPEC = """\
   disp_desc(A, B, C)       : 산포배수가 나열 순서대로 감소(A가 최대) / disp_asc(...)는 증가
   disp_desc_cat2(A, B)     : CAT2별 최대 산포배수가 순서대로 감소 / disp_asc_cat2(...)는 증가
   median_low(ITEM)         : target median이 제품 대비 매우 낮음(임계 σ는 설정값)
+  median_high(ITEM)        : target median이 제품 대비 매우 높음(median_low의 대칭)
   median_pctile(ITEM) <= 15 : target median의 모집단 내 백분위(%) 비교(연산자 >= <= < >).
                               하위 N% = <=N, 상위 N% = >=100-N
+  spec_out_pt(ITEM) >= n   : 지정 항목의 spec-out pt 수 비교(trigger 없이 임의 항목에 사용 가능)
+  spec_out_wafers(ITEM) >= n : spec-out이 발생한 wafer 수 비교
+  spec_out_ratio(ITEM) >= f  : wafer 최고 이탈 비율(그 wafer의 out pt/측정 pt, 0~1) 비교
+  disp(ITEM) >= x          : 항목의 worst wafer 산포배수를 숫자로 직접 비교
+  disp_cat2(CAT2) >= x     : CAT2 그룹 최대 산포배수를 숫자로 직접 비교
+  median_dev_sigma(ITEM) >= x : worst wafer median 이탈 σ(제품 wafer 기준) 비교
+  pattern(ITEM, Edge ring) : 특이맵 라벨 부분일치(예: Edge ring/줄성/Center 집중 —
+                             특이맵 판정(anomaly_pattern_rules) 활성 시에만 라벨이 생성됨)
+  zone_share(ITEM, Edge) >= f : spec-out 좌표 중 해당 zone(Edge|Middle|Center) 비율(0~1)
+  repeat_shot(ITEM)        : 여러 wafer에서 '동일 shot 반복' 코멘트 존재(특이맵 판정 활성 시)
+  repeat_similar(ITEM)     : 여러 wafer에서 '유사 위치 반복' 코멘트 존재(특이맵 판정 활성 시)
+  meas_overlap(PCHK명) >= n : 그 PCHK와 동일 shot에서 다른 항목이 함께 spec-out인 겹침 수 비교
+  measured(ITEM)           : 항목이 target lot에서 측정됨(미측정 항목 가드용)
+  count_sev(critical) >= n : 해당 등급 이상(critical|warning)인 항목의 '개수' 비교(전 항목 대상)
 등급 의미: 이상(critical)=spec 이탈 pt 존재 / 주의(warning)=wafer 산포가 보통 wafer 대비 임계배수 초과.
 항목명/CAT2명은 원 이름(ALIAS)·표시명 둘 다 인식된다(자연어에 적힌 표기 그대로 사용)."""
 
@@ -810,6 +825,19 @@ NL_PATTERN_HINTS = """\
   "…일 때, ~이면 \"X\", 아니면 \"Y\""  → when(게이트) + when2/note("X") + else 마지막 note("Y") (분기)
   "…의 산포 주의 언급은 하지 마"       → suppress_disp: 항목 (조건은 when에)
   "…그룹과 …그룹의 산포를 비교"        → compare_disp: A,B | C,D
+  "A의 spec 이탈이 n개 이상"(임의 항목) → spec_out_pt(A) >= n
+  "A의 이탈 wafer가 n매 이상"          → spec_out_wafers(A) >= n
+  "어느 wafer의 이탈 비율이 N% 이상"   → spec_out_ratio(A) >= N/100
+  "A의 산포가 x배 이상"                → disp(A) >= x
+  "X 카테고리 산포가 x배 이상"         → disp_cat2(X) >= x
+  "median이 매우 높으면/낮으면"        → median_high(A) / median_low(A)
+  "wafer median이 xσ 이상 이탈"        → median_dev_sigma(A) >= x
+  "특이맵이 Edge ring(라벨)이면"       → pattern(A, Edge ring)
+  "이탈의 N% 이상이 Edge(zone)면"      → zone_share(A, Edge) >= N/100
+  "여러 wafer에서 같은 자리 반복이면"  → repeat_shot(A) (비슷한 자리면 repeat_similar)
+  "PCHK와 동일 shot 겹침이 n개 이상"   → meas_overlap(PCHK명) >= n
+  "A가 측정된 경우에만"                → measured(A) AND ...
+  "이상 항목이 n개 이상이면"           → count_sev(critical) >= n
   "(주의)" 표기가 있으면               → sev: warning (없으면 critical)
   "링크: URL"                          → link: "URL" (해당 분기의 link)
 판정명("큰따옴표 문구")은 note:에 그대로 넣는다. 따옴표가 없으면 문맥에서 짧은 판정 문구를 만들어 note에 넣는다."""
@@ -829,6 +857,15 @@ _ATOM_VALID_PATTERNS = [
     r'disp_(desc|asc)(_cat2)?\([^()]+\)$',
     r'median_low\([^()]+\)$',
     r'median_pctile\([^()]+\)\s*(>=|<=|<|>)\s*[\d.]+$',
+    # ── 확장 원자 (평가기 _eval_atom 확장분과 1:1) ──
+    r'(spec_out_pt|spec_out_wafers|spec_out_ratio|disp|median_dev_sigma|meas_overlap)\([^()]+\)\s*(>=|<=|==|<|>)\s*[\d.]+$',
+    r'disp_cat2\([^()]+\)\s*(>=|<=|==|<|>)\s*[\d.]+$',
+    r'median_high\([^()]+\)$',
+    r'pattern\([^,()]+,\s*[^()]+\)$',
+    r'zone_share\([^,()]+,\s*(?i:edge|middle|center)\s*\)\s*(>=|<=|<|>)\s*[\d.]+$',
+    r'repeat_(shot|similar)\([^()]+\)$',
+    r'measured\([^()]+\)$',
+    r'count_sev\((critical|warning|이상|주의)\)\s*(>=|<=|==|<|>)\s*[\d.]+$',
 ]
 
 
@@ -1741,8 +1778,17 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'disp': float(worst_disp_ratio) if worst_disp_ratio else 0.0,
             'tmed': _tmed, 'pmed': pop_med, 'pspread': pop_spread,
             'tmed_pctile': _tmed_pct,
-            'spec_out_pt': int(n_out),           # spec_out(n) 규칙 함수용
+            'spec_out_pt': int(n_out),           # spec_out(n)/spec_out_pt(ITEM) 규칙 함수용
             'seq': _seq_metrics(it, lo, hi),     # seq_out/seq_front_heavy/seq_mostly_dead 규칙 함수용
+            # ── 확장 조건 원자용(전부 이 루프에서 이미 계산된 값 — 추가 비용 없음) ──
+            'so_wafers': int(so_n_wafers),       # spec_out_wafers(ITEM): spec-out wafer 수
+            'so_ratio': float(so_max_ratio),     # spec_out_ratio(ITEM): wafer 최고 이탈 비율(0~1)
+            'med_dev': float(worst_med_dev),     # median_dev_sigma(ITEM): worst wafer median 이탈 σ
+            'pattern': so_pattern or '',         # pattern(ITEM, 라벨): 특이맵 라벨(판정 on일 때만)
+            'zones': dict(so_zones or {}),       # zone_share(ITEM, Edge): spec-out zone 분포
+            'commonality': so_commonality or '', # repeat_shot/repeat_similar(ITEM)
+            'ov_shots': int(ov_shots),           # meas_overlap(PCHK): 동일 shot 겹침 수
+            'measured': tgt_it is not None,      # measured(ITEM): target lot 측정 존재
         }
 
         # ── AI 해석용 항목별 통계 요약(전 항목 — finding 유무 무관) ──
@@ -2004,6 +2050,67 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         return False
                     t = float(m.group(3))
                     return {'>=': v >= t, '<=': v <= t, '<': v < t, '>': v > t}[m.group(2)]
+
+                # ── 확장 원자 — 항목 수치/위치/패턴/겹침 (전부 _item_ctx의 기계산 값 참조) ──
+                def _cmp(v, op, t):
+                    try:
+                        v = float(v); t = float(t)
+                    except (TypeError, ValueError):
+                        return False
+                    return {'>=': v >= t, '<=': v <= t, '==': v == t, '<': v < t, '>': v > t}[op]
+
+                # 수치 비교형: spec_out_pt/spec_out_wafers/spec_out_ratio/disp/median_dev_sigma/meas_overlap
+                m = re.match(r'(spec_out_pt|spec_out_wafers|spec_out_ratio|disp|median_dev_sigma|meas_overlap)'
+                             r'\(([^()]+)\)\s*(>=|<=|==|<|>)\s*([\d.]+)$', atom)
+                if m:
+                    _key = {'spec_out_pt': 'spec_out_pt', 'spec_out_wafers': 'so_wafers',
+                            'spec_out_ratio': 'so_ratio', 'disp': 'disp',
+                            'median_dev_sigma': 'med_dev', 'meas_overlap': 'ov_shots'}[m.group(1)]
+                    c = _find_ctx(m.group(2).strip())
+                    return bool(c) and _cmp(c.get(_key, 0), m.group(3), m.group(4))
+                # disp_cat2(CAT2) >= x : CAT2 최대 산포배수 직접 비교
+                m = re.match(r'disp_cat2\(([^()]+)\)\s*(>=|<=|==|<|>)\s*([\d.]+)$', atom)
+                if m:
+                    cc = _cat2_ctx(m.group(1).strip())
+                    return bool(cc) and _cmp(cc.get('disp', 0), m.group(2), m.group(3))
+                # median_high(ITEM) : target median이 제품 대비 매우 높음(median_low 대칭, 임계 σ 동일)
+                m = re.match(r'median_high\(([^()]+)\)$', atom)
+                if m:
+                    c = _find_ctx(m.group(1).strip())
+                    if not c or c['tmed'] is None or c['pmed'] is None or not c['pspread']:
+                        return False
+                    return (c['tmed'] - c['pmed']) / c['pspread'] >= _mlow_sigma
+                # pattern(ITEM, 라벨) : 특이맵 라벨 부분일치(대소문자 무시 — 특이맵 판정 on일 때만 의미)
+                m = re.match(r'pattern\(([^,()]+),\s*([^()]+)\)$', atom)
+                if m:
+                    c = _find_ctx(m.group(1).strip())
+                    return bool(c) and m.group(2).strip().lower() in str(c.get('pattern', '')).lower()
+                # zone_share(ITEM, Edge|Middle|Center) >= f : spec-out 중 해당 zone 비율(0~1)
+                m = re.match(r'zone_share\(([^,()]+),\s*([A-Za-z가-힣]+)\s*\)\s*(>=|<=|<|>)\s*([\d.]+)$', atom)
+                if m:
+                    c = _find_ctx(m.group(1).strip())
+                    _zs = (c or {}).get('zones') or {}
+                    _tot = sum(_zs.values())
+                    _zn = m.group(2).strip().lower()
+                    _v = next((v for k, v in _zs.items() if str(k).lower() == _zn), 0)
+                    return _tot > 0 and _cmp(_v / _tot, m.group(3), m.group(4))
+                # repeat_shot/repeat_similar(ITEM) : wafer간 동일 shot/유사 위치 반복 코멘트 존재
+                m = re.match(r'repeat_(shot|similar)\(([^()]+)\)$', atom)
+                if m:
+                    c = _find_ctx(m.group(2).strip())
+                    _cm = str((c or {}).get('commonality', ''))
+                    return ('동일 shot' in _cm) if m.group(1) == 'shot' else ('유사 위치' in _cm)
+                # measured(ITEM) : 항목이 target lot에서 측정됨
+                m = re.match(r'measured\(([^()]+)\)$', atom)
+                if m:
+                    c = _find_ctx(m.group(1).strip())
+                    return bool(c and c.get('measured'))
+                # count_sev(critical) >= n : 해당 등급 이상인 항목 개수(전 항목 대상)
+                m = re.match(r'count_sev\((critical|warning|이상|주의)\)\s*(>=|<=|==|<|>)\s*([\d.]+)$', atom)
+                if m:
+                    _need = _LVL_KW[m.group(1).lower()]
+                    _n = sum(1 for _cx in _item_ctx.values() if _cx.get('level', 0) >= _need)
+                    return _cmp(_n, m.group(2), m.group(3))
                 return False
 
             def _eval_when(expr):

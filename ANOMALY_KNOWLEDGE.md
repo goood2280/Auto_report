@@ -126,12 +126,23 @@
 > | 여러 항목이 동시에 | `VTH_N과 VTH_P가 둘 다 spec 이탈이면` |
 > | 카테고리(CAT2) 전체 | `VTH 카테고리 전체가 이상이면` |
 > | 이탈 개수 기준 | `VTH_N의 spec 이탈이 10개 이상이면` |
+> | 이탈 wafer 수 기준 | `VTH_N의 이탈 wafer가 5매 이상이면` |
+> | wafer 이탈 비율 기준 | `어느 wafer든 측정점의 50% 이상 이탈하면` |
 > | median이 낮음/높음 | `IDSAT_P의 median이 모집단 하위 15% 이내면` (상위는 "상위 10% 이내") |
-> | 산포(퍼짐)가 큼 | `IDSAT_N이 주의(산포 확대)면` |
+> | median이 극단적으로 낮음/높음 | `IDSAT_P의 median이 매우 낮으면` / `매우 높으면` |
+> | wafer median 이탈(σ) | `어느 wafer의 median이 3시그마 이상 이탈하면` |
+> | 산포(퍼짐)가 큼 | `IDSAT_N이 주의(산포 확대)면` 또는 `IDSAT_N의 산포가 3배 이상이면` |
+> | 카테고리 산포 | `IDSAT 카테고리의 산포가 2배 이상이면` |
 > | 산포 크기 순서 | `산포가 VTH_N > VTH_P > VTH_AVG 순으로 크면` |
 > | 측정 순서 연속 이탈 | `측정 순서상 연속 5개 이상 이탈하면` (프로브/측정 중단 의심용) |
 > | 측정점 대부분 이탈 | `측정점의 80% 이상이 이탈하면` |
 > | 측정 앞부분 집중 | `측정 앞부분에 이탈이 몰려 있으면` (워밍업/드리프트 의심용) |
+> | 특이맵(공간 패턴) | `VTH_N의 특이맵이 Edge ring이면` (특이맵 판정이 켜져 있을 때만) |
+> | 이탈 위치(zone) 비율 | `VTH_N 이탈의 80% 이상이 Edge면` (Edge/Middle/Center) |
+> | 같은 자리 반복 | `여러 wafer에서 같은 자리에 반복 이탈하면` (비슷한 자리는 "유사 위치") |
+> | PCHK 동일 shot 겹침 | `PCHK_LKG와 동일 shot 겹침이 100개 이상이면` |
+> | 측정된 경우에만 | `IDSAT_P가 측정된 경우에, ...` (미측정이면 규칙 미발동) |
+> | 이상 항목 개수 | `이상 항목이 3개 이상이면` |
 > | 조건 결합 | `~이고 ~이면`(그리고=AND) / `~이거나 ~이면`(또는=OR) |
 > | 분기(경우 나누기) | `VTH_N이 spec 이탈일 때, VTH 카테고리 전체가 이상이면 "A 불량", 아니면 "단순 이탈"로 판정` |
 > | 산포 언급 끄기 | `PCHK_LKG가 정상이면 IDSAT_N의 산포 주의 언급은 하지 마` |
@@ -211,11 +222,26 @@
 > - `sev(ITEM, level)` 또는 `sev(ITEM) <연산자> <이상|주의|참고>` — 항목 등급 비교(미측정=참고)
 > - `all_sev(그룹…, level)` 또는 `all_sev(A,B,…)>=이상` — 나열 그룹(CAT2/항목) **모두** ≥ level
 > - `disp_desc(A,B,C,…)` / `disp_asc(…)` — 나열 순서대로 산포배수가 감소/증가
-> - `median_low(ITEM)` — target median이 제품 대비 매우 낮음(임계 σ = My_config.anomaly_median_low_sigma)
+> - `median_low(ITEM)` / `median_high(ITEM)` — target median이 제품 대비 매우 낮음/높음(임계 σ = My_config.anomaly_median_low_sigma)
 > - `median_pctile(ITEM) <연산자> <숫자>` — target median의 **모집단 분포 내 백분위(%)** 비교.
 >   **하위 N% = `<=N`, 상위 N% = `>=100-N`.** 예: `median_pctile(ITEM_C)<=15` (하위 15%)
 > - **CAT2 그룹 원자**: `sev_cat2(CAT2) <연산자> <등급>` · `all_sev_cat2(CAT2_A,…)>=이상` ·
 >   `disp_desc_cat2(…)`/`disp_asc_cat2(…)` — 그 CAT2에 속한 항목들의 '최대 등급·최대 산포'로 판정
+> - **수치 직접 비교 원자** (연산자 `>= <= == < >`, trigger 없이 임의 항목 지정 가능):
+>   - `spec_out_pt(ITEM) >= n` — 항목의 spec-out pt 수
+>   - `spec_out_wafers(ITEM) >= n` — spec-out이 발생한 wafer 수
+>   - `spec_out_ratio(ITEM) >= f` — wafer 최고 이탈 비율(그 wafer의 out pt/측정 pt, 0~1)
+>   - `disp(ITEM) >= x` / `disp_cat2(CAT2) >= x` — worst wafer 산포배수(항목/CAT2 최대)
+>   - `median_dev_sigma(ITEM) >= x` — worst wafer median 이탈 σ(제품 wafer 기준)
+>   - `count_sev(critical) >= n` — 해당 등급 이상(critical|warning)인 **항목 개수**(전 항목 대상)
+> - **위치/패턴/겹침 원자**:
+>   - `pattern(ITEM, Edge ring)` — 특이맵 라벨 부분일치(Edge ring/줄성/Center 집중 등 —
+>     **특이맵 판정(`anomaly_pattern_rules`)이 켜져 있을 때만** 라벨이 생성됨)
+>   - `zone_share(ITEM, Edge) >= f` — spec-out 좌표 중 해당 zone(Edge|Middle|Center) 비율(0~1)
+>   - `repeat_shot(ITEM)` / `repeat_similar(ITEM)` — 여러 wafer에서 동일 shot/유사 위치 반복
+>     코멘트 존재(특이맵 판정 활성 시)
+>   - `meas_overlap(PCHK명) >= n` — 그 PCHK와 동일 shot에서 다른 항목이 함께 spec-out인 겹침 수
+>   - `measured(ITEM)` — 항목이 target lot에서 측정됨(미측정 가드)
 
 ### `[RULE]` 작성 예시 (아래 마커 사이가 실제 파싱 대상 — `ITEM_A` 등은 실제 항목명으로 교체)
 
