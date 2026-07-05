@@ -47,6 +47,7 @@ _REPORT_HTML_TEMPLATE = r"""<!DOCTYPE html>
             box-sizing: border-box;
         }
 
+        /* 여백은 본문 wrapper div의 inline style로 지정(메일/포워딩 동일 표시) — body엔 미지정 */
         body {
             font-family: 'Segoe UI', Arial, '맑은 고딕', Malgun Gothic, sans-serif;
             font-size: 12px;
@@ -55,7 +56,7 @@ _REPORT_HTML_TEMPLATE = r"""<!DOCTYPE html>
             line-height: 1.5;
             max-width: 100%;
             margin: 0;
-            padding: 16px 24px;
+            padding: 0;
         }
 
         /* ── 제목 스타일 (Heading styles) ── */
@@ -325,44 +326,53 @@ _REPORT_HTML_TEMPLATE = r"""<!DOCTYPE html>
 </head>
 <body>
     <!-- ============================================================
+         본문 wrapper — 메일 클라이언트는 head의 style 블록과 body 스타일을 무시하므로
+         글꼴/크기/색/여백을 inline으로 지정해 HTML 파일·메일 본문·포워딩에서 동일하게 표시.
+         (아래 모든 inline style은 같은 이유 — head의 style 블록은 브라우저 전용
+          보조(sticky/스크롤)만 담당. 주의: 이 주석 안에 태그 형태 문자열을 쓰면
+          메일 sanitizer가 오파싱할 수 있어 금지)
+         ============================================================ -->
+    <div style="font-family:'Segoe UI', Arial, '맑은 고딕', Malgun Gothic, sans-serif; font-size:12px; color:#1a1a1a; line-height:1.5; background-color:#ffffff; padding:16px 24px;">
+
+    <!-- ============================================================
          Header – 리포트 제목 및 부제
          ============================================================ -->
     <div id="top"></div>
-    <h2>[{{node}} HOL] {{vehicle}} sub_title</h2>
-    <div class="subtitle">&nbsp; Python-based automated system providing new DC results, charts</div>
+    <h2 style="color:#003366; font-size:18px; border-bottom:2px solid #003366; padding-bottom:6px; margin:0 0 2px 0;">[{{node}} HOL] {{vehicle}} sub_title</h2>
+    <div class="subtitle" style="font-size:13px; font-weight:bold; color:#555555; margin-bottom:10px;">&nbsp; Python-based automated system providing new DC results, charts</div>
 
     <!-- ============================================================
          공지사항 (Announcements)
          ============================================================ -->
-    <div class="info-block">
-        <strong>■ 공지 사항</strong><br>
-        <span>▷ Python 기반의 새로운 {{node}} {{vehicle}} HOL DC 측정 결과 자동 메일 발송 시스템 입니다.</span><br>
+    <div class="info-block" style="margin-bottom:12px; font-size:12px;">
+        <strong style="font-size:14px; color:#003366;">■ 공지 사항</strong><br>
+        <span style="font-size:12px;">▷ Python 기반의 새로운 {{node}} {{vehicle}} HOL DC 측정 결과 자동 메일 발송 시스템 입니다.</span><br>
         <strong style="color:#0055aa; font-size:12px;">▷ 메일 자동 분류는 아래 조건으로 설정하면 됩니다:</strong><br>
-        <span>&nbsp;&nbsp;&nbsp;(1) 보낸 사람 : {{system_admin}}<br>
+        <span style="font-size:12px;">&nbsp;&nbsp;&nbsp;(1) 보낸 사람 : {{system_admin}}<br>
         &nbsp;&nbsp;&nbsp;(2) 메일 제목 : 다음 키워드를 포함할 때 - [HOL AUTO REPORT]</span>
     </div>
 
     <!-- ============================================================
          문의 및 요청사항 (Contact & Requests)
          ============================================================ -->
-    <div class="info-block">
-        <strong>■ 문의 및 요청사항</strong><br>
-        <span>▷ 수신처 추가 및 시스템 문의 : {{system_admin}}</span><br>
-        <span>▷ Lot Report Archive : <a href="https://go/pa-web">DX Web System Link</a></span>
+    <div class="info-block" style="margin-bottom:12px; font-size:12px;">
+        <strong style="font-size:14px; color:#003366;">■ 문의 및 요청사항</strong><br>
+        <span style="font-size:12px;">▷ 수신처 추가 및 시스템 문의 : {{system_admin}}</span><br>
+        <span style="font-size:12px;">▷ Lot Report Archive : <a href="https://go/pa-web" style="color:#0055aa; text-decoration:none;">DX Web System Link</a></span>
     </div>
 
     <!-- ============================================================
          Contents – 목차 (Table of Contents)
          ============================================================ -->
-    <div class="info-block toc">
-        <strong>■ Contents</strong><br>
-        <span>&nbsp; <a href="#target0">[0] Anomaly Trend Chart</a></span><br>
-        <span>&nbsp; <a href="#target1">[1] Score Board</a></span><br>
-        <span>&nbsp; <a href="#target2">[2] Inline Table</a></span><br>
-        <span>&nbsp; <a href="#target3">[3] 최근 DC측정자재 상세</a></span>
+    <div class="info-block toc" style="margin-bottom:16px; font-size:12px;">
+        <strong style="font-size:14px; color:#003366;">■ Contents</strong><br>
+        <span style="font-size:12px;">&nbsp; <a href="#target0" style="color:#0055aa; text-decoration:none;">[0] Anomaly Trend Chart</a></span><br>
+        <span style="font-size:12px;">&nbsp; <a href="#target1" style="color:#0055aa; text-decoration:none;">[1] Score Board</a></span><br>
+        <span style="font-size:12px;">&nbsp; <a href="#target2" style="color:#0055aa; text-decoration:none;">[2] Inline Table</a></span><br>
+        <span style="font-size:12px;">&nbsp; <a href="#target3" style="color:#0055aa; text-decoration:none;">[3] 최근 DC측정자재 상세</a></span>
     </div>
 
-    <hr>
+    <hr style="border:none; border-top:1px solid #cccccc; margin:16px 0;">
 
     <!-- ============================================================
          Section Placeholders (동적 콘텐츠 삽입 영역)
@@ -373,6 +383,7 @@ _REPORT_HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div id="target2"></div>
     <div id="target3"></div>
 
+    </div>
 </body>
 </html>
 """
@@ -600,14 +611,10 @@ class Config:
         #                                 2개 wafer 이상 겹치면 '유사 위치 반복' 코멘트
         self.anomaly_pattern_thresholds = {}
 
-        # ── 측정 순서(Measurement-Order) 기반 spec-out 패턴 탐지 on/off ──
-        #   측정 순서 = WF MAP 좌상단 기준 chip_x 먼저 증가 → chip_y 증가
-        #     (1,1)→(2,1)→(3,1)→…→(1,2)→(2,2)→… . wafer별로 이 순서의 spec-out 시퀀스를 만들어
-        #     ANOMALY_KNOWLEDGE.md의 MSEQ_RULES(연속 이탈/대량 이탈/전반부 집중 이탈)와 매칭한다.
-        #   True + MSEQ_RULES가 있을 때만 동작. False(기본)면 측정순서 패턴 판정을 하지 않는다.
-        self.anomaly_mseq_enabled = False
-        #   전역 옵션(dict): min_pts(시퀀스 최소 측정 pt 수, 기본 10), min_wafers(패턴 인정 최소 wafer 수, 기본 1)
-        self.anomaly_mseq_thresholds = {}
+        # ── 측정 순서(Measurement-Order) 기반 판정 ──
+        #   별도 설정 없음 — ANOMALY_KNOWLEDGE.md [RULE]의 조건 함수
+        #   seq_out(n)/seq_mostly_dead(f)/seq_front_heavy 로만 판정한다(룰 관리 일원화).
+        #   측정 순서 = WF MAP 좌상단 기준 chip_x 먼저 증가 → chip_y 증가.
 
         # ── AI 판정 예시(few-shot) — RUN/EXAMPLE/*.md (없어도 동작) ──
         #   후행적으로 불량 모드가 확정된 사례를 md 파일로 넣으면 AI Final 판정에 예시로 주입된다.

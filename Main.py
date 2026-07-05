@@ -146,7 +146,7 @@ def _slide_title(slide):
 def _save_rule_check_log(ai_dir, lot_id, dc_step, rule_trace, findings):
     """전체 anomaly rule 체크 결과를 RUN/AI 폴더에 파일로 저장.
 
-    모든 규칙(지식/불량모드/[RULE] 체이닝)을 순회한 매칭/해당없음 전량을 기록하고,
+    모든 [RULE] 규칙(체이닝/산포억제/산포비교)을 순회한 매칭/해당없음 전량을 기록하고,
     사람이 읽는 .txt(요약+표)와 기계용 .json(rule_trace 원본) 2개를 남긴다.
     파일명: anomaly_rule_check_{lot}_{step}.(txt|json)  (AI 인풋 폴더 = 사이클 정리 대상 아님).
     """
@@ -1175,11 +1175,14 @@ def main():
                         _has_wf = len(wfmaps_by_item) > 0
                         _wf_w = 45
                         # 메일 클라이언트는 <style> CSS를 무시하므로 각 셀에 inline style로 직접 지정
+                        # (padding/font-size/nowrap도 <style> 값과 동일하게 inline — 메일·포워딩 표시 통일)
                         _SB_BD = 'border:1px solid #2c2c2c;'      # 셀 구분선(inline)
+                        _SB_PAD = 'padding:4px 6px; white-space:nowrap;'
                         _sb_waf_w = _wf_w if _has_wf else 40      # wafer 셀 폭(숫자 잘림 방지) inline min-width
-                        _SB_WAF = f'{_SB_BD} text-align:center; width:{_sb_waf_w}px; min-width:{_sb_waf_w}px; max-width:{_sb_waf_w}px;'
-                        _SB_CAT = f'{_SB_BD} text-align:center; min-width:77px;'      # category 고정열
-                        _SB_ITEM = f'{_SB_BD} text-align:center; min-width:240px;'    # Item 고정열
+                        _SB_WAF = (f'{_SB_BD} text-align:center; width:{_sb_waf_w}px; min-width:{_sb_waf_w}px; '
+                                   f'max-width:{_sb_waf_w}px; padding:2px 1px; font-size:10px; white-space:nowrap;')
+                        _SB_CAT = f'{_SB_BD} {_SB_PAD} text-align:center; min-width:77px;'      # category 고정열
+                        _SB_ITEM = f'{_SB_BD} {_SB_PAD} text-align:center; min-width:240px;'    # Item 고정열
                         sb_html = ''
                         if _has_wf:
                             sb_html += (f'<style>.score-board td.sb-val, .score-board th.sb-waf'
@@ -1193,15 +1196,15 @@ def main():
                             else:
                                 _lot_groups.append((_c[0], [_c]))
 
-                        sb_html += '<table class="score-board" style="border-collapse:collapse;">\n  <thead>\n'
+                        sb_html += '<table class="score-board" style="border-collapse:collapse; font-size:11px;">\n  <thead>\n'
                         sb_html += '    <tr>\n'
-                        sb_html += f'      <th colspan="2" class="sb-frozen-lot" style="{_SB_BD} text-align:center; background-color:#d9e1f2;">LOT_ID</th>\n'
+                        sb_html += f'      <th colspan="2" class="sb-frozen-lot" style="{_SB_BD} {_SB_PAD} text-align:center; background-color:#d9e1f2;">LOT_ID</th>\n'
                         # root_lot_id가 같은 형제 lot을 각각 헤더로 분리 (target lot은 강조)
                         for _lot, _cols in _lot_groups:
                             _is_tgt = (str(_lot) == str(target_lot_id))
                             _bg = '#dbe7c8' if _is_tgt else '#f0f0f0'
                             _fw = 'bold' if _is_tgt else 'normal'
-                            sb_html += (f'      <th colspan="{len(_cols)}" style="{_SB_BD} text-align:center; '
+                            sb_html += (f'      <th colspan="{len(_cols)}" style="{_SB_BD} {_SB_PAD} text-align:center; '
                                         f'background-color:{_bg}; font-weight:{_fw};">{_lot}</th>\n')
                         sb_html += '    </tr>\n'
                         sb_html += '    <tr>\n'
@@ -1265,10 +1268,10 @@ def main():
                         # 메일 클라이언트용 inline style (셀 구분선 + 가운데 정렬 + 줄바꿈 방지)
                         _IT_BD = 'border:1px solid #2c2c2c;'
                         _IT_CTR = 'text-align:center !important; white-space:nowrap;'   # 헤더 CSS(left) override + nowrap
-                        _IT_WAF = 'width:56px; min-width:56px; max-width:56px;'
-                        _IT_PAD = 'padding-left:10px; padding-right:10px;'   # Module~LCL 열 좌우 여백(약 1.5자)
+                        _IT_WAF = 'width:56px; min-width:56px; max-width:56px; padding:4px 6px;'
+                        _IT_PAD = 'padding:4px 10px;'   # Module~LCL 열 좌우 여백(약 1.5자)
 
-                        it_html = '<table class="inline-table" style="border-collapse:collapse;">\n'
+                        it_html = '<table class="inline-table" style="border-collapse:collapse; font-size:11px;">\n'
                         it_html += '  <thead>\n'
                         it_html += '    <tr>\n'
                         for col in inlinedata_filtered_pivot.columns:
@@ -1283,7 +1286,9 @@ def main():
                         it_html += '  </thead>\n'
                         it_html += '  <tbody>\n'
                         for _ri, (_, row) in enumerate(inlinedata_filtered_pivot.iterrows()):
-                            it_html += '    <tr>\n'
+                            # 짝수행 zebra 배경을 inline으로(브라우저 nth-child(even) CSS와 동일값 — 메일 표시 통일)
+                            _zebra = ' style="background-color:#fafbfc;"' if _ri % 2 == 1 else ''
+                            it_html += f'    <tr{_zebra}>\n'
                             for col in inlinedata_filtered_pivot.columns:
                                 # Module 열은 연속 동일값 rowspan 병합 → 그룹 첫 행에서만 출력
                                 if col == 'Module':
@@ -1339,12 +1344,13 @@ def main():
                         _LD_CELL = f'{_LD_BD} text-align:center; padding:3px 10px; white-space:nowrap;'   # 열 좌우 여백 10px
                         def _ld_esc(_x):
                             return str(_x).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                        lot_detail_html = '<table class="lot-detail-table" style="border-collapse:collapse;">\n  <thead>\n    <tr>\n'
+                        lot_detail_html = '<table class="lot-detail-table" style="border-collapse:collapse; font-size:11px;">\n  <thead>\n    <tr>\n'
                         for _c in et_log.columns:
                             lot_detail_html += f'      <th style="{_LD_CELL} background-color:#e8edf3; font-weight:bold;">{_ld_esc(_c)}</th>\n'
                         lot_detail_html += '    </tr>\n  </thead>\n  <tbody>\n'
-                        for _, _r in et_log.iterrows():
-                            lot_detail_html += '    <tr>\n'
+                        for _ldi, (_, _r) in enumerate(et_log.iterrows()):
+                            _zebra = ' style="background-color:#fafbfc;"' if _ldi % 2 == 1 else ''
+                            lot_detail_html += f'    <tr{_zebra}>\n'
                             for _c in et_log.columns:
                                 _v = _r[_c]
                                 _vs = '' if pd.isna(_v) else _ld_esc(_v)
@@ -1524,9 +1530,9 @@ def main():
                                         # 주의 차트들도 flex-wrap 대신 table(2열)로 배치
                                         _parts.append(_html_table(_warn_blocks, 2, cellpad=4,
                                                                   cellstyle='vertical-align:top;'))
-                                    anomaly_html = ''.join(_parts) if _parts else '<p>이상항목 없음</p>'
+                                    anomaly_html = ''.join(_parts) if _parts else '<p style="margin:4px 0;">이상항목 없음</p>'
                                 else:
-                                    anomaly_html = '<p>이상항목 없음</p>'
+                                    anomaly_html = '<p style="margin:4px 0;">이상항목 없음</p>'
                             except Exception as ae:
                                 print(f"[WARN] 이상 Trend chart 생성 스킵 (오류): {ae}")
                         else:
@@ -1552,32 +1558,37 @@ def main():
                         html_content = html_code.replace('sub_title', sub_title)
 
                         # [0] 섹션 = (AI 다단계 해석 있으면 상단) + 코드 자동 분석(통계 Finding) + Trend chart 그리드
+                        # 섹션 제목/컨테이너 여백은 메일 클라이언트(<style> 무시)·포워딩에서도 동일하게
+                        # 보이도록 inline style로 지정(class는 브라우저 sticky/스크롤 보조용으로 유지).
+                        _SEC_T = ('border-left:4px solid #003366; padding-left:8px; font-size:15px; '
+                                  'font-weight:bold; color:#003366; margin-top:20px; margin-bottom:6px;')
+                        _TBL_C = 'margin-top:5px; margin-bottom:15px;'
                         _ai_block = (ai_html + '<hr style="border:none;border-top:1px solid #eee;margin:8px 0;">') if ai_html else ''
-                        _chart_sub = ('<div class="section-title" style="font-size:13px; margin-top:14px;">'
+                        _chart_sub = (f'<div class="section-title" style="{_SEC_T} font-size:13px; margin-top:14px;">'
                                       'Anomaly Trend Chart</div>')
                         html_content = html_content.replace(
                             '<div id="target0"></div>',
-                            f'<div id="target0"><div class="section-title">■ [0] Anomaly Summary</div>'
+                            f'<div id="target0"><div class="section-title" style="{_SEC_T}">■ [0] Anomaly Summary</div>'
                             f'{_ai_block}{code_summary_html}{_chart_sub}{anomaly_html}</div>'
                         )
                         html_content = html_content.replace(
                             '<div id="target1"></div>',
-                            f'<div id="target1"><div class="section-title">■ [1] Score Board</div>'
+                            f'<div id="target1"><div class="section-title" style="{_SEC_T}">■ [1] Score Board</div>'
                             f'<div style="font-size:12px; color:#555; margin:2px 0 6px 2px;">'
                             f'※ {_wf_min}pt 이상 측정된 이력이 있는 아이템은 각 wafer 아래에 WF MAP이 함께 표시됩니다.</div>'
                             # Score Board: 컨테이너 스크롤 없이 전체 항목을 한번에 펼침(max-height 없음, overflow visible).
                             # → thead(LOT_ID/wafer 헤더)가 페이지 스크롤 시 상단에 sticky 고정됨(score-board-open 클래스).
-                            f'<div class="table-container score-board-open">{score_board_html}</div></div>'
+                            f'<div class="table-container score-board-open" style="{_TBL_C}">{score_board_html}</div></div>'
                         )
                         html_content = html_content.replace(
                             '<div id="target2"></div>',
-                            f'<div id="target2"><div class="section-title">■ [2] Inline Table</div>'
-                            f'<div class="table-container">{inline_table_html}</div></div>'
+                            f'<div id="target2"><div class="section-title" style="{_SEC_T}">■ [2] Inline Table</div>'
+                            f'<div class="table-container" style="{_TBL_C}">{inline_table_html}</div></div>'
                         )
                         html_content = html_content.replace(
                             '<div id="target3"></div>',
-                            f'<div id="target3"><div class="section-title">■ [3] 최근 DC측정자재 상세</div>'
-                            f'<div class="table-container">{lot_detail_html}</div></div>'
+                            f'<div id="target3"><div class="section-title" style="{_SEC_T}">■ [3] 최근 DC측정자재 상세</div>'
+                            f'<div class="table-container" style="{_TBL_C}">{lot_detail_html}</div></div>'
                         )
                         html_content = html_content.replace(
                             '<div id="target4"></div>',

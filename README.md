@@ -14,7 +14,7 @@
 - [아키텍처](#아키텍처)
 - [불량 통계 자동 분석 (핵심)](#불량-통계-자동-분석-핵심)
   - [analyze_commonality — 코드 단독 동작](#analyze_commonality--코드-단독-동작)
-  - [지식 규칙 엔진 — 코드 조합 판정](#지식-규칙-엔진--코드-조합-판정)
+  - [지식 규칙 엔진 — [RULE] 단일 포맷](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용)
   - [지표(metrics) 계산식](#지표metrics-계산식)
   - [신호등 3색 등급](#신호등-3색-등급)
   - [Anomaly Trend Chart & spec-out WF MAP](#anomaly-trend-chart--spec-out-wf-map)
@@ -29,7 +29,7 @@
 - [로직 확장 가능성 · 분석 로직 카탈로그](#로직-확장-가능성--분석-로직-카탈로그)
   - [확장 포인트 (어디에 로직을 추가하나)](#확장-포인트-어디에-로직을-추가하나)
   - [넣을 수 있는 분석 로직 (아이디어)](#넣을-수-있는-분석-로직-아이디어)
-  - [불량 모드 판정표 (참고 지식)](#불량-모드-판정표-참고-지식)
+  - [불량 모드 판정 지식 (참고)](#불량-모드-판정-지식-참고)
   - [통계 패턴 → 추정 원인 카탈로그](#통계-패턴--추정-원인-카탈로그)
 - [주요 함수](#주요-함수)
 - [데이터 흐름](#데이터-흐름)
@@ -68,10 +68,12 @@ DC 측정 결과를 자동으로 통계 분석하고, 리포트를 자동 생성
 - **통계 자동 분석을 'wafer 단위'로 재설계** — 예전에는 *lot median vs 제품 chip median*으로 봤지만, 이제 **target lot의 각 wafer**를 **제품 전체의 'wafer별' 기준**과 비교합니다. spec-out은 **wafer별 이탈 비율**로 순위를 매기고, 주의(median/산포)는 **제품 wafer 분포 대비 wafer 이탈**로 판정 → lot 전체 평균에 묻히던 국소 이상을 잡아냅니다. → [analyze_commonality](#analyze_commonality--코드-단독-동작).
 - **PCHK를 일반 Index로 통합** — PCHK도 spec-out이면 동일하게 **이상(CRITICAL)**. '측정이상 추정'은 코드가 겹침 신호만 basis에 남기고 **AI가 판정**(억지 규칙 제거).
 - **통계 분석 제외 항목 설정** — `anomaly_exclude_items`로 파생/마진 컬럼 등을 **우선순위에서 제외**해 노이즈를 줄입니다(와일드카드 지원). → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
-- **AI 다단계 해석(선택)** — 통계 Finding 위에 triage→root-cause→final 3단계로 원인/조치를 자연어 보강. **AI 없거나 실패해도 코드 통계 분석은 그대로** 동작(AI-optional).
+- **판정 규칙을 `[RULE]` 단일 포맷으로 통합** — 지식 판정·불량 모드 decision tree·측정순서(seq_*) 판정·산포 억제/비교를 `ANOMALY_KNOWLEDGE.md`의 `ANOMALY_RULES` 마커 안 **`[RULE]` 블록 하나의 포맷**으로 통합(구 `RULE:`/`MSEQ_RULES`/`DEFECT_TREE` 섹션·`anomaly_mseq_*` 설정 폐기). **엔지니어의 룰 관리 지점 = md 파일 하나**. 매 발행마다 전 규칙 체크 결과를 터미널 `[RULE CHECK]` + `RUN/AI/anomaly_rule_check_*.txt/.json`으로 기록.
+- **AI 다단계 해석(선택)** — 통계 Finding 위에 triage→root-cause→final 3단계로 원인/조치를 자연어 보강. **AI 없거나 실패해도 코드 통계 분석은 그대로** 동작(AI-optional). 결과는 **평문 서술형 문장(핵심만 볼드)** 으로 표시하고, **`[RULE]`에 정의된 불량 모드만 표기**(규칙 미매칭 시 '수동 검토 필요'만 — AI 자유 제안·임의 링크는 리포트에 나오지 않음).
 
 ### 🎨 리포트·운용
 - **Score Board 연속 색 보간 + lot 분리** — 단계식 임계색 폐기, `score_color_scale` 제어점 선형보간(PPT·HTML 동일 함수). 같은 root의 형제 lot을 평균으로 합치지 않고 **lot별 분리** 표시.
+- **HTML=메일=포워딩 표시 통일** — 리포트 HTML의 보이는 스타일 전부(제목·표 테두리/색/폭·zebra·글꼴/여백)를 **inline style**로 지정. `<head>`의 `<style>` 블록은 브라우저 전용 보조(sticky 헤더/스크롤)만 담당 → 메일 뷰어가 style 블록을 무시해도, 포워딩 재작성 엔진이 flex/grid·%크기를 버려도 **동일하게 보임**(차트/WF MAP은 고정 px + table 배치).
 - **setup.py 자가추출 번들** — 코어 소스 전체를 gzip+base64로 임베드, SHA-256 검증. 저장소엔 소수 파일만 두고 한 번에 배포.
 
 ---
@@ -258,7 +260,7 @@ finding type과 우선순위(값이 클수록 위에 정렬)는 다음과 같습
 
 | 우선(priority) | type | severity | 조건 | 코멘트 |
 |---|---|---|---|---|
-| **30000+** | `KNOWLEDGE` | 🔴 이상 / 🟠 주의 | `ANOMALY_KNOWLEDGE.md`의 **`ANOMALY_RULES` 마커(WHEN 조건)** 충족 → 여러 항목 조합 판정 | 지식 기반 판정(불량모드/risk). 라벨 + 근거 + LINK. → [지식 규칙 엔진](#지식-규칙-엔진--코드-조합-판정) |
+| **30000+** | `KNOWLEDGE`/`DEFECT_MODE` | 🔴 이상 / 🟠 주의 | `ANOMALY_KNOWLEDGE.md`의 **`[RULE]`(when 게이트+분기)** 충족 → 여러 항목 조합/연쇄 판정 | 지식 기반 판정(불량모드/risk). note + LINK. → [지식 규칙 엔진](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용) |
 | **20000+** | `SPEC_OUT` | 🔴 CRITICAL (이상) | 타깃 lot에서 spec(SPECLOW~SPECHIGH) 이탈 측정점 ≥ 1 | wafer별 (이탈 pt/측정 pt) 비율, 위치(radius zone)·PGM(pt) |
 | **10000+** | `DISPERSION` | 🟠 WARNING (주의) | spec 미초과 + **어떤 wafer의 산포** `> anomaly_lot_dispersion_ratio` 배 | worst wafer 내부 산포가 '보통 wafer 산포'의 몇 배 |
 | **하위(참고)** | `MEAS_SUSPECT` | 🟡 NOTICE (측정이상 추정) | **판정 제외(`wfmap_exclude_keywords`) PCHK**가 spec-out | 동일 shot 겹침 신호만 산출 → AI 측정이상 추정 입력 |
@@ -285,41 +287,62 @@ finding type과 우선순위(값이 클수록 위에 정렬)는 다음과 같습
 - 통계 우선순위에서 특정 항목을 빼려면 → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
 
 > **여러 Index 조합→불량 모드 판정을 이제 코드도 수행**합니다(지식 규칙 엔진). `ANOMALY_KNOWLEDGE.md`의
-> `ANOMALY_RULES` 마커에 `RULE/WHEN/LEVEL/LINK/NOTE`로 조건식을 쓰면 코드가 파싱·평가해 `KNOWLEDGE` finding을
-> 만듭니다 — **AI가 없어도** 동작합니다. AI가 켜져 있으면 그 위에 자연어 종합 판정을 추가로 얹습니다.
-> → [지식 규칙 엔진](#지식-규칙-엔진--코드-조합-판정).
+> `ANOMALY_RULES` 마커에 **`[RULE]` 블록**(name/trigger/when/whenN/note/link + suppress·compare_disp)으로
+> 조건식을 쓰면 코드가 파싱·평가해 `KNOWLEDGE`/`DEFECT_MODE` finding을 만듭니다 — **AI가 없어도** 동작합니다.
+> AI가 켜져 있으면 같은 `[RULE]`들을 근거로 자연어 종합 판정을 추가로 얹습니다.
+> → [지식 규칙 엔진](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용).
 
-### 지식 규칙 엔진 — 코드 조합 판정
+### 지식 규칙 엔진 — `[RULE]` 단일 포맷 (코드 조합 판정 + AI 불량 모드 판정 공용)
 
 여러 항목을 조합한 **불량 모드/risk 판정**을 **AI 없이 코드가** 수행하는 경량 규칙 엔진입니다
-(`analyze_commonality` 내부, `_parse_knowledge_rules`). `ANOMALY_KNOWLEDGE.md`의 **`ANOMALY_RULES:start … ANOMALY_RULES:end`** 마커 사이에 규칙을 텍스트로 적으면, 코드가 파싱해 항목별 통계 컨텍스트에 대입·평가하고 통과한 규칙만 `KNOWLEDGE` finding으로 올립니다(최상단 priority).
+(`analyze_commonality` 내부, `_parse_chain_rules`). `ANOMALY_KNOWLEDGE.md`의 **`ANOMALY_RULES:start … ANOMALY_RULES:end`** 마커 사이에 **`[RULE]` 블록 하나의 포맷**으로만 적으면, 코드가 파싱해 항목별 통계 컨텍스트에 대입·평가합니다. **측정순서 함수·CAT2 조건·다단계 분기(decision tree)·산포 억제/비교까지 전부 이 한 포맷**으로 표현합니다(구 `RULE:`/`MSEQ_RULES`/`DEFECT_TREE` 별도 섹션·`anomaly_mseq_*` 설정 폐기 — 룰 관리 일원화).
 
-**규칙 한 개 = `RULE`(라벨) + `WHEN`(조건식) + 선택 `LEVEL/LINK/NOTE`** (혹은 `SUPPRESS_DISP`/`COMPARE_DISP`):
+같은 `[RULE]`이 **AI 불량 모드 판정에도 그대로** 쓰입니다: 각 분기의 `note` 문구가 곧 불량 모드명이고,
+AI가 규칙에 없는 모드명을 만들어도 코드 검증에서 걸러져 리포트에 표기되지 않습니다.
+
+**`[RULE]` 블록 키** (대소문자 무시):
 
 ```
-ANOMALY_RULES:start
-RULE: Gate 모듈 불량 (VTH N·P 연동)
-WHEN: all_sev(VTH_N, VTH_P) >= 이상
-LEVEL: 이상
-LINK: http://<사내 위키>/gate-cd
-NOTE: VTH N·P 동시 spec-out → Gate CD/Oxide 확인
-ANOMALY_RULES:end
+[RULE]
+name: Gate 모듈 불량 (VTH N·P 연동)      # 선택 — 트레이스/finding 라벨(없으면 trigger)
+trigger: VTH_N                           # spec_out/seq_* 함수의 주체 & finding item
+sev: critical                            # critical|warning (기본 critical)
+when: spec_out >= 3                      # 게이트(비우면 항상 활성)
+when2: all_sev(VTH, critical)            # 분기1 조건 (when2→note/link)
+note: "Gate 모듈 불량 — Gate CD/Oxide 확인"
+link: "http://<사내 위키>/gate-cd"
+when2_else:
+when3: seq_out(5)                        # 분기2 조건 (when3→note2/link2)
+note2: "측정 순서 연속 이탈 — 프로브/측정 중단 확인"
+when3_else:
+note3: "단순 이탈"                        # else 분기
 ```
 
-**`WHEN` 조건식** — `AND`/`OR`로 원자(atom)를 결합합니다(대소문자 무시). 지원 원자:
+- **분기 평가**: 게이트(`when`) 통과 후 `when2→when3→…→else` 순으로 **먼저 만족한 분기 1개**의
+  note/link만 `[불량 모드]` finding으로 채택(중복 없음, 최상단 priority). 분기 없이 `when`+`note`만 있으면
+  게이트 참 = 그 note가 곧 불량 모드.
+- **액션 키**(분기 대신/함께 사용 가능):
+  - `suppress_disp: A, B` — 게이트 참일 때 해당 항목의 `DISPERSION`(주의) finding 억제(`when` 없으면 항상). spec-out(이상)은 유지.
+  - `compare_disp: A,B | D,E` — 게이트 참일 때 두 그룹의 최대 산포배수를 비교하는 finding 생성.
+
+**조건식** — `when`/`whenN`에서 ` AND `/` OR `로 원자(atom)를 결합합니다. 지원 원자/함수:
 
 | 원자 | 의미 |
 |---|---|
-| `sev(ITEM) >= 이상\|주의\|참고` | 항목 severity 등급 비교(`>= <= == < >`). 미측정 항목은 참고(0) |
-| `all_sev(A, B, …) >= 이상\|주의` | 나열 항목이 **모두** 해당 등급 이상 |
+| `spec_out >= n` | trigger 항목의 spec-out pt 수 비교(`>= <= == < >`) |
+| `seq_out(n)` | **측정순서**(chip_x 먼저↑→chip_y↑)상 연속 spec-out ≥ n (프로브 접촉/측정 중단 의심) |
+| `seq_mostly_dead(f)` | 측정순서 시퀀스의 spec-out 비율 ≥ f(0~1, 거의 다 이탈 — 측정계 이상 의심) |
+| `seq_front_heavy` | 앞 절반 이탈 많고(≥60%)·뒤 절반 양호(≤20%) — 측정 워밍업/드리프트 의심 |
+| `sev(ITEM, critical)` 또는 `sev(ITEM) >= 이상\|주의\|참고` | 항목 severity 등급 비교. 미측정 항목은 참고(0) |
+| `all_sev(A, B, …, critical)` 또는 `all_sev(A,B,…) >= 이상` | 나열 그룹(CAT2/항목)이 **모두** 해당 등급 이상 |
 | `disp_desc(A,B,…)` / `disp_asc(…)` | 산포배수가 나열 순서로 단조 감소/증가 |
 | `median_low(ITEM)` | target median이 제품 대비 `anomaly_median_low_sigma`(2.0)σ 이상 낮음 |
 | `median_pctile(ITEM) <= 5` | target median이 모집단 분포의 하위 5% 이내(`>=95`면 상위 5%) |
+| `sev_cat2(CAT2) >= 이상` · `all_sev_cat2(…)>=이상` · `disp_desc/asc_cat2(…)` | CAT2 그룹의 '최대 등급·최대 산포'로 판정 |
 
-- **`LEVEL`** = `이상`(CRITICAL) / `주의`(WARNING, 기본). **`LINK`/`NOTE`** 는 detail에 근거·참고 링크로 덧붙습니다.
-- **`SUPPRESS_DISP: A, B`** — 해당 항목의 `DISPERSION`(주의) finding을 억제(WHEN 있으면 조건 참일 때만). spec-out(이상)은 유지.
-- **`COMPARE_DISP: A,B | D,E`** — 두 그룹의 최대 산포배수를 비교하는 코멘트 finding 생성(WHEN 참일 때).
+- 측정순서 지표(`seq_*`)는 trigger 항목의 wafer별 시퀀스에서 **최악값으로 집계**해 평가합니다(별도 설정 없음).
 - 규칙 평가는 전체가 try/except로 감싸져 **하나가 깨져도 나머지 분석은 계속**됩니다.
+- **전 규칙 체크 결과가 매 발행마다 기록**됩니다: 터미널 `[RULE CHECK]` 요약 + `RUN/AI/anomaly_rule_check_<lot>_<step>.txt/.json`(매칭/미매칭 전량, 조건·결과·비고).
 - **엔지니어가 `ANOMALY_KNOWLEDGE.md`만 편집**하면 코드 수정 없이 조합 판정 로직을 추가/수정할 수 있습니다.
 
 ### 지표(metrics) 계산식
@@ -427,9 +450,13 @@ if GLOBAL_CONFIG.use_gpt_summary and GLOBAL_CONFIG.use_gpt_multistep \
 | ③ **Final** | "종합 판단 + 불량 모드 판정, **JSON 객체로만 출력**" + 지식 텍스트 + (있으면) **[판정 예시]**(RUN/EXAMPLE) | spec-out Index 조합 + ① + ② + [항목 통계] | **구조화 JSON** | 코드가 검증 후 HTML 조립(아래) |
 
 - **③ Final은 구조화 JSON**: `{"defect_mode", "basis_items", "summary", "phenomenon", "actions", "meas_suspect"}`.
-  코드(`_assemble_final_html`)가 **판정표(DEFECT_MODE_TABLE)를 파싱해 검증** 후 HTML `<ul>`을 조립합니다:
-  - `defect_mode`가 표의 MODE명과 매칭되지 않으면 → `특정 불량 모드 미매칭(수동 검토) — AI 제안: ...`으로 강등.
-  - **LINK는 AI 출력이 아니라 매칭된 표 항목의 LINK만** `<a>`로 첨부(LINK 없는 모드는 미첨부 — 선택 사항). COMMENT도 표의 값을 권고 조치에 덧붙임. → **판정표 밖의 링크/조치가 리포트에 나올 수 없음.**
+  코드(`_assemble_final_html`)가 **`ANOMALY_RULES`의 `[RULE]` 분기(note=불량 모드명)와 대조·검증** 후
+  **평문 서술형 문장(핵심만 볼드)** 으로 조립합니다 — "**~ 불량**이 추정됩니다(근거: **A, B**). 현상/원인 서술.
+  측정이상 가능성: ~ — 재측정 우선. **확인/조치**: ~ (관련 링크)" 형태(머리말 태그 나열 없음):
+  - `defect_mode`가 `[RULE]`에 정의된 note 문구와 매칭되지 않으면 → **"지식 규칙 미매칭 — 수동 검토 필요"만 표시**.
+    AI가 임의로 만든 모드명은 리포트에 나오지 않습니다(**md에 정의된 규칙만 표기**).
+  - **LINK는 AI 출력이 아니라 매칭된 `[RULE]` 분기의 LINK만** `<a>`로 첨부(LINK 없는 모드는 미첨부 — 선택 사항).
+    → **규칙 밖의 링크/조치가 리포트에 나올 수 없음.**
   - JSON 파싱 실패 시(비-JSON 응답) 종전처럼 텍스트/HTML 그대로 사용(하위호환).
 - **AI에 전달되는 것**: (a) findings JSON(코드 산출 — 표시명·CAT2·위치·특이맵 패턴·PGM(pt)·PCHK 겹침 포함), (b) [항목 통계](전 항목 wafer 기준 요약 — median 백분위·산포배수·패턴), (c) `ANOMALY_KNOWLEDGE.md` 텍스트(②③ system), (d) RUN/EXAMPLE 판정 예시(③, 있으면), (e) target_lot_id.
   → **측정 raw/피벗 데이터, reformatter, 이미지는 전달하지 않습니다.** 토큰·보안 관점에서 "코드가 요약한 Finding"만 넘깁니다.
@@ -442,7 +469,7 @@ if GLOBAL_CONFIG.use_gpt_summary and GLOBAL_CONFIG.use_gpt_multistep \
 
 ```
 [0] Anomaly Summary
-├─ (AI 있으면) AI 다단계 해석 결과      ← interpret_with_ai (HTML <ul>)
+├─ (AI 있으면) AI 다단계 해석 결과      ← interpret_with_ai (평문 서술형 + 핵심 볼드)
 ├─ 통계 기반 자동 분석 (상위 5건)        ← render_findings_html (코드, AI 무관 항상)
 └─ Anomaly Trend Chart + spec-out WF MAP
 ```
@@ -457,7 +484,7 @@ if GLOBAL_CONFIG.use_gpt_summary and GLOBAL_CONFIG.use_gpt_multistep \
         │   토글/조건 만족?
         ▼ (yes)
 interpret_with_ai(findings, metrics, knowledge_text, _LLM_FN, ...)
-   ①LLM(triage) → ②LLM(root-cause, +지식) → ③LLM(final, +지식) → HTML <ul>
+   ①LLM(triage) → ②LLM(root-cause, +지식) → ③LLM(final, +지식) → 검증 → 서술형 HTML
         │ (실패/None)                              │
         ▼                                          ▼
    [0]엔 코드 분석만                       [0] 최상단에 AI 요약 삽입
@@ -467,10 +494,12 @@ interpret_with_ai(findings, metrics, knowledge_text, _LLM_FN, ...)
 
 ②③ 단계 system 프롬프트에 주입되는 **페르소나·응답 스타일 + 판정 지식(해석 규칙)** 가이드입니다(`My_config.anomaly_knowledge_path`).
 
-- AI의 **말투/형식/태도**(간결·객관·근거 기반, HTML `<ul>` 형식, 재측정 우선 등)를 정의합니다.
-- **일부 해석 규칙**(예: '측정이상 추정 규칙' — PCHK 동일 shot spec-out 겹침 → 측정이상 추정)도 여기서 관리합니다. 코드가 산출한 신호를 **어떻게 해석·판정할지**를 서술하며, AI가 이를 적용합니다.
-- 단 **통계 임계값(σ·배수 숫자)** 은 `My_config.py`에서, 무거운 통계 계산은 코드가 담당합니다. 불량 모드 판정표 등 넓은 참고 지식 → [로직 확장 가능성](#로직-확장-가능성--분석-로직-카탈로그).
-- **엔지니어가 이 MD만 편집하면** 코드 수정 없이 AI 해석의 톤/형식·해석 규칙이 바뀝니다.
+- AI의 **말투/형식/태도**(간결·객관·근거 기반, 평문 서술형, 재측정 우선 등)를 정의합니다.
+- **판정 규칙·불량 모드는 같은 파일의 `ANOMALY_RULES` 마커 안 `[RULE]` 단일 포맷**으로 관리합니다
+  (코드 지식 판정과 AI 불량 모드 판정 공용 — [지식 규칙 엔진](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용) 참조).
+- **해석 규칙**(예: '측정이상 추정 규칙' — PCHK 동일 shot spec-out 겹침 → 측정이상 추정)도 여기서 관리합니다. 코드가 산출한 신호를 **어떻게 해석·판정할지**를 서술하며, AI가 이를 적용합니다.
+- 단 **통계 임계값(σ·배수 숫자)** 은 `My_config.py`에서, 무거운 통계 계산은 코드가 담당합니다.
+- **엔지니어가 이 MD만 편집하면** 코드 수정 없이 AI 해석의 톤/형식·판정 규칙이 바뀝니다 — **룰 관련 관리 지점은 이 파일 하나**입니다.
 
 ### LLM 연결 / 토글
 
@@ -518,7 +547,7 @@ self.anomaly_exclude_items = [
 - 판정은 `anomaly_engine.item_excluded(name, patterns)` 한 함수가 담당 → `analyze_commonality`(finding·basis)와 `Main.py`(Trend chart 보충 선정) **양쪽에서 동일 적용**.
 - 제외된 항목은 `RUN/TEMP/anomaly_basis_<lot>.json`에도 나타나지 않습니다.
 
-> `anomaly_trend_slope_sigma` · `anomaly_split_separation` · `anomaly_site_recurrence_min_lots` · `anomaly_pchk_check` · `anomaly_lot_median_sigma` 키는 과거 detector의 잔여 설정으로 **현재 `analyze_commonality` 동작에는 영향을 주지 않습니다**(불량 모드/측정 의심/median 해석은 [지식 규칙 엔진](#지식-규칙-엔진--코드-조합-판정)과 AI로 이전됨).
+> `anomaly_trend_slope_sigma` · `anomaly_split_separation` · `anomaly_site_recurrence_min_lots` · `anomaly_pchk_check` · `anomaly_lot_median_sigma` 키는 과거 detector의 잔여 설정으로 **현재 `analyze_commonality` 동작에는 영향을 주지 않습니다**(불량 모드/측정 의심/median 해석은 [지식 규칙 엔진](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용)과 AI로 이전됨).
 
 ### Anomaly Trend Chart / WF MAP
 
@@ -612,7 +641,7 @@ self.anomaly_exclude_items = [
 |---|---|---|
 | **새 이상 detector** | `anomaly_engine.analyze_commonality()` | 항목 루프 안에 `findings.append(_finding(sev, type, item, title, detail))` 한 줄 추가. 각 detector는 try/except로 독립 → 하나 실패해도 나머지 계속 |
 | **판정 임계값** | `My_config.py` | `anomaly_lot_dispersion_ratio`, `anomaly_median_low_sigma` 등 상수만 조정 (코드 불변) → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝) |
-| **조합 판정 규칙(불량모드/risk)** | `ANOMALY_KNOWLEDGE.md` `ANOMALY_RULES` | `RULE/WHEN/LEVEL/LINK/NOTE`로 조건식 작성 → 코드가 `KNOWLEDGE` finding 생성(AI 무관). → [지식 규칙 엔진](#지식-규칙-엔진--코드-조합-판정) |
+| **조합 판정 규칙(불량모드/risk/측정순서/산포 억제·비교)** | `ANOMALY_KNOWLEDGE.md` `ANOMALY_RULES` | **`[RULE]` 블록**(name/trigger/sev/when/whenN/note/link/suppress·compare_disp) 작성 → 코드가 `KNOWLEDGE`/`DEFECT_MODE` finding 생성(AI 무관). → [지식 규칙 엔진](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용) |
 | **통계 분석 제외 항목** | `My_config.anomaly_exclude_items` | 파생/마진 컬럼 등을 우선순위에서 제외(와일드카드). `item_excluded`가 finding·Trend 양쪽 적용 |
 | **AI 해석 톤/형식** | `ANOMALY_KNOWLEDGE.md` | 페르소나·스타일 텍스트 편집 (로직 아님) |
 | **AI 다단계 프롬프트** | `anomaly_engine.interpret_with_ai()` | triage→root-cause→final 각 단계 프롬프트 문자열 수정 |
@@ -721,23 +750,24 @@ print(label); print(stats['rules'])   # 규칙별 평가 trace
 - PCHK 겹침: 없음 / [항목 통계] 특기: IDSAT_N median_pctile=3.2(하위 5% 이내)
 
 ## 확정 판정(후행 확인된 결과)
-- 불량 모드: Gate 모듈 불량 (VTH N·P 연동)   ← DEFECT_MODE_TABLE의 MODE명 그대로
+- 불량 모드: Gate 모듈 불량 (VTH N·P 연동)   ← ANOMALY_RULES [RULE] 분기의 note 문구 그대로
 - 판정 로직: VTH N·P 동시 spec-out + Edge ring → OOO 설비 엣지 링 이슈로 확정됨
 
 ## 비고(선택)
 - 재발 시 확인 포인트: OOO 챔버 이력, 엣지 계측
 ```
 
-- **주의**: `불량 모드`는 `ANOMALY_KNOWLEDGE.md` 판정표의 MODE명과 **정확히 일치**해야
-  코드 검증을 통과합니다(새 불량이면 판정표에 MODE 블록을 먼저 추가한 뒤 예시를 넣으세요 —
-  예시는 "언제 그 모드로 판정할지"의 사례, 판정표는 "그 모드가 존재함"의 정의).
+- **주의**: `불량 모드`는 `ANOMALY_KNOWLEDGE.md`의 `[RULE]` 분기 note 문구와 **정확히 일치**해야
+  코드 검증을 통과합니다(새 불량이면 `[RULE]`에 분기를 먼저 추가한 뒤 예시를 넣으세요 —
+  예시는 "언제 그 모드로 판정할지"의 사례, `[RULE]`은 "그 모드가 존재함"의 정의).
 
-### 불량 모드 판정표 (참고 지식)
+### 불량 모드 판정 지식 (참고)
 
-> 여러 Index 조합→불량 모드 판정은 **두 경로**로 이뤄집니다: ① 코드 [지식 규칙 엔진](#지식-규칙-엔진--코드-조합-판정)이 `ANOMALY_RULES`로 `KNOWLEDGE` finding 생성(AI 무관), ② AI 연결 시 `DEFECT_MODE_TABLE` 기반 자연어 종합 판정(그 위에 얹힘).
-> ⚠️ **AI가 실제 참조하는 판정표는 `ANOMALY_KNOWLEDGE.md`의 `DEFECT_MODE_TABLE` 마커 섹션**, 코드 규칙은 같은 파일의 `ANOMALY_RULES` 마커 섹션입니다
+> 여러 Index 조합→불량 모드 판정은 **한 곳(`ANOMALY_KNOWLEDGE.md`의 `ANOMALY_RULES` 마커 안 `[RULE]` 블록들)** 에서 관리하고 **두 경로**로 쓰입니다:
+> ① 코드 [지식 규칙 엔진](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용)이 직접 평가해 `[불량 모드]`/`[지식 판정]` finding 생성(AI 무관),
+> ② AI 연결 시 같은 `[RULE]`들을 근거로 자연어 종합 판정(그 위에 얹힘 — 규칙 밖 모드명은 코드 검증에서 걸러짐).
 > (AI에는 ANOMALY_KNOWLEDGE.md만 전달됨 — README는 전달되지 않음). 새 불량 모드 추가/링크·코멘트
-> 관리도 그쪽에서 하세요. 아래는 이해를 돕는 참고 사본(예시)입니다.
+> 관리도 그쪽에서 하세요. 아래는 이해를 돕는 참고 지식(예시)입니다.
 
 1. **Contact 미오픈 불량** — 조건: `RCNT_N`/`RCNT_P` spec-out → Contact 저항 초과(식각 미오픈/폴리머 잔류).
 2. **Gate 모듈 불량 (VTH)**
@@ -788,8 +818,8 @@ print(label); print(stats['rules'])   # 규칙별 평가 trace
 ### anomaly_engine.py
 | 함수 | 설명 |
 |------|------|
-| `analyze_commonality` | 코드 기반 Index별 Finding 산출 + `ANOMALY_RULES` 지식 규칙으로 조합 판정(`KNOWLEDGE`) (**AI 없이 동작**) |
-| `_parse_knowledge_rules` | `ANOMALY_KNOWLEDGE.md`의 `ANOMALY_RULES` 마커 파싱(RULE/WHEN/LEVEL/…) |
+| `analyze_commonality` | 코드 기반 Index별 Finding 산출 + `[RULE]` 지식 규칙으로 조합 판정(`KNOWLEDGE`/`DEFECT_MODE`) (**AI 없이 동작**) |
+| `_parse_chain_rules` | `ANOMALY_KNOWLEDGE.md`의 `ANOMALY_RULES` 마커 파싱 — `[RULE]` 단일 포맷(분기/seq_*/suppress·compare_disp) |
 | `interpret_with_ai` | Finding → AI 다단계(triage→root-cause→final) 해석 HTML (LLM 교체 가능) |
 | `render_findings_html` | Finding 리스트 → HTML(상위 top_n, 신호등 색) |
 | `run_anomaly_pipeline` | (구) Z-score Trend 차트 — 하위호환용 유지 |

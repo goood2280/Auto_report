@@ -503,113 +503,30 @@ def classify_specout_pattern(out_xy, all_xy, radius_of=None, rules=None, options
     return (label or '산발(특정 패턴 없음)'), stats
 
 
-# ──────────────────────────────────────────────────────────────────────
-# 측정 순서(Measurement-Order) 기반 spec-out 패턴 — My_config.anomaly_mseq_enabled=True 시 동작
-#   측정 순서 = WF MAP 좌상단 기준 chip_x 먼저 증가 → chip_y 증가
-#     (1,1)→(2,1)→(3,1)→…→(1,2)→(2,2)→… . wafer별로 이 순서의 spec-out 시퀀스를 MSEQ_RULES와 매칭.
-# ──────────────────────────────────────────────────────────────────────
-def _parse_mseq_rules(text):
-    """ANOMALY_KNOWLEDGE.md의 측정순서 패턴 규칙(MSEQ_RULES 마커 사이) 파싱.
-
-    한 규칙 = `MSEQ:`(이름) + `TYPE:`(consecutive_run|mostly_dead|front_loaded) + type별 파라미터
-              + [LEVEL/NOTE/LINK]. 반환: [{'name','type','level','note','link', <파라미터...>}, ...]
-    """
-    import re
-    rules = []
-    if not text:
-        return rules
-    _s = text.find('MSEQ_RULES:start')
-    _e = text.find('MSEQ_RULES:end')
-    if _s == -1 or _e == -1 or _e <= _s:
-        return rules
-    _numkeys = {'MIN_RUN', 'MIN_DEAD_FRAC', 'FRONT_FRAC', 'FRONT_MIN_SHARE', 'BACK_MAX_SHARE'}
-    cur = None
-    for line in text[_s:_e].splitlines():
-        if 'MSEQ_RULES' in line:      # 마커(:start/:end) 라인 제외
-            continue
-        m = re.match(r'\s*(MSEQ|TYPE|LEVEL|NOTE|LINK|MIN_RUN|MIN_DEAD_FRAC|FRONT_FRAC|'
-                     r'FRONT_MIN_SHARE|BACK_MAX_SHARE)\s*[:：]\s*(.*)$', line, re.IGNORECASE)
-        if not m:
-            continue
-        key = m.group(1).upper(); val = m.group(2).strip()
-        if key == 'MSEQ':
-            if cur and cur.get('type'):
-                rules.append(cur)
-            cur = {'name': val, 'type': '', 'level': '주의', 'note': '', 'link': ''}
-        elif cur is not None:
-            if key == 'TYPE':
-                cur['type'] = val.lower()
-            elif key == 'LEVEL':
-                cur['level'] = val
-            elif key == 'NOTE':
-                cur['note'] = val
-            elif key == 'LINK':
-                cur['link'] = val
-            elif key in _numkeys:
-                try:
-                    cur[key.lower()] = float(val)
-                except ValueError:
-                    pass
-    if cur and cur.get('type'):
-        rules.append(cur)
-    return rules
-
-
-def _classify_mseq_pattern(seq_flags, rules):
-    """측정순서 spec-out 불리언 시퀀스(seq_flags: 측정순서대로 True=spec-out)를 규칙과 매칭.
-
-    - consecutive_run : 연속 spec-out 최대 길이 ≥ MIN_RUN
-    - mostly_dead     : spec-out 비율 ≥ MIN_DEAD_FRAC (거의 다 이탈)
-    - front_loaded    : 앞부분(FRONT_FRAC) spec-out 비율 ≥ FRONT_MIN_SHARE 이고
-                        뒷부분 spec-out 비율 ≤ BACK_MAX_SHARE (전반부 집중 이탈)
-    반환: [{'name','level','note','link'}, ...] (매칭된 규칙들).
-    """
-    out = []
-    n = len(seq_flags)
-    if n == 0 or not rules:
-        return out
-    total_out = sum(1 for f in seq_flags if f)
-    max_run = 0; cur_run = 0
-    for f in seq_flags:
-        cur_run = cur_run + 1 if f else 0
-        if cur_run > max_run:
-            max_run = cur_run
-    for r in rules:
-        t = r.get('type'); ok = False
-        if t == 'consecutive_run':
-            ok = max_run >= int(r.get('min_run', 5))
-        elif t == 'mostly_dead':
-            ok = (total_out / n) >= float(r.get('min_dead_frac', 0.8))
-        elif t == 'front_loaded':
-            _k = max(1, int(round(n * float(r.get('front_frac', 0.5)))))
-            _front, _back = seq_flags[:_k], seq_flags[_k:]
-            _fs = (sum(1 for f in _front if f) / len(_front)) if _front else 0.0
-            _bs = (sum(1 for f in _back if f) / len(_back)) if _back else 0.0
-            ok = (_fs >= float(r.get('front_min_share', 0.6))
-                  and _bs <= float(r.get('back_max_share', 0.2)))
-        if ok:
-            out.append({'name': r.get('name', ''), 'level': r.get('level', '주의'),
-                        'note': r.get('note', ''), 'link': r.get('link', '')})
-    return out
-
-
 def _parse_defect_modes(text):
-    """AI Final의 불량 모드 판정 검증용 목록을 '통합 판정 규칙'(ANOMALY_RULES 마커)에서 도출.
+    """AI Final의 불량 모드 판정 검증용 목록을 '통합 [RULE] 규칙'(ANOMALY_RULES 마커)에서 도출.
 
-    ▶ 통합 관리: 별도 'DEFECT_MODE_TABLE' 섹션을 없애고 ANOMALY_RULES 하나로 관리한다.
-      각 RULE의 label=모드명, NOTE=코멘트, LINK=링크, WHEN=조건, 규칙 '순서'=우선순위.
-      단, 산포 억제 전용(SUPPRESS_DISP만) 규칙은 불량 모드가 아니므로 제외한다.
-    반환: [{'num','mode','when','comment','link'}, ...] (규칙 순서 = 우선순위).
+    ▶ 통합 관리: 판정 규칙은 [RULE] 체이닝 포맷 하나로만 관리한다.
+      각 [RULE] 분기의 note가 곧 불량 모드명, 그 분기의 link가 대시보드 링크.
+      규칙/분기 '순서' = 우선순위. 산포 억제/비교 전용 규칙(분기 note 없음)은 제외된다.
+    반환: [{'num','mode','when','comment','link'}, ...] (규칙·분기 순서 = 우선순위).
     AI Final(JSON) 검증 — defect_mode/LINK가 이 목록에 있는 값인지 대조한다.
     """
     out = []
     if not text:
         return out
-    for _i, _r in enumerate(_parse_knowledge_rules(text), start=1):
-        if _r.get('suppress_disp') and not _r.get('note'):
-            continue   # 산포 억제 전용 규칙은 불량 모드 목록에서 제외
-        out.append({'num': str(_i), 'mode': _r.get('label', ''), 'when': _r.get('when', ''),
-                    'comment': _r.get('note', ''), 'link': _r.get('link', '')})
+    _n = 0
+    for _r in _parse_chain_rules(text):
+        for _br in _r.get('branches', []):
+            _note = (_br.get('note') or '').strip()
+            if not _note:
+                continue
+            _n += 1
+            _when = _r.get('when', '')
+            if _br.get('cond'):
+                _when = (_when + ' → ' if _when else '') + _br['cond']
+            out.append({'num': str(_n), 'mode': _note, 'when': _when,
+                        'comment': '', 'link': _br.get('link', '')})
     return out
 
 
@@ -628,12 +545,16 @@ def _extract_json_obj(text):
 
 
 def _assemble_final_html(final_text, modes):
-    """AI Final 단계의 구조화(JSON) 출력을 검증하고 HTML <ul>로 조립.
+    """AI Final 단계의 구조화(JSON) 출력을 검증하고 **서술형 문장(평문 + 핵심 볼드)** 으로 조립.
+
+    출력 형태(머리말 태그 없이 자연스러운 2~4문장):
+      "**<불량 모드>**(으)로 추정됩니다(근거: **A, B**). <현상/원인 서술>.
+       측정이상 가능성: <...> — 재측정 우선. 확인/조치: <...> [관련 링크]"
 
     검증 규칙(할루시네이션 차단):
-    - defect_mode는 판정표(modes) MODE명과 대조 — 없으면 '특정 불량 모드 미매칭(수동 검토)'.
-    - LINK는 LLM 출력이 아니라 **매칭된 판정표 항목의 LINK만** <a>로 첨부(LINK는 선택 — 없으면 미첨부).
-    - COMMENT도 매칭된 표 항목의 값을 권고 조치에 덧붙임.
+    - defect_mode는 **ANOMALY_KNOWLEDGE.md [RULE]에 정의된 모드만** 인정 — 규칙에 없는 모드명은
+      표기하지 않고 '지식 규칙 미매칭(수동 검토 필요)'로만 안내한다(AI 자유 제안 미표기).
+    - LINK는 LLM 출력이 아니라 **매칭된 [RULE] 분기의 LINK만** <a>로 첨부(LINK는 선택 — 없으면 미첨부).
     JSON 파싱 실패 시(비-JSON 응답) 종전처럼 텍스트/HTML 그대로 사용(하위호환).
     """
     import html as _html
@@ -641,12 +562,17 @@ def _assemble_final_html(final_text, modes):
     def _esc(x):
         return _html.escape(str(x), quote=False)
 
+    def _sent(t):
+        """문장 끝 마침표 보정(이미 . ! ? 로 끝나면 그대로)."""
+        t = str(t or '').strip()
+        return t if (not t or t[-1] in '.!?…') else t + '.'
+
     data = _extract_json_obj(final_text)
     if not isinstance(data, dict):
         t = str(final_text or '').strip()
-        return t if '<' in t else f'<ul><li>{_esc(t)}</li></ul>'
+        return t if '<' in t else f'<div style="margin:3px 0;">{_esc(t)}</div>'
 
-    # 불량 모드 검증 — 판정표 MODE명과 대조(공백 차이 허용, 부분 포함까지)
+    # 불량 모드 검증 — [RULE] 모드명과 대조(공백 차이 허용, 부분 포함까지)
     mode_raw = data.get('defect_mode')
     mode_raw = str(mode_raw).strip() if isinstance(mode_raw, str) and str(mode_raw).strip().lower() not in ('null', 'none') else ''
     entry = None
@@ -656,42 +582,44 @@ def _assemble_final_html(final_text, modes):
             if _mm and (_mm == mode_raw or _mm in mode_raw or mode_raw in _mm):
                 entry = _m
                 break
-    if entry:
-        mode_txt = entry['mode']
-    elif mode_raw:
-        mode_txt = f'특정 불량 모드 미매칭(수동 검토) — AI 제안: {mode_raw}'
-    else:
-        mode_txt = '특정 불량 모드 미매칭(수동 검토)'
 
     basis = data.get('basis_items') or []
     if isinstance(basis, str):
         basis = [basis]
     basis_txt = ', '.join(_esc(b) for b in basis if b)
 
-    lis = []
-    _li = f'<li><b>[불량 모드 판정]</b> {_esc(mode_txt)}'
-    if basis_txt:
-        _li += f' — 근거: {basis_txt}'
-    if entry and entry.get('link'):
-        _li += f' <a href="{_html.escape(entry["link"], quote=True)}" target="_blank">관련 링크</a>'
-    _li += '</li>'
-    lis.append(_li)
+    paras = []
+    # ① 판정 문장 — 매칭된 [RULE] 모드만 표기(미매칭이면 모드명 미표기 = 수동 검토 안내)
+    if entry:
+        p = f'<b>{_esc(entry["mode"])}</b>(이)가 추정됩니다'
+        p += f' (근거: <b>{basis_txt}</b>).' if basis_txt else '.'
+        if entry.get('link'):
+            p += f' <a href="{_html.escape(entry["link"], quote=True)}" target="_blank">관련 링크</a>'
+    else:
+        p = '지식 규칙(ANOMALY_KNOWLEDGE.md)에 매칭되는 불량 모드가 없어 <b>수동 검토가 필요</b>합니다'
+        p += f' (이상 항목: <b>{basis_txt}</b>).' if basis_txt else '.'
+    paras.append(p)
 
+    # ② 현상/원인 서술 — 관찰 사실(phenomenon) + 종합 판단(summary)을 이어서 평문으로
+    _body = ' '.join(_sent(_esc(data.get(k))) for k in ('phenomenon', 'summary') if data.get(k))
+    if _body:
+        paras.append(_body)
+
+    # ③ 측정이상 추정(있을 때만) — 재측정 우선 안내
     _ms = data.get('meas_suspect')
     if isinstance(_ms, str) and _ms.strip() and _ms.strip().lower() not in ('null', 'none'):
-        lis.append(f'<li><b>[측정이상 추정]</b> {_esc(_ms.strip())}</li>')
-    if data.get('summary'):
-        lis.append(f'<li><b>[종합 판단]</b> {_esc(data["summary"])}</li>')
-    if data.get('phenomenon'):
-        lis.append(f'<li><b>[핵심 현상]</b> {_esc(data["phenomenon"])}</li>')
+        paras.append(f'<b>측정이상 가능성</b>: {_sent(_esc(_ms))} 불량 단정 전 <b>재측정으로 재현성 확인</b>을 우선하세요.')
+
+    # ④ 확인/조치 — LLM actions + 매칭 [RULE]의 코멘트(comment, 있으면)
     _act = _esc(data.get('actions') or '').strip()
     if entry and entry.get('comment'):
         _cm = _esc(entry['comment'])
         if _cm not in _act:
-            _act = (_act + ' · ' if _act else '') + f'(판정표) {_cm}'
+            _act = (_act + ' ' if _act else '') + _sent(_cm)
     if _act:
-        lis.append(f'<li><b>[권고 조치]</b> {_act}</li>')
-    return '<ul>' + ''.join(lis) + '</ul>'
+        paras.append(f'<b>확인/조치</b>: {_sent(_act)}')
+
+    return ''.join(f'<div style="margin:3px 0;">{p}</div>' for p in paras)
 
 
 def _parse_pchk_item_map(text):
@@ -730,128 +658,28 @@ def _parse_pchk_item_map(text):
     return out
 
 
-def _parse_knowledge_rules(text):
-    """ANOMALY_KNOWLEDGE.md의 판정 로직 규칙(ANOMALY_RULES 마커 사이)을 파싱.
-
-    한 규칙 = RULE:(라벨) + WHEN:(조건) + [LEVEL/LINK/NOTE]. 규칙끼리는 새 RULE:로 구분.
-    반환: [{'label','when','level','link','note'}, ...]
-    """
-    import re
-    rules = []
-    if not text:
-        return rules
-    _s = text.find('ANOMALY_RULES:start')
-    _e = text.find('ANOMALY_RULES:end')
-    if _s == -1 or _e == -1 or _e <= _s:
-        return rules
-    body = text[_s:_e]
-    cur = None
-    def _has_action(c):
-        return bool(c) and (c.get('when') or c.get('suppress_disp') or c.get('compare_disp'))
-
-    for line in body.splitlines():
-        if 'ANOMALY_RULES' in line:      # 마커 라인 제외
-            continue
-        if re.match(r'\s*\[RULE\]\s*$', line):   # 신규 [RULE] 체이닝 블록 시작 → 구(old) 규칙 파싱 중단(분리)
-            if _has_action(cur):
-                rules.append(cur)
-            cur = None
-            continue
-        m = re.match(r'\s*(RULE|WHEN|LEVEL|LINK|NOTE|SUPPRESS_DISP|COMPARE_DISP)\s*[:：]\s*(.*)$',
-                     line, re.IGNORECASE)
-        if not m:
-            continue
-        key = m.group(1).upper()
-        val = m.group(2).strip()
-
-        if key == 'RULE':
-            if _has_action(cur):
-                rules.append(cur)
-            cur = {'label': val, 'when': '', 'level': '주의', 'link': '', 'note': '',
-                   'suppress_disp': None, 'compare_disp': None}
-        elif cur is not None:
-            if key == 'WHEN':
-                cur['when'] = val
-            elif key == 'LEVEL':
-                cur['level'] = val
-            elif key == 'LINK':
-                cur['link'] = val
-            elif key == 'NOTE':
-                cur['note'] = val
-            elif key == 'SUPPRESS_DISP':
-                cur['suppress_disp'] = [t.strip() for t in val.split(',') if t.strip()]
-            elif key == 'COMPARE_DISP':
-                # "A,B | D,E" → 두 그룹
-                _parts = val.split('|')
-                if len(_parts) == 2:
-                    cur['compare_disp'] = (
-                        [t.strip() for t in _parts[0].split(',') if t.strip()],
-                        [t.strip() for t in _parts[1].split(',') if t.strip()])
-    if _has_action(cur):
-        rules.append(cur)
-    return rules
-
-
-def _parse_defect_tree(text):
-    """ANOMALY_KNOWLEDGE.md의 '연쇄(decision tree) 불량 모드 규칙'(DEFECT_TREE 마커 사이) 파싱.
-
-    한 규칙 = `MODE:`(불량 모드 이름) + `WHEN:`/`STEP:`(조건식; 여러 줄이면 순차 AND = 트리 경로를
-    따라가는 연속 확인) + [`LEVEL`(이상|주의, 기본 이상)/`NOTE`/`LINK`].
-    반환: [{'mode','conds':[조건식,...],'level','note','link'}, ...] — **순서=우선순위**(먼저 매칭 우선).
-    같은 시작 조건이라도 후속 STEP이 다르면 서로 다른 MODE로 분기하고, 코드는 순서대로 평가해
-    '최초로 모든 조건을 만족한' 규칙 하나만 최종 불량 모드로 채택한다(중복 판정 방지).
-    """
-    import re
-    out = []
-    if not text:
-        return out
-    _s = text.find('DEFECT_TREE:start')
-    _e = text.find('DEFECT_TREE:end')
-    if _s == -1 or _e == -1 or _e <= _s:
-        return out
-    cur = None
-    for line in text[_s:_e].splitlines():
-        if 'DEFECT_TREE' in line:      # 마커(:start/:end) 라인 제외
-            continue
-        m = re.match(r'\s*(MODE|WHEN|STEP|LEVEL|NOTE|LINK)\s*[:：]\s*(.*)$', line, re.IGNORECASE)
-        if not m:
-            continue
-        key = m.group(1).upper(); val = m.group(2).strip()
-        if key == 'MODE':
-            if cur and cur.get('conds'):
-                out.append(cur)
-            cur = {'mode': val, 'conds': [], 'level': '이상', 'note': '', 'link': ''}
-        elif cur is not None:
-            if key in ('WHEN', 'STEP'):
-                if val:
-                    cur['conds'].append(val)
-            elif key == 'LEVEL':
-                cur['level'] = val
-            elif key == 'NOTE':
-                cur['note'] = val
-            elif key == 'LINK':
-                cur['link'] = val
-    if cur and cur.get('conds'):
-        out.append(cur)
-    return out
-
-
 def _parse_chain_rules(text):
-    """ANOMALY_RULES 마커 안의 '[RULE] 통합 체이닝(decision tree) 규칙' 파싱.
+    """ANOMALY_RULES 마커 안의 '[RULE] 통합 체이닝 규칙' 파싱 — **판정 규칙의 단일 포맷**.
 
-    측정순서 함수·CAT2 조건·다단계 분기·다중 note/link를 '하나의 룰 포맷'으로 표현한다.
+    측정순서 함수·CAT2 조건·다단계 분기(decision tree)·다중 note/link·산포 억제/비교까지
+    '하나의 룰 포맷'으로 표현한다(별도 RULE:/MSEQ/DEFECT_TREE 섹션 없음 — 전부 통합).
     한 규칙은 `[RULE]` 헤더로 시작하고 아래 키(대소문자 무시)를 가진다:
+      - `name:`    규칙 이름(선택 — 트레이스/finding 라벨용. 없으면 trigger로 표기)
       - `trigger:` 대상 항목(함수 spec_out/seq_*의 주체 & finding item)
       - `sev:`     critical|warning|이상|주의 (finding 심각도, 기본 critical)
-      - `when:`    게이트 조건(참일 때만 규칙 활성)
+      - `when:`    게이트 조건(참일 때만 규칙 활성. 비우면 항상 활성)
       - `when2:`, `when3:`, ... : 연쇄 분기 조건(when 만족 시 위에서부터 순차 평가)
       - `whenN_else:` : 가독성용 구분자(무시)
-      - `note:`, `note2:`, ... / `link:`, `link2:`, ... : 분기별 코멘트/링크(여러 개 가능)
+      - `note:`, `note2:`, ... / `link:`, `link2:`, ... : 분기별 불량 모드 문구/링크(여러 개 가능)
+      - `suppress_disp: A,B,...` : 게이트 참일 때 나열 항목의 산포(주의) finding 억제(액션)
+      - `compare_disp: A,B | C,D` : 게이트 참일 때 두 그룹 산포 비교 finding 생성(액션)
     분기 매핑: branch i(1-base) = 조건 `when{i+1}`(없으면 else) → `note{i}`/`link{i}`.
       즉 when2→note/link, when3→note2/link2, (else)→note3/link3. 조건식 함수는
       spec_out<op>n · seq_out(n) · seq_front_heavy · seq_mostly_dead(f) · all_sev(그룹...,level) ·
-      sev(ITEM,level) · disp_asc/desc(...) · *_cat2(...) 등(ANOMALY_RULES WHEN 원자와 공용).
-    반환: [{'trigger','sev','when','branches':[{'cond'(None=else),'note','link'}, ...]}, ...].
+      sev(ITEM,level) · sev(ITEM)>=이상 · all_sev(...)>=이상 · disp_asc/desc(...) ·
+      median_low/median_pctile(...) · *_cat2(...) — WHEN 원자 전부 when/whenN에서 공용.
+    반환: [{'name','trigger','sev','when','branches':[{'cond'(None=else),'note','link'},...],
+            'suppress_disp': [..]|None, 'compare_disp': ([..],[..])|None}, ...].
     """
     import re
     out = []
@@ -863,8 +691,9 @@ def _parse_chain_rules(text):
         return out
     _blocks = re.split(r'(?im)^\s*\[RULE\]\s*$', text[_s:_e])
     for _blk in _blocks[1:]:      # 첫 조각은 [RULE] 이전(무시)
-        cur = {'trigger': '', 'sev': 'critical', 'when': '',
-               'whens': {}, 'notes': {}, 'links': {}}
+        cur = {'name': '', 'trigger': '', 'sev': 'critical', 'when': '',
+               'whens': {}, 'notes': {}, 'links': {},
+               'suppress_disp': None, 'compare_disp': None}
         for line in _blk.splitlines():
             if 'ANOMALY_RULES' in line:
                 continue
@@ -873,7 +702,9 @@ def _parse_chain_rules(text):
                 continue
             key = m.group(1).lower()
             val = m.group(2).strip().strip('"').strip("'").strip()
-            if key == 'trigger':
+            if key == 'name':
+                cur['name'] = val
+            elif key == 'trigger':
                 cur['trigger'] = val
             elif key == 'sev':
                 cur['sev'] = val.lower()
@@ -891,7 +722,16 @@ def _parse_chain_rules(text):
                 cur['links'][1] = val
             elif re.match(r'link\d+$', key):
                 cur['links'][int(key[4:])] = val
-        if not (cur['trigger'] or cur['when'] or cur['notes']):
+            elif key == 'suppress_disp':
+                cur['suppress_disp'] = [t.strip() for t in val.split(',') if t.strip()]
+            elif key == 'compare_disp':
+                _parts = val.split('|')
+                if len(_parts) == 2:
+                    cur['compare_disp'] = (
+                        [t.strip() for t in _parts[0].split(',') if t.strip()],
+                        [t.strip() for t in _parts[1].split(',') if t.strip()])
+        if not (cur['trigger'] or cur['when'] or cur['notes']
+                or cur['suppress_disp'] or cur['compare_disp']):
             continue
         _max = max(list(cur['notes'].keys()) + [0])
         branches = []
@@ -899,10 +739,11 @@ def _parse_chain_rules(text):
             branches.append({'cond': cur['whens'].get(i + 1),
                              'note': cur['notes'].get(i, ''),
                              'link': cur['links'].get(i, '')})
-        if not branches and cur['when']:
+        if not branches and cur['when'] and not (cur['suppress_disp'] or cur['compare_disp']):
             branches = [{'cond': None, 'note': '', 'link': ''}]
-        out.append({'trigger': cur['trigger'], 'sev': cur['sev'],
-                    'when': cur['when'], 'branches': branches})
+        out.append({'name': cur['name'], 'trigger': cur['trigger'], 'sev': cur['sev'],
+                    'when': cur['when'], 'branches': branches,
+                    'suppress_disp': cur['suppress_disp'], 'compare_disp': cur['compare_disp']})
     return out
 
 
@@ -1012,10 +853,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             _pat_all_xy = []
     _pat_rules = cfg('anomaly_pattern_rules', None) or None   # None/빈 → 특이맵 판정 안 함(하드코딩 기본 없음)
     _pat_opt = cfg('anomaly_pattern_thresholds', {}) or {}    # 전역 옵션(min_pts, y_positive_up)
-    # 측정 순서 기반 패턴(MSEQ) — anomaly_mseq_enabled=True + MSEQ_RULES 있을 때만 판정
-    _mseq_enabled = bool(cfg('anomaly_mseq_enabled', False))
-    _mseq_opt = cfg('anomaly_mseq_thresholds', {}) or {}      # min_pts(시퀀스 최소 pt), min_wafers
-    _mseq_rules = _parse_mseq_rules(knowledge_text) if _mseq_enabled else []
+    # NOTE: 측정 순서 기반 패턴은 별도 MSEQ 설정/섹션 없이 [RULE]의 seq_* 조건 함수로만 판정한다.
 
     # spec dict {alias: (low, high)} — 차트 항목은 spec_data, PCHK 등 비차트 항목은 reformatter에서 보강
     spec = {}
@@ -1269,39 +1107,9 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             except Exception as _pe:
                 print(f"[anomaly] 특이맵 분류 실패({it}): {_pe}")
 
-        # ── 측정 순서(Measurement-Order) 기반 패턴 (anomaly_mseq_enabled) ──
-        #   wafer별로 측정순서(chip_x 먼저↑ → chip_y↑) spec-out 시퀀스를 만들어 MSEQ_RULES와 매칭.
-        mseq_label = ''
-        if (_mseq_enabled and _mseq_rules and col_x and col_y and col_waf
-                and col_x in _sub.columns and col_y in _sub.columns and col_waf in _sub.columns):
-            try:
-                _mseq_min_pts = int(_mseq_opt.get('min_pts', 10))
-                _mseq_min_wf = int(_mseq_opt.get('min_wafers', 1))
-                _hit = {}   # 규칙명 -> {'level','note','link','wafers':set}
-                _seqdf = _sub[[col_waf, col_x, col_y]].copy()
-                _seqdf['_out'] = _om.values
-                for _w, _wrows in _seqdf.groupby(col_waf):
-                    if len(_wrows) < _mseq_min_pts:
-                        continue
-                    # 측정 순서: chip_x 먼저 증가 → chip_y 증가 = (chip_y, chip_x) 오름차순 정렬
-                    _ordered = _wrows.sort_values([col_y, col_x], kind='stable')
-                    _flags = list(_ordered['_out'].astype(bool))
-                    for _mm in _classify_mseq_pattern(_flags, _mseq_rules):
-                        _wi = _waf_int(_w)
-                        _h = _hit.setdefault(_mm['name'], {'level': _mm['level'], 'note': _mm['note'],
-                                                           'link': _mm['link'], 'wafers': set()})
-                        _h['wafers'].add(_wi if _wi is not None else _w)
-                _labels = []
-                for _nm, _h in _hit.items():
-                    if len(_h['wafers']) >= _mseq_min_wf:
-                        _wl = ', '.join('#' + str(w) for w in sorted(
-                            _h['wafers'], key=lambda z: (isinstance(z, str), z)))
-                        _labels.append(f"{_nm}({_wl})")
-                if _labels:
-                    mseq_label = '측정순서: ' + ' / '.join(_labels)
-            except Exception as _me:
-                print(f"[anomaly] 측정순서 패턴 분류 실패({it}): {_me}")
-        return pgms, zones, positions, pattern, pattern_stats, commonality, mseq_label
+        # NOTE: 측정 순서 기반 판정은 [RULE]의 seq_out/seq_mostly_dead/seq_front_heavy 조건 함수가
+        #       담당한다(_seq_metrics 지표 사용). 별도 측정순서 라벨은 생성하지 않는다.
+        return pgms, zones, positions, pattern, pattern_stats, commonality
 
     # PCHK 계열도 '동일한 index 항목'으로 같은 루프에서 함께 분석하고, 판정도 동일하게 적용한다.
     #   - 비차트(REPORT ORDER 없음)라 metrics_dict엔 없지만 merged_df엔 컬럼으로 존재 → items에 합류.
@@ -1600,13 +1408,13 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         specout_txt, n_out, specout_map = ('', 0, {})
         so_max_ratio, so_n_wafers = 0.0, 0
         so_pgms, so_zones, so_positions = [], {}, []
-        so_pattern, so_pattern_stats, so_commonality, so_mseq = '', {}, '', ''
+        so_pattern, so_pattern_stats, so_commonality = '', {}, ''
         if tgt_it is not None and (lo is not None or hi is not None):
             specout_txt, n_out, specout_map, so_max_ratio, so_n_wafers = \
                 _specout_by_wafer(tgt_it, col_waf, it, lo, hi)
             if n_out > 0:
                 (so_pgms, so_zones, so_positions, so_pattern,
-                 so_pattern_stats, so_commonality, so_mseq) = _specout_extra(it, lo, hi)
+                 so_pattern_stats, so_commonality) = _specout_extra(it, lo, hi)
         # agg 판정 항목은 raw metrics 폴백을 쓰지 않는다(집계값 기준 유지)
         if n_out == 0 and it not in _agg_item_set:
             n_out = int(metrics_dict.get(it, {}).get('spec_out_count', 0) or 0)
@@ -1638,9 +1446,6 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         # wafer간 반복성(동일 shot/유사 위치) 코멘트 — 3개 wafer 이상 발생 시(요청사항)
         if so_commonality:
             _bits.append(so_commonality)
-        # 측정 순서 기반 패턴(MSEQ) — 매칭 시 상세에 표기
-        if so_mseq:
-            _bits.append(so_mseq)
         # radius zone 분포(위치: Center N ...)는 표시하지 않음(요청). so_zones는 basis에만 기록.
         # median 이탈(dev_txt)은 판정 기준에서 제외됨 → 상세에도 표시하지 않음. 산포(disp_txt)만.
         if disp_txt:
@@ -1718,7 +1523,6 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'spec_out_zone': so_zones,              # {Center/Middle/Edge: 개수}
             'spec_out_positions': so_positions,     # 이상 pt 위치 [{wafer,x,y,pgm}, ...] (상한 적용)
             'spec_out_pattern': so_pattern,         # 특이맵 라벨(Edge ring/줄성/k시 방향 등)
-            'spec_out_mseq': so_mseq,               # 측정순서 패턴 라벨(연속/대량/전반부 이탈)
             'spec_out_pattern_stats': so_pattern_stats,   # 패턴 판정 수치/게이트 사유
             'spec_out_commonality': so_commonality, # wafer간 반복성(동일 shot/유사 위치) 코멘트
             'target_median': _tmed,
@@ -1824,12 +1628,11 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         print(f"[WARN] anomaly 근거 데이터 저장 실패: {_be}")
 
     # ── 지식 규칙(ANOMALY_KNOWLEDGE.md) 파싱·평가 → '지식 기반 판정' finding 생성 ──
-    #   md의 RULE을 파싱해 항목별 통계 판정(_item_ctx: 이상/주의 level·산포배수·median)과 매칭.
+    #   md의 [RULE] 체이닝 규칙(단일 포맷)을 파싱해 항목별 통계 판정
+    #   (_item_ctx: 이상/주의 level·산포배수·median)과 매칭한다.
     try:
-        _kn_rules = _parse_knowledge_rules(knowledge_text)
-        _tree = _parse_defect_tree(knowledge_text)     # (구) 불량 모드 decision tree
-        _chain = _parse_chain_rules(knowledge_text)    # 통합 [RULE] 체이닝 규칙
-        if _kn_rules or _tree or _chain:
+        _chain = _parse_chain_rules(knowledge_text)    # 통합 [RULE] 체이닝 규칙(단일 포맷)
+        if _chain:
             _mlow_sigma = cfg('anomaly_median_low_sigma', 2.0)
 
             _LV = {'이상': 2, '주의': 1, '참고': 0}
@@ -2002,103 +1805,59 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         return True
                 return False
 
+            # ── 통합 [RULE] 규칙 평가(단일 포맷) ──
+            #   각 [RULE]은 gate(when) 통과 후:
+            #   (a) suppress_disp: 나열 항목의 산포(주의) finding 억제
+            #   (b) compare_disp : 두 그룹 산포 비교 finding 생성
+            #   (c) 분기(when2→when3…): '먼저 만족한' 분기의 note/link 하나만 [불량 모드] finding.
             _suppress_disp_items = set()   # DISPERSION(주의) finding을 억제할 항목(실제 키)
-            for _r in _kn_rules:
+            for _cr in _chain:
                 try:
-                    _when = _r.get('when') or ''
-                    _when_ok = (not _when) or _eval_when(_when)
-                    # (1) 산포 언급 억제: WHEN 없으면 항상, 있으면 WHEN 참일 때만
-                    if _r.get('suppress_disp'):
-                        if _when_ok:
-                            for _n in _r['suppress_disp']:
+                    _tname = _cr.get('trigger', '')
+                    _rname = _cr.get('name') or (f"[RULE] {_tname}" if _tname else '[RULE]')
+                    _gate = _cr.get('when') or ''
+                    _tctx = _find_ctx(_tname) if _tname else None
+                    _gate_ok = (not _gate) or _eval_chain_cond(_gate, _tctx)
+                    # (a) 산포 억제 액션 — 게이트 참(또는 게이트 없음)일 때 적용
+                    if _cr.get('suppress_disp'):
+                        if _gate_ok:
+                            for _n in _cr['suppress_disp']:
                                 _ri = _resolve_item(_n)
                                 if _ri:
                                     _suppress_disp_items.add(_ri)
-                        _rule_trace.append({'kind': '지식(산포억제)', 'name': _r.get('label', ''),
-                                            'cond': _when, 'matched': bool(_when_ok),
-                                            'result': '적용' if _when_ok else '해당없음',
-                                            'note': ('산포 언급 억제: ' + ', '.join(_r['suppress_disp'])) if _when_ok else ''})
-                        continue
-                    # (2) 산포 그룹 비교: WHEN 참일 때 두 그룹 산포 비교 코멘트 생성
-                    if _r.get('compare_disp'):
-                        if _when_ok:
-                            _g1, _g2 = _r['compare_disp']
+                        _rule_trace.append({'kind': 'RULE(산포억제)', 'name': _rname,
+                                            'cond': f"when: {_gate}" if _gate else '(항상)',
+                                            'matched': bool(_gate_ok),
+                                            'result': '적용' if _gate_ok else '게이트 미충족',
+                                            'note': ('산포 언급 억제: ' + ', '.join(_cr['suppress_disp'])) if _gate_ok else ''})
+                        if not (_cr.get('compare_disp') or _cr.get('branches')):
+                            continue
+                    # (b) 산포 그룹 비교 액션 — 게이트 참일 때 비교 finding 생성
+                    if _cr.get('compare_disp'):
+                        _cmp = ''
+                        if _gate_ok:
+                            _g1, _g2 = _cr['compare_disp']
                             _v1, _v2 = _grp_disp(_g1), _grp_disp(_g2)
                             # 표시명 후처리(suffix/prefix 제거) 적용해 그룹 항목명 표기
                             _g1d = ', '.join(_disp(_x) for _x in _g1)
                             _g2d = ', '.join(_disp(_x) for _x in _g2)
                             _big = f"[{_g1d}]" if _v1 >= _v2 else f"[{_g2d}]"
                             _cmp = f"산포 비교: [{_g1d}]={_v1:.1f}배 vs [{_g2d}]={_v2:.1f}배 → {_big} 산포가 더 큼"
-                            _lvl = 'CRITICAL' if str(_r.get('level', '주의')).strip() == '이상' else 'WARNING'
-                            _det = _cmp + ((' · ' + _r['note']) if _r.get('note') else '')
-                            if _r.get('link'):
-                                _det += f"  참고: {_r['link']}"
-                            findings.append(_finding(_lvl, 'KNOWLEDGE', _r['label'],
-                                                     f"[지식 판정] {_r['label']}", _det.strip()))
-                        _rule_trace.append({'kind': '지식(산포비교)', 'name': _r.get('label', ''),
-                                            'cond': _when, 'matched': bool(_when_ok),
-                                            'result': '매칭' if _when_ok else '해당없음',
-                                            'note': (_cmp if _when_ok else '')})
+                            _lvl = ('CRITICAL' if str(_cr.get('sev', 'warning')).lower()
+                                    in ('critical', '이상') else 'WARNING')
+                            findings.append(_finding(_lvl, 'KNOWLEDGE', _rname,
+                                                     f"[지식 판정] {_rname}", _cmp))
+                        _rule_trace.append({'kind': 'RULE(산포비교)', 'name': _rname,
+                                            'cond': f"when: {_gate}" if _gate else '(항상)',
+                                            'matched': bool(_gate_ok),
+                                            'result': '매칭' if _gate_ok else '게이트 미충족',
+                                            'note': _cmp})
+                        if not _cr.get('branches'):
+                            continue
+                    # (c) 분기 판정 — 게이트 통과 후 when2→when3… 순으로 최초 매칭 1개만
+                    if not _cr.get('branches'):
                         continue
-                    # (3) 일반 판정: WHEN 참이면 finding 생성
-                    _gen_ok = bool(_when and _eval_when(_when))
-                    if _gen_ok:
-                        _lvl = 'CRITICAL' if str(_r.get('level', '주의')).strip() == '이상' else 'WARNING'
-                        _det = _r.get('note', '') or ''
-                        if _r.get('link'):
-                            _det = (_det + '  ' if _det else '') + f"참고: {_r['link']}"
-                        findings.append(_finding(_lvl, 'KNOWLEDGE', _r['label'],
-                                                 f"[지식 판정] {_r['label']}", _det.strip()))
-                    _rule_trace.append({'kind': '지식(판정)', 'name': _r.get('label', ''),
-                                        'cond': _when, 'matched': _gen_ok,
-                                        'result': ('매칭 → ' + str(_r.get('level', '주의'))) if _gen_ok else '해당없음',
-                                        'note': (_r.get('note', '') or '') if _gen_ok else ''})
-                except Exception:
-                    continue
-            # 억제 적용: 지정 항목의 DISPERSION(주의) finding 제거 (spec-out=이상은 유지)
-            if _suppress_disp_items:
-                findings[:] = [f for f in findings
-                               if not (f.get('type') == 'DISPERSION' and f.get('item') in _suppress_disp_items)]
-
-            # ── 불량 모드 decision tree (DEFECT_TREE) — 순서대로 평가, 최초 매칭 '1개'만 finding ──
-            #   각 규칙의 조건(WHEN/STEP; 여러 개면 순차 AND, 즉 트리의 경로를 따라감)이 모두 참인
-            #   '첫' 규칙 하나만 채택하고 멈춘다(중복 판정 방지, 먼저 매칭된 규칙 우선).
-            _dm_hit = False
-            for _tr in _tree:
-                try:
-                    _conds = _tr.get('conds') or []
-                    _cond_txt = ' AND '.join(_conds)
-                    if _dm_hit:
-                        _rule_trace.append({'kind': '불량모드(tree)', 'name': _tr.get('mode', ''),
-                                            'cond': _cond_txt, 'matched': False,
-                                            'result': '스킵(이전 매칭)', 'note': ''})
-                        continue
-                    _tr_ok = bool(_conds and all(_eval_when(_c) for _c in _conds))
-                    if _tr_ok:
-                        _lvl = 'CRITICAL' if str(_tr.get('level', '이상')).strip() == '이상' else 'WARNING'
-                        _det = _tr.get('note', '') or ''
-                        if _tr.get('link'):
-                            _det = (_det + '  ' if _det else '') + f"참고: {_tr['link']}"
-                        findings.append(_finding(_lvl, 'DEFECT_MODE', _tr['mode'],
-                                                 f"[불량 모드] {_tr['mode']}", _det.strip()))
-                        _dm_hit = True
-                    _rule_trace.append({'kind': '불량모드(tree)', 'name': _tr.get('mode', ''),
-                                        'cond': _cond_txt, 'matched': _tr_ok,
-                                        'result': '매칭(불량모드)' if _tr_ok else '해당없음',
-                                        'note': (_tr.get('note', '') or '') if _tr_ok else ''})
-                except Exception:
-                    continue
-
-            # ── 통합 [RULE] 체이닝 규칙 — 규칙별 gate(when) 후 분기, 최초 매칭 branch 1개만 finding ──
-            #   trigger 항목 컨텍스트로 spec_out/seq_* 함수를 평가하고, when→when2→when3… 순으로
-            #   따라가 '먼저 만족한' 분기의 note/link 하나만 채택(중복 없음).
-            for _cr in _chain:
-                try:
-                    _tname = _cr.get('trigger', '')
-                    _rname = f"[RULE] {_tname}" if _tname else '[RULE]'
-                    _gate = _cr.get('when') or ''
-                    _tctx = _find_ctx(_tname) if _tname else None
-                    if _gate and not _eval_chain_cond(_gate, _tctx):
+                    if not _gate_ok:
                         _rule_trace.append({'kind': 'RULE(체이닝)', 'name': _rname,
                                             'cond': f"when: {_gate}", 'matched': False,
                                             'result': '게이트 미충족', 'note': ''})
@@ -2134,6 +1893,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                                             'result': '게이트 통과·분기 무매칭', 'note': ''})
                 except Exception:
                     continue
+            # 억제 적용: 지정 항목의 DISPERSION(주의) finding 제거 (spec-out=이상은 유지)
+            if _suppress_disp_items:
+                findings[:] = [f for f in findings
+                               if not (f.get('type') == 'DISPERSION' and f.get('item') in _suppress_disp_items)]
     except Exception as _ke:
         print(f"[WARN] 지식 규칙/불량모드 평가 실패: {_ke}")
 
@@ -2401,17 +2164,19 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
             "**[지식베이스]와 관찰된 데이터(finding·항목 통계)에 있는 내용만** 사용하세요. "
             "**[지식베이스]에 적혀있지 않은 반도체 공정 지식·원인·조치(예: '산화막 두께', "
             "'식각 균일성' 등 md에 없는 도메인 지식)를 임의로 판단하거나 추가하지 마세요.** "
-            "[지식베이스]의 '판정 규칙'(ANOMALY_RULES 마커 사이의 RULE 목록)을 이용해 "
-            "spec-out Index 조합으로부터 불량 모드를 판정하세요(각 RULE의 이름=불량 모드). "
-            "Index명은 원 이름과 표시명 어느 쪽으로 적혀 있어도 같은 항목으로 인식하고, RULE의 "
+            "[지식베이스]의 '판정 규칙'(ANOMALY_RULES 마커 사이의 [RULE] 블록들)을 이용해 "
+            "spec-out Index 조합으로부터 불량 모드를 판정하세요(각 [RULE] **분기의 note 문구가 곧 불량 모드명**). "
+            "**[RULE]에 정의된 note 문구 외의 불량 모드명을 새로 만들지 마세요 — 매칭되는 규칙이 없으면 "
+            "defect_mode는 반드시 null**로 출력합니다(임의 모드명 생성 금지). "
+            "Index명은 원 이름과 표시명 어느 쪽으로 적혀 있어도 같은 항목으로 인식하고, [RULE]의 "
             "CAT2 조건은 finding의 cat2와 대조합니다. 규칙은 위에서부터 우선순위가 높고 여러 모드가 동시 매칭되면 "
-            "**번호가 가장 작은(가장 위)** 모드 하나로 판정합니다(1-1, 1-2 세부도 위가 우선). "
+            "**가장 위(먼저 정의된)** 모드 하나로 판정합니다(한 [RULE] 안에서는 먼저 만족한 분기 하나). "
             "측정 의심(PCHK 동일 shot 겹침)이 있으면 [지식베이스]의 '측정이상 추정 규칙'을 적용해 "
             "겹친 wafer·좌표·PGM(pt)를 명시하고 불량 단정 전 재측정 권고를 우선하며, "
             "해당 site를 제외한 나머지 spec-out만으로 불량 모드를 판정하세요. "
             "항목명은 표시명(display_name) 기준으로 서술합니다. "
             "**출력은 아래 형식의 JSON 객체 하나만**(코드펜스·설명문·HTML 금지): "
-            '{"defect_mode": "<매칭된 RULE 이름(=불량 모드) 그대로. 매칭 없으면 null>", '
+            '{"defect_mode": "<매칭된 [RULE] 분기의 note 문구(=불량 모드) 그대로. 매칭 없으면 null>", '
             '"basis_items": ["<근거가 된 Index 표시명>", ...], '
             '"summary": "<종합 판단 1~2문장 — finding·지식베이스에 근거한 판단만>", '
             '"phenomenon": "<핵심 현상 — 관찰된 사실만. 어느 Index가 어느 wafer/특이맵 패턴·PGM(pt)에서 어떻게 spec-out/이탈했는지. 원인 추측 금지>", '
