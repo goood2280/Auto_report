@@ -792,6 +792,28 @@ RULE_FUNCTION_SPEC = """\
 등급 의미: 이상(critical)=spec 이탈 pt 존재 / 주의(warning)=wafer 산포가 보통 wafer 대비 임계배수 초과.
 항목명/CAT2명은 원 이름(ALIAS)·표시명 둘 다 인식된다(자연어에 적힌 표기 그대로 사용)."""
 
+# 자연어 표현 → 조건 원자 변환 지침 — ANOMALY_KNOWLEDGE.md의 '쓸 수 있는 조건 표현' 표와 1:1.
+#   (md는 사람용 가이드, 이 상수는 같은 매핑을 LLM 컴파일 프롬프트에 주입해 변환을 결정적으로 만든다.)
+NL_PATTERN_HINTS = """\
+자연어 표현 → 변환 지침(md 작성 가이드와 동일한 매핑):
+  "A와 B가 둘 다 spec 이탈이면"        → when: all_sev(A, B, critical)
+  "X 카테고리 전체가 이상이면"         → when: sev_cat2(X)>=이상
+  "A가 spec 이탈이면"                  → when: sev(A, critical)
+  "A의 spec 이탈이 n개 이상이면"       → trigger: A + when: spec_out >= n
+  "median이 모집단 하위 N% 이내면"     → when: median_pctile(ITEM)<=N   (상위 N%는 >=100-N)
+  "A가 주의(산포 확대)면"              → when: sev(A, warning)
+  "산포가 A > B > C 순으로 크면"       → when: disp_desc(A, B, C)
+  "측정 순서상 연속 n개 이상 이탈하면" → trigger: 항목 + when(또는 분기 조건): seq_out(n)
+  "측정점의 N% 이상이 이탈하면"        → seq_mostly_dead(N/100)
+  "측정 앞부분에 이탈이 몰려 있으면"   → seq_front_heavy
+  "~이고/그리고 ~이면"                 → 조건을 ' AND '로 결합 / "~이거나/또는" → ' OR '
+  "…일 때, ~이면 \"X\", 아니면 \"Y\""  → when(게이트) + when2/note("X") + else 마지막 note("Y") (분기)
+  "…의 산포 주의 언급은 하지 마"       → suppress_disp: 항목 (조건은 when에)
+  "…그룹과 …그룹의 산포를 비교"        → compare_disp: A,B | C,D
+  "(주의)" 표기가 있으면               → sev: warning (없으면 critical)
+  "링크: URL"                          → link: "URL" (해당 분기의 link)
+판정명("큰따옴표 문구")은 note:에 그대로 넣는다. 따옴표가 없으면 문맥에서 짧은 판정 문구를 만들어 note에 넣는다."""
+
 # 조건 원자 정적 검증 패턴 — _eval_chain_atom/_eval_atom의 인식 문법과 1:1 미러.
 _ATOM_VALID_PATTERNS = [
     r'spec_out\s*(>=|<=|==|<|>)\s*[\d.]+$',
@@ -931,7 +953,7 @@ def compile_nl_rules(knowledge_text, llm_fn, cache_dir='RUN/AI'):
         "- 항목명/CAT2명은 자연어에 적힌 표기 그대로 사용하세요(임의 변경 금지).\n"
         "- 아래 카탈로그에 있는 키·조건 원자만 사용하세요. 카탈로그로 표현할 수 없는 규칙은\n"
         "  블록을 만들지 말고 '# 변환불가: <이유>' 주석 한 줄만 남기세요.\n\n"
-        + RULE_FUNCTION_SPEC)
+        + RULE_FUNCTION_SPEC + "\n\n" + NL_PATTERN_HINTS)
     _user = f"[자연어 규칙]\n{nl}"
 
     compiled = _strip_code_fences(llm_fn(_system, _user))
