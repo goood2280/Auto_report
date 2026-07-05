@@ -747,6 +747,240 @@ def _parse_chain_rules(text):
     return out
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 자연어 규칙(NL_RULES) → [RULE] 자동 컴파일
+#   엔지니어는 ANOMALY_KNOWLEDGE.md의 NL_RULES 마커 사이에 '자연어'로 규칙을 적고,
+#   코드가 LLM 1회 호출로 [RULE] 체이닝 포맷으로 변환(컴파일)해 ANOMALY_RULES에 주입한다.
+#   - 변환 결과는 코드가 정적 검증(파싱 + 조건 원자 문법 확인) → 실패 시 오류 피드백으로 1회 재시도
+#     → 그래도 실패한 블록은 제외(유효 블록만 적용).
+#   - 캐시: RUN/AI/nl_rules_compiled.json (자연어 원문 sha256 일치 시 LLM 재호출 없음 →
+#     결정론적/감사 가능. 엔지니어는 이 파일에서 '무엇으로 컴파일됐는지' 확인).
+#   - LLM 미연결 + 캐시 없음 → 미적용(수기 [RULE]만 동작 — AI-optional 원칙 유지).
+# ──────────────────────────────────────────────────────────────────────
+
+# [RULE]에서 사용 가능한 키/조건 함수 전체 카탈로그 — NL 컴파일 프롬프트와 문서에 공용.
+RULE_FUNCTION_SPEC = """\
+[RULE] 블록 키(대소문자 무시):
+  name: 규칙 이름(선택 — 트레이스/finding 라벨. 없으면 trigger로 표기)
+  trigger: 대상 항목(spec_out/seq_* 함수의 주체 & finding item)
+  sev: critical|warning (finding 심각도, 기본 critical)
+  when: 게이트 조건(참일 때만 규칙 활성. 비우면 항상 활성)
+  when2:, when3:, ... : 연쇄 분기 조건(when 통과 후 위에서부터 순차 평가, 먼저 만족한 분기 1개만)
+  whenN_else: : 가독성용 구분자(무시됨)
+  note:, note2:, ... : 분기별 불량 모드 문구(매핑: when2→note, when3→note2, else→마지막 noteN)
+  link:, link2:, ... : 분기별 대시보드 링크(선택)
+  suppress_disp: A,B,... : 게이트 참일 때 나열 항목의 산포(주의) finding 억제(액션)
+  compare_disp: A,B | C,D : 게이트 참일 때 두 그룹 산포 비교 finding 생성(액션)
+
+조건식(when/whenN 공용): 원자를 ' AND ' / ' OR '로 연결(OR로 묶인 AND 그룹).
+사용 가능한 조건 원자/함수(정확히 이 문법만 — 임의 함수 생성 금지):
+  spec_out >= n            : trigger 항목의 spec-out pt 수 비교(연산자 >= <= == < >)
+  seq_out(n)               : 측정순서(chip_x 먼저 증가→chip_y 증가)상 연속 spec-out ≥ n
+  seq_mostly_dead(f)       : 측정순서 시퀀스의 spec-out 비율 ≥ f (0~1)
+  seq_front_heavy          : 앞 절반 이탈 많음(≥0.6) + 뒤 절반 양호(≤0.2)
+  sev(ITEM, critical)      : 항목 등급 ≥ 지정 등급 (critical|warning|이상|주의|참고|info)
+  sev(ITEM) >= 이상        : 항목 등급 비교(연산자 >= <= == < >, 등급 이상|주의|참고. 미측정=참고)
+  all_sev(A, B, critical)  : 나열 그룹(CAT2 또는 항목) '모두' ≥ 지정 등급
+  all_sev(A, B) >= 이상    : 위와 동일(연산자 표기, 등급 이상|주의)
+  sev_cat2(CAT2) >= 이상   : CAT2 그룹의 최대 항목 등급 비교
+  all_sev_cat2(A, B) >= 이상 : 나열 CAT2 '모두'에서 해당 등급 이상
+  disp_desc(A, B, C)       : 산포배수가 나열 순서대로 감소(A가 최대) / disp_asc(...)는 증가
+  disp_desc_cat2(A, B)     : CAT2별 최대 산포배수가 순서대로 감소 / disp_asc_cat2(...)는 증가
+  median_low(ITEM)         : target median이 제품 대비 매우 낮음(임계 σ는 설정값)
+  median_pctile(ITEM) <= 15 : target median의 모집단 내 백분위(%) 비교(연산자 >= <= < >).
+                              하위 N% = <=N, 상위 N% = >=100-N
+등급 의미: 이상(critical)=spec 이탈 pt 존재 / 주의(warning)=wafer 산포가 보통 wafer 대비 임계배수 초과.
+항목명/CAT2명은 원 이름(ALIAS)·표시명 둘 다 인식된다(자연어에 적힌 표기 그대로 사용)."""
+
+# 조건 원자 정적 검증 패턴 — _eval_chain_atom/_eval_atom의 인식 문법과 1:1 미러.
+_ATOM_VALID_PATTERNS = [
+    r'spec_out\s*(>=|<=|==|<|>)\s*[\d.]+$',
+    r'seq_out\(\s*[\d.]+\s*\)$',
+    r'seq_mostly_dead\(\s*[\d.]+\s*\)$',
+    r'seq_front_heavy$',
+    r'sev\([^,()]+,\s*(critical|warning|이상|주의|참고|info)\s*\)$',
+    r'sev\([^()]+\)\s*(>=|<=|==|<|>)\s*(이상|주의|참고)$',
+    r'sev_cat2\([^()]+\)\s*(>=|<=|==|<|>)\s*(이상|주의|참고)$',
+    r'all_sev_cat2\([^()]+\)\s*>=\s*(이상|주의)$',
+    r'all_sev\([^()]+,\s*(critical|warning|이상|주의|참고|info)\s*\)$',
+    r'all_sev\([^()]+\)\s*>=\s*(이상|주의)$',
+    r'disp_(desc|asc)(_cat2)?\([^()]+\)$',
+    r'median_low\([^()]+\)$',
+    r'median_pctile\([^()]+\)\s*(>=|<=|<|>)\s*[\d.]+$',
+]
+
+
+def _atom_valid(atom):
+    """조건 원자 하나가 [RULE] 평가기가 인식하는 문법인지 정적 확인."""
+    import re
+    a = atom.strip()
+    if not a:
+        return False
+    return any(re.match(p, a) for p in _ATOM_VALID_PATTERNS)
+
+
+def _cond_valid(expr):
+    """조건식(AND/OR 결합) 전체의 원자 문법 확인. (빈 식은 '항상 참'으로 유효)"""
+    import re
+    if not (expr or '').strip():
+        return True
+    for _grp in re.split(r'\s+OR\s+', expr):
+        for _a in re.split(r'\s+AND\s+', _grp):
+            if _a.strip() and not _atom_valid(_a):
+                return False
+    return True
+
+
+def _validate_rules_text(rules_text):
+    """[RULE] 블록 텍스트를 파싱+정적 검증. 반환 (규칙 수, 오류 목록)."""
+    wrapped = f"ANOMALY_RULES:start\n{rules_text}\nANOMALY_RULES:end"
+    rules = _parse_chain_rules(wrapped)
+    errors = []
+    if not rules:
+        errors.append("[RULE] 블록이 하나도 파싱되지 않음")
+        return 0, errors
+    for _i, _r in enumerate(rules, start=1):
+        _nm = _r.get('name') or _r.get('trigger') or f"#{_i}"
+        if not (_r.get('branches') or _r.get('suppress_disp') or _r.get('compare_disp')):
+            errors.append(f"규칙 {_nm}: 분기(note)도 액션(suppress/compare_disp)도 없음")
+        if _r.get('branches') and not any((_b.get('note') or '').strip() for _b in _r['branches']):
+            errors.append(f"규칙 {_nm}: note(불량 모드 문구)가 비어 있음")
+        if not _cond_valid(_r.get('when', '')):
+            errors.append(f"규칙 {_nm}: when 조건 '{_r.get('when','')}' 인식 불가(지원 원자 아님)")
+        for _b in _r.get('branches', []):
+            if _b.get('cond') is not None and not _cond_valid(_b['cond']):
+                errors.append(f"규칙 {_nm}: 분기 조건 '{_b['cond']}' 인식 불가(지원 원자 아님)")
+    return len(rules), errors
+
+
+def _keep_valid_rule_blocks(rules_text):
+    """블록 단위로 재검증해 유효한 [RULE] 블록만 남긴다. 반환 (텍스트, 유효 수, 제외 수)."""
+    import re
+    _blocks = re.split(r'(?im)^\s*\[RULE\]\s*$', rules_text)
+    _ok = []
+    _dropped = 0
+    for _blk in _blocks[1:]:
+        _n, _errs = _validate_rules_text('[RULE]\n' + _blk)
+        if _n == 1 and not _errs:
+            _ok.append('[RULE]\n' + _blk.strip())
+        else:
+            _dropped += 1
+    return '\n\n'.join(_ok), len(_ok), _dropped
+
+
+def _extract_nl_rules(text):
+    """ANOMALY_KNOWLEDGE.md의 NL_RULES 마커 사이 자연어 규칙 원문을 추출(마커 라인 제외)."""
+    if not text:
+        return ''
+    _s = text.find('NL_RULES:start')
+    _e = text.find('NL_RULES:end')
+    if _s == -1 or _e == -1 or _e <= _s:
+        return ''
+    lines = [l for l in text[_s:_e].splitlines()
+             if 'NL_RULES' not in l and l.strip() not in ('', '<!--', '-->')]
+    return '\n'.join(lines).strip()
+
+
+def _strip_code_fences(text):
+    """LLM 응답의 ``` 코드펜스 제거(있으면 첫 펜스 안쪽만, 없으면 원문)."""
+    import re
+    t = str(text or '').strip()
+    m = re.search(r'```[a-zA-Z]*\n(.*?)```', t, flags=re.S)
+    return m.group(1).strip() if m else t
+
+
+def compile_nl_rules(knowledge_text, llm_fn, cache_dir='RUN/AI'):
+    """NL_RULES(자연어 규칙) → [RULE] 텍스트 컴파일. 컴파일 결과 텍스트 반환(없으면 '').
+
+    구조 = 'LLM 1회 생성 → 코드(결정론) 검증 → 실패 시 오류 피드백 재시도 1회 → 유효 블록만 적용'.
+    다단계 AI(의도 분해/항목 매핑/조합을 별도 호출)로 나누지 않는 이유: 변환 대상 DSL이 작고
+    검증기가 코드로 존재하므로, 생성-검증 루프가 다단계 분해보다 단순하고 오류 전파가 없다
+    (검증 실패 시 정확한 오류 문구가 재시도 프롬프트로 들어가 자가 수정됨).
+    캐시(RUN/AI/nl_rules_compiled.json)로 같은 자연어 원문엔 LLM을 다시 호출하지 않는다.
+    """
+    import hashlib
+    import json as _json
+    import os
+    from datetime import datetime as _dt
+
+    nl = _extract_nl_rules(knowledge_text)
+    if not nl:
+        return ''
+    src_sha = hashlib.sha256(nl.encode('utf-8')).hexdigest()
+    cache_path = os.path.join(cache_dir, 'nl_rules_compiled.json')
+
+    # ── 캐시 히트: 자연어 원문이 그대로면 LLM 호출 없이 이전 컴파일 결과 재사용 ──
+    try:
+        with open(cache_path, encoding='utf-8') as _cf:
+            _c = _json.load(_cf)
+        if _c.get('source_sha') == src_sha and _c.get('compiled'):
+            print(f"[NL RULES] 캐시 사용({_c.get('n_rules', '?')}개 규칙) — 자연어 규칙 변경 없음")
+            return _c['compiled']
+    except Exception:
+        pass
+
+    if llm_fn is None:
+        print("[WARN] NL RULES: 자연어 규칙이 있으나 LLM 미연결·캐시 없음 → 이번 실행 미적용(수기 [RULE]만 동작)")
+        return ''
+
+    _system = (
+        "당신은 규칙 DSL 컴파일러입니다. 아래 '자연어 규칙' 각각을 [RULE] 블록 하나로 변환하세요.\n"
+        "출력은 [RULE] 블록들만(설명문/코드펜스/번호 금지). 자연어 규칙의 순서를 유지하세요.\n"
+        "- name: 에는 자연어 규칙을 요약한 짧은 이름을, note: 에는 판정 시 표기할 불량 모드 문구를 적으세요\n"
+        "  (자연어에 판정명/코멘트가 있으면 그대로 사용).\n"
+        "- 항목명/CAT2명은 자연어에 적힌 표기 그대로 사용하세요(임의 변경 금지).\n"
+        "- 아래 카탈로그에 있는 키·조건 원자만 사용하세요. 카탈로그로 표현할 수 없는 규칙은\n"
+        "  블록을 만들지 말고 '# 변환불가: <이유>' 주석 한 줄만 남기세요.\n\n"
+        + RULE_FUNCTION_SPEC)
+    _user = f"[자연어 규칙]\n{nl}"
+
+    compiled = _strip_code_fences(llm_fn(_system, _user))
+    n, errs = _validate_rules_text(compiled)
+    if errs:
+        # 검증 오류를 그대로 피드백해 1회 재시도(자가 수정)
+        _retry_sys = (_system + "\n\n직전 변환에 아래 오류가 있었습니다. 오류를 수정해 "
+                      "전체 [RULE] 블록을 처음부터 다시 출력하세요:\n- " + "\n- ".join(errs))
+        compiled = _strip_code_fences(llm_fn(_retry_sys, _user))
+        n, errs = _validate_rules_text(compiled)
+    if errs:
+        compiled, n, _dropped = _keep_valid_rule_blocks(compiled)
+        print(f"[WARN] NL RULES: 일부 규칙 변환 실패 → 유효 {n}개만 적용, {_dropped}개 제외 ({'; '.join(errs[:3])})")
+    if n == 0 or not compiled.strip():
+        print("[WARN] NL RULES: 유효한 [RULE] 변환 결과 없음 → 미적용")
+        return ''
+
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(cache_path, 'w', encoding='utf-8') as _cf:
+            _json.dump({'source_sha': src_sha, 'source_nl': nl, 'compiled': compiled,
+                        'n_rules': n, 'errors': errs,
+                        'generated': _dt.now().strftime('%Y-%m-%d %H:%M:%S')},
+                       _cf, ensure_ascii=False, indent=2)
+    except Exception as _we:
+        print(f"[WARN] NL RULES 캐시 저장 실패: {_we}")
+    print(f"[NL RULES] 자연어 규칙 → [RULE] {n}개 컴파일 완료 (검증 통과, 캐시: {cache_path})")
+    return compiled
+
+
+def inject_compiled_rules(knowledge_text, compiled_text):
+    """컴파일된 [RULE] 텍스트를 ANOMALY_RULES 마커 '안'(end 직전)에 주입한 지식 텍스트 반환.
+
+    수기 [RULE]들 뒤에 붙으므로 우선순위는 수기 규칙이 위(먼저 매칭 우선)다.
+    마커가 없으면 새 ANOMALY_RULES 섹션을 문서 끝에 추가한다.
+    """
+    if not (compiled_text or '').strip():
+        return knowledge_text
+    _hdr = "\n# ── 자연어 규칙(NL_RULES) 자동 컴파일 결과 — 원문/검증은 RUN/AI/nl_rules_compiled.json ──\n"
+    _mk = 'ANOMALY_RULES:end'
+    i = (knowledge_text or '').find(_mk)
+    if i == -1:
+        return ((knowledge_text or '') + "\n<!-- ANOMALY_RULES:start -->" + _hdr
+                + compiled_text.strip() + "\n<!-- ANOMALY_RULES:end -->\n")
+    j = knowledge_text.rfind('<!--', 0, i)
+    ins = j if j != -1 else i
+    return knowledge_text[:ins] + _hdr + compiled_text.strip() + "\n\n" + knowledge_text[ins:]
+
+
 def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         main_vehicle=None, config=None, reformatter=None,
                         knowledge_text="", item_stats_out=None, rule_trace_out=None):

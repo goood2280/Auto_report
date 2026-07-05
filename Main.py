@@ -429,6 +429,20 @@ def main():
     except Exception as _ke:
         print(f"[WARN] 이상 지식베이스 로드 실패: {_ke}")
 
+    # ── 자연어 규칙(NL_RULES) → [RULE] 자동 컴파일 (시작 시 1회) ──
+    #   md의 NL_RULES 마커에 자연어 규칙이 있으면 LLM 1회 호출로 [RULE]로 컴파일해
+    #   ANOMALY_RULES에 주입(코드 검증 + 오류 피드백 재시도 1회, 유효 블록만).
+    #   결과는 RUN/AI/nl_rules_compiled.json에 캐시 — 자연어 원문이 같으면 LLM 재호출 없음.
+    #   LLM 미연결·캐시 없음이면 미적용(수기 [RULE]만 동작 — AI-optional).
+    try:
+        from anomaly_engine import compile_nl_rules, inject_compiled_rules
+        _nl_compiled = compile_nl_rules(_ANOMALY_KNOWLEDGE_TEXT, _LLM_FN,
+                                        cache_dir=os.path.join('RUN', 'AI'))
+        if _nl_compiled:
+            _ANOMALY_KNOWLEDGE_TEXT = inject_compiled_rules(_ANOMALY_KNOWLEDGE_TEXT, _nl_compiled)
+    except Exception as _ne:
+        print(f"[WARN] 자연어 규칙 컴파일 실패(수기 [RULE]만 사용): {_ne}")
+
     reformatter = pd.read_csv(f'reformatter/{vehicle}_reformatter.csv')
 
     reformatter_check = reformatter_verify(reformatter)

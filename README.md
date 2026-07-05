@@ -69,6 +69,7 @@ DC 측정 결과를 자동으로 통계 분석하고, 리포트를 자동 생성
 - **PCHK를 일반 Index로 통합** — PCHK도 spec-out이면 동일하게 **이상(CRITICAL)**. '측정이상 추정'은 코드가 겹침 신호만 basis에 남기고 **AI가 판정**(억지 규칙 제거).
 - **통계 분석 제외 항목 설정** — `anomaly_exclude_items`로 파생/마진 컬럼 등을 **우선순위에서 제외**해 노이즈를 줄입니다(와일드카드 지원). → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
 - **판정 규칙을 `[RULE]` 단일 포맷으로 통합** — 지식 판정·불량 모드 decision tree·측정순서(seq_*) 판정·산포 억제/비교를 `ANOMALY_KNOWLEDGE.md`의 `ANOMALY_RULES` 마커 안 **`[RULE]` 블록 하나의 포맷**으로 통합(구 `RULE:`/`MSEQ_RULES`/`DEFECT_TREE` 섹션·`anomaly_mseq_*` 설정 폐기). **엔지니어의 룰 관리 지점 = md 파일 하나**. 매 발행마다 전 규칙 체크 결과를 터미널 `[RULE CHECK]` + `RUN/AI/anomaly_rule_check_*.txt/.json`으로 기록.
+- **자연어 규칙 자동 컴파일(NL_RULES)** — md에 규칙을 **자연어 한 줄**로 적으면 AI가 `[RULE]`로 컴파일(코드 검증+오류 피드백 재시도, 유효 블록만 적용, 원문 해시 캐시로 결정론 유지). DSL 문법을 몰라도 룰 추가 가능. → [자연어 규칙 컴파일](#자연어-규칙nl_rules--rule-자동-컴파일).
 - **AI 다단계 해석(선택)** — 통계 Finding 위에 triage→root-cause→final 3단계로 원인/조치를 자연어 보강. **AI 없거나 실패해도 코드 통계 분석은 그대로** 동작(AI-optional). 결과는 **평문 서술형 문장(핵심만 볼드)** 으로 표시하고, **`[RULE]`에 정의된 불량 모드만 표기**(규칙 미매칭 시 '수동 검토 필요'만 — AI 자유 제안·임의 링크는 리포트에 나오지 않음).
 
 ### 🎨 리포트·운용
@@ -344,6 +345,48 @@ note3: "단순 이탈"                        # else 분기
 - 규칙 평가는 전체가 try/except로 감싸져 **하나가 깨져도 나머지 분석은 계속**됩니다.
 - **전 규칙 체크 결과가 매 발행마다 기록**됩니다: 터미널 `[RULE CHECK]` 요약 + `RUN/AI/anomaly_rule_check_<lot>_<step>.txt/.json`(매칭/미매칭 전량, 조건·결과·비고).
 - **엔지니어가 `ANOMALY_KNOWLEDGE.md`만 편집**하면 코드 수정 없이 조합 판정 로직을 추가/수정할 수 있습니다.
+
+### 자연어 규칙(NL_RULES) → `[RULE]` 자동 컴파일
+
+엔지니어가 DSL 문법을 몰라도 되도록, `ANOMALY_KNOWLEDGE.md`의 **`NL_RULES:start … end` 마커 사이에
+자연어 한 줄(`- `로 시작)로 규칙을 적으면** 프로그램 시작 시 AI가 `[RULE]` 포맷으로 컴파일합니다
+(`anomaly_engine.compile_nl_rules` → `inject_compiled_rules`).
+
+```
+<!-- NL_RULES:start -->
+- VTH_N과 VTH_P가 둘 다 spec 이탈이면 "Gate 모듈 불량"으로 판정. 링크: http://...
+- IDSAT_P의 median이 모집단 하위 15% 이내면 "IDSAT_P 타겟 저하"(주의)로 판정.
+- PCHK_LKG가 정상(주의 미만)이면 IDSAT_N의 산포 주의 언급은 하지 마.
+<!-- NL_RULES:end -->
+```
+
+**파이프라인 = LLM 1회 생성 → 코드(결정론) 검증 → 실패 시 오류 피드백 재시도 1회 → 유효 블록만 주입**:
+
+1. **생성**: 위 조건 함수 카탈로그(`RULE_FUNCTION_SPEC`) 전체를 프롬프트에 넣고 "카탈로그의 키·원자만
+   사용, 표현 불가하면 `# 변환불가:` 주석만" 지시 → LLM이 `[RULE]` 블록들 출력.
+2. **검증(코드)**: `_parse_chain_rules`로 파싱 + 조건식의 모든 원자를 평가기 문법과 1:1 미러인
+   정적 패턴(`_ATOM_VALID_PATTERNS`)으로 확인. **환각 함수(카탈로그 밖 문법)는 여기서 걸러짐.**
+3. **재시도**: 검증 오류 문구를 그대로 프롬프트에 붙여 1회 재생성(자가 수정). 그래도 실패한 블록은
+   제외하고 유효 블록만 적용(경고 출력).
+4. **주입**: `ANOMALY_RULES` 마커 안, **수기 `[RULE]` 뒤**에 삽입 → 우선순위는 수기 규칙이 위.
+   이후 코드 판정·AI 불량 모드 검증·`[RULE CHECK]` 트레이스에 수기 규칙과 똑같이 참여.
+
+- **캐시/감사**: 결과는 `RUN/AI/nl_rules_compiled.json`(자연어 원문 sha256·컴파일 결과·오류)에 저장.
+  **자연어 원문이 같으면 LLM을 다시 호출하지 않음** → 발행마다 규칙이 달라지지 않는 결정론 유지,
+  엔지니어는 이 파일에서 "무엇으로 컴파일됐는지" 검수 가능.
+- **AI-optional**: LLM 미연결 + 캐시 없음이면 미적용(수기 `[RULE]`만 동작). NL 섹션이 비어 있으면
+  아무 것도 하지 않음(기본값).
+
+> **왜 다단계 AI(LangGraph식 분해)가 아니라 단일 호출인가** — 이 변환은 "작은 DSL로의 번역"이고,
+> **정답 판정기가 코드로 존재**합니다(파서+원자 문법 검증). 이런 구조에서는
+> `생성(LLM 1회) → 검증(코드) → 오류 피드백 재시도` 루프가 정석입니다:
+> - 다단계 분해(의도 파싱→항목 매핑→조건 조합을 각각 AI에 시키는 방식)는 호출 3배 비용에
+>   **단계 간 오류 전파**가 생기는 반면, 얻는 건 약한 모델에서의 안정성뿐입니다.
+> - 여기선 검증이 AI가 아니라 **결정론적 코드**라서, 실패 원인이 정확한 문구("조건 'xxx' 인식 불가")로
+>   피드백되어 1회 재시도로 대부분 수렴합니다. 남는 실패는 블록 단위로 격리 폐기되어 안전합니다.
+> - 규칙 컴파일은 **시작 시 1회 + 캐시**라 지연·비용 민감도도 낮습니다. 사내 모델이 약해 변환 품질이
+>   떨어지면 그때 `ai_stage_mode`처럼 2단계(항목명 추출 → DSL 조합) 옵션을 추가하는 것을 권장
+>   — 지금 구조(생성→검증→재시도)가 이미 '2노드 그래프'와 등가라 확장도 쉽습니다.
 
 ### 지표(metrics) 계산식
 
@@ -642,6 +685,7 @@ self.anomaly_exclude_items = [
 | **새 이상 detector** | `anomaly_engine.analyze_commonality()` | 항목 루프 안에 `findings.append(_finding(sev, type, item, title, detail))` 한 줄 추가. 각 detector는 try/except로 독립 → 하나 실패해도 나머지 계속 |
 | **판정 임계값** | `My_config.py` | `anomaly_lot_dispersion_ratio`, `anomaly_median_low_sigma` 등 상수만 조정 (코드 불변) → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝) |
 | **조합 판정 규칙(불량모드/risk/측정순서/산포 억제·비교)** | `ANOMALY_KNOWLEDGE.md` `ANOMALY_RULES` | **`[RULE]` 블록**(name/trigger/sev/when/whenN/note/link/suppress·compare_disp) 작성 → 코드가 `KNOWLEDGE`/`DEFECT_MODE` finding 생성(AI 무관). → [지식 규칙 엔진](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용) |
+| **자연어 규칙(문법 몰라도 됨)** | `ANOMALY_KNOWLEDGE.md` `NL_RULES` | 자연어 한 줄로 규칙 서술 → 시작 시 AI가 `[RULE]`로 컴파일(코드 검증·캐시). → [자연어 규칙 컴파일](#자연어-규칙nl_rules--rule-자동-컴파일) |
 | **통계 분석 제외 항목** | `My_config.anomaly_exclude_items` | 파생/마진 컬럼 등을 우선순위에서 제외(와일드카드). `item_excluded`가 finding·Trend 양쪽 적용 |
 | **AI 해석 톤/형식** | `ANOMALY_KNOWLEDGE.md` | 페르소나·스타일 텍스트 편집 (로직 아님) |
 | **AI 다단계 프롬프트** | `anomaly_engine.interpret_with_ai()` | triage→root-cause→final 각 단계 프롬프트 문자열 수정 |
@@ -820,6 +864,7 @@ print(label); print(stats['rules'])   # 규칙별 평가 trace
 |------|------|
 | `analyze_commonality` | 코드 기반 Index별 Finding 산출 + `[RULE]` 지식 규칙으로 조합 판정(`KNOWLEDGE`/`DEFECT_MODE`) (**AI 없이 동작**) |
 | `_parse_chain_rules` | `ANOMALY_KNOWLEDGE.md`의 `ANOMALY_RULES` 마커 파싱 — `[RULE]` 단일 포맷(분기/seq_*/suppress·compare_disp) |
+| `compile_nl_rules` / `inject_compiled_rules` | `NL_RULES` 자연어 규칙 → `[RULE]` 컴파일(LLM 1회+코드 검증+재시도, 해시 캐시) → `ANOMALY_RULES` 주입 |
 | `interpret_with_ai` | Finding → AI 다단계(triage→root-cause→final) 해석 HTML (LLM 교체 가능) |
 | `render_findings_html` | Finding 리스트 → HTML(상위 top_n, 신호등 색) |
 | `run_anomaly_pipeline` | (구) Z-score Trend 차트 — 하위호환용 유지 |
