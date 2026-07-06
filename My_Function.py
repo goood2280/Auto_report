@@ -1037,72 +1037,97 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
     return prs
 
 
-def _wafer_circle_params(df, x_col, y_col, rad_col=None, wafer_radius_mm=150.0,
-                         px=None, py=None):
-    """WF MAP wafer 경계 파라미터 (cx, cy, semi_x, semi_y, aspect)를 '플롯 좌표계' 단위로 산출.
+def _wafer_circle_params(df, x_col, y_col, rad_col=None, mask_col=None,
+                         main_vehicle=None, wafer_radius_mm=150.0):
+    """실제 150mm wafer 원 (cx, cy, semi_x, semi_y, aspect)을 '플롯 좌표계(격자)' 단위로 산출.
 
-    두 단계로 나눠 계산한다:
-      (1) 중심(cx,cy)·종횡비(aspect=ky/kx): Chip_Radius(mm) fit으로 물리적 wafer 중심과
-          x/y 스케일비를 구한다. r^2 = A*x^2 + B*y^2 + p*x + q*y + C (cx=-p/2A, cy=-q/2B,
-          kx=√A, ky=√B). radius가 없거나 fit이 비합리적이면 중심=좌표 평균, aspect=1.0.
-      (2) 반지름(semi_x,semi_y): '모든 shot 사각형의 꼭짓점'이 원 안에 들어오도록 크기를 정한다.
-          shot은 pitch(px,py) 크기 사각형으로 그려지므로 가장자리 shot의 '중심'이 아니라 '꼭짓점'
-          까지 포함해야 원 밖으로 삐져나가지 않는다. 고정 150mm 스케일에 의존하지 않고 실제
-          shot 좌표+반pitch로 경계를 잡아, 중심/스케일 오차와 무관하게 모든 shot을 담는다.
-          타원 metric: t = max_shot √( ((|x-cx|+hx)/aspect)² + (|y-cy|+hy)² ),
-          semi_y=t, semi_x=aspect·t (semi_x/semi_y=aspect → set_aspect 후 정원으로 보임).
-    px,py 미전달 시 좌표 unique 간격(_wfmap_shot_pitch)으로 pitch를 추정한다. 좌표 무효면 None.
+    ● MASK(vehicle) 매칭 — vehicle별 shot 크기가 다를 수 있으므로, 같은 MASK==main_vehicle
+      shot만으로 계산한다(mask_col·main_vehicle이 있고 데이터가 충분할 때). mask_col 미지정 시
+      df에서 'MASK'/'mask'를 자동 인식, main_vehicle 미지정 시 GLOBAL_CONFIG.vehicle 사용.
+
+    ● shot 크기(mm) 산출 — 격자 1칸당 물리거리 = shot_width/shot_height. Chip_Radius r 과
+      shot 중점 격자좌표(chip_x_adj, chip_y_adj)의 관계
+          r² = kx²·(x-cx)² + ky²·(y-cy)²   (kx=shot_width, ky=shot_height, (cx,cy)=wafer 중심)
+      를 선형화 r² = A·x² + B·y² + p·x + q·y + C 로 최소자승 fit:
+          cx=-p/2A,  cy=-q/2B,  shot_width=√A,  shot_height=√B.
+      보통 wafer당 수십~수백 shot이라 5pt 이상 충분. 좌표는 (x,y) 중복 제거해 'shot 레이아웃'만 쓴다
+      (측정 밀도 편향 제거). rad_col은 측정프레임의 Chip_Radius(Data Extractor MASK==vehicle 기반).
+
+    ● 150mm 원 — 격자 반축: semi_x = 150/shot_width,  semi_y = 150/shot_height.
+      aspect = shot_height/shot_width (= ky/kx, set_aspect 값) → 타원이 정원으로 보인다.
+      shot이 원 밖으로 나가도 그대로 둔다(강제 포함하지 않음 — 실제 wafer 경계를 정확히 표시).
+
+    Chip_Radius가 없거나 fit이 degenerate하면 shot 크기를 알 수 없어, 등방(aspect=1) shot-중심
+    bounding 원(중심=좌표평균, 반경=최대편차×1.05)으로 폴백한다. 좌표 자체가 무효면 None.
     """
     try:
         import numpy as _np
         if x_col not in df.columns or y_col not in df.columns:
             return None
-        x = pd.to_numeric(df[x_col], errors='coerce')
-        y = pd.to_numeric(df[y_col], errors='coerce')
-        m0 = x.notna() & y.notna()
+        # ── MASK(vehicle) 매칭: 같은 vehicle shot만 사용 ──
+        if mask_col is None:
+            mask_col = 'MASK' if 'MASK' in df.columns else ('mask' if 'mask' in df.columns else None)
+        if main_vehicle is None:
+            try:
+                main_vehicle = GLOBAL_CONFIG.get('vehicle')
+            except Exception:
+                main_vehicle = None
+        _src = df
+        if mask_col and mask_col in df.columns and main_vehicle is not None:
+            _sub = df[df[mask_col] == main_vehicle]
+            if len(_sub) >= 6:
+                _src = _sub
+
+        x = pd.to_numeric(_src[x_col], errors='coerce')
+        y = pd.to_numeric(_src[y_col], errors='coerce')
+        _hasr = bool(rad_col and rad_col in _src.columns)
+        if _hasr:
+            r = pd.to_numeric(_src[rad_col], errors='coerce')
+            m0 = x.notna() & y.notna() & r.notna()
+        else:
+            m0 = x.notna() & y.notna()
         if int(m0.sum()) < 6:
             return None
         x = x[m0].to_numpy(dtype=float); y = y[m0].to_numpy(dtype=float)
         cxg = float(x.mean()); cyg = float(y.mean())
-        _dx = float(x.max() - x.min()); _dy = float(y.max() - y.min())
 
-        # ── (1) 중심·aspect: Chip_Radius fit (실패 시 좌표 평균 중심·등방) ──
-        cx, cy, aspect = cxg, cyg, 1.0
-        if rad_col and rad_col in df.columns:
-            r = pd.to_numeric(df[rad_col], errors='coerce')[m0].to_numpy(dtype=float)
-            fin = _np.isfinite(r)
-            if int(fin.sum()) >= 6 and float(_np.nanstd(r[fin])) > 0:
-                xx = x[fin]; yy = y[fin]; rr = r[fin]
-                # r^2 = A*x^2 + B*y^2 + p*x + q*y + C  (x/y 스케일 분리 fit)
-                M = _np.column_stack([xx ** 2, yy ** 2, xx, yy, _np.ones_like(xx)])
+        # ── Chip_Radius fit → shot_width/height·중심·150mm 원 ──
+        if _hasr:
+            r = r[m0].to_numpy(dtype=float)
+            # (x,y) 좌표별 대표 radius(중앙값) — shot 레이아웃만 남겨 측정 밀도 편향 제거
+            _lay = (pd.DataFrame({'x': x, 'y': y, 'r': r})
+                    .groupby(['x', 'y'], as_index=False)['r'].median())
+            xs = _lay['x'].to_numpy(dtype=float)
+            ys = _lay['y'].to_numpy(dtype=float)
+            rs = _lay['r'].to_numpy(dtype=float)
+            if len(xs) >= 6 and float(_np.nanstd(rs)) > 1e-9:
+                # r² = A·x² + B·y² + p·x + q·y + C  (x/y 스케일 분리, 축 정렬 가정)
+                M = _np.column_stack([xs ** 2, ys ** 2, xs, ys, _np.ones_like(xs)])
                 try:
-                    sol, *_ = _np.linalg.lstsq(M, rr ** 2, rcond=None)
+                    sol, *_ = _np.linalg.lstsq(M, rs ** 2, rcond=None)
                     A, B, p, q, C = [float(v) for v in sol]
-                    if _np.isfinite(A) and _np.isfinite(B) and A > 0 and B > 0:
-                        _cx = -p / (2.0 * A); _cy = -q / (2.0 * B)
-                        _aspect = (B ** 0.5) / (A ** 0.5)   # ky/kx
-                        # fit 중심이 데이터 범위(±50% 여유) 안이고 aspect가 합리적일 때만 채택
-                        _cx_ok = (x.min() - 0.5 * (_dx or 1)) <= _cx <= (x.max() + 0.5 * (_dx or 1))
-                        _cy_ok = (y.min() - 0.5 * (_dy or 1)) <= _cy <= (y.max() + 0.5 * (_dy or 1))
-                        if (_np.isfinite([_cx, _cy, _aspect]).all()
-                                and 0.2 <= _aspect <= 5.0 and _cx_ok and _cy_ok):
-                            cx, cy, aspect = _cx, _cy, _aspect
+                    if _np.isfinite([A, B, p, q]).all() and A > 0 and B > 0:
+                        cx = -p / (2.0 * A); cy = -q / (2.0 * B)
+                        shot_w = A ** 0.5; shot_h = B ** 0.5      # 격자 1칸당 mm(shot 크기)
+                        semi_x = wafer_radius_mm / shot_w         # 150mm 원의 격자 x 반축
+                        semi_y = wafer_radius_mm / shot_h         # 150mm 원의 격자 y 반축
+                        aspect = shot_h / shot_w                  # ky/kx → set_aspect(정원)
+                        # degenerate만 배제: 반축이 측정 shot 편차의 절반보다 작으면(원이 데이터보다
+                        # 터무니없이 작음) 폴백. 정상 fit은 semi_x≥max|x-cx| 이므로 통과.
+                        _rx = float(_np.abs(xs - cx).max()); _ry = float(_np.abs(ys - cy).max())
+                        if (_np.isfinite([cx, cy, semi_x, semi_y, aspect]).all()
+                                and semi_x > 0 and semi_y > 0 and 0.1 <= aspect <= 10.0
+                                and semi_x >= _rx * 0.5 and semi_y >= _ry * 0.5):
+                            return (cx, cy, semi_x, semi_y, aspect)
                 except Exception:
                     pass
 
-        # ── (2) 반지름: 모든 shot 사각형 꼭짓점을 포함하는 최소 반축(+2% 여백) ──
-        hx = (float(px) if px else _wfmap_shot_pitch(x)) / 2.0
-        hy = (float(py) if py else _wfmap_shot_pitch(y)) / 2.0
-        ex = _np.abs(x - cx) + hx        # 각 shot의 x방향 최외곽(꼭짓점)
-        ey = _np.abs(y - cy) + hy        # 각 shot의 y방향 최외곽(꼭짓점)
-        t = float(_np.sqrt((ex / aspect) ** 2 + ey ** 2).max())
-        if not (_np.isfinite(t) and t > 0):
-            return None
-        t *= 1.02                        # 꼭짓점이 경계선에 딱 붙지 않도록 소폭 여백
-        semi_x = aspect * t; semi_y = t
-        if not _np.isfinite([semi_x, semi_y]).all() or semi_x <= 0 or semi_y <= 0:
-            return None
-        return (cx, cy, semi_x, semi_y, aspect)
+        # ── 폴백: radius 없음/실패 → 등방 shot-중심 bounding 원(shot 크기 미상) ──
+        max_dist = float(_np.sqrt((x - cxg) ** 2 + (y - cyg) ** 2).max())
+        if max_dist > 0:
+            _r = max_dist * 1.05
+            return (cxg, cyg, _r, _r, 1.0)
+        return None
     except Exception:
         return None
 
@@ -1250,16 +1275,17 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
     ct = _pick('TKOUT_TIME', 'tkout_time')
     cl = _pick('FAB_LOT_ID', 'fab_lot_id')
     crad = _pick('Chip_Radius', 'chip_radius')
+    cm = _pick('MASK', 'mask')                        # vehicle 매칭용(150mm 원 shot 크기 계산)
     if not (cx and cy and cw and ct):
         return {}
 
-    d = df[[c for c in [cx, cy, cw, ct, cl, crad, item] if c]].dropna(subset=[item]).copy()
+    d = df[[c for c in [cx, cy, cw, ct, cl, crad, cm, item] if c]].dropna(subset=[item]).copy()
     if lot_prefix and cl:
         d = d[d[cl].astype(str).str.startswith(str(lot_prefix))]
     if len(d) == 0:
         return {}
     d[ct] = pd.to_datetime(d[ct], errors='coerce')
-    _circ = _wafer_circle_params(d, cx, cy, crad)   # 배경 wafer 원(150mm)
+    _circ = _wafer_circle_params(d, cx, cy, crad, mask_col=cm)   # 실제 150mm wafer 원(vehicle 매칭)
 
     norm = _wfmap_norm(direction, spec_low, spec_high, d[item])
     cmap = _wfmap_cmap(direction)
@@ -1368,15 +1394,16 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
     croot = _pick('ROOT_LOT_ID', 'root_lot_id')
     clot = _pick('FAB_LOT_ID', 'fab_lot_id')
     crad = _pick('Chip_Radius', 'chip_radius')
+    cm = _pick('MASK', 'mask')                        # vehicle 매칭용(150mm 원 shot 크기 계산)
     if not (cx and cy and cw and ct):
         return []
 
-    keep = [c for c in [cx, cy, cw, ct, croot, clot, crad, item] if c]
+    keep = [c for c in [cx, cy, cw, ct, croot, clot, crad, cm, item] if c]
     d = merged_df[keep].dropna(subset=[item]).copy()
     if len(d) == 0:
         return []
     d[ct] = pd.to_datetime(d[ct], errors='coerce')
-    _circ = _wafer_circle_params(d, cx, cy, crad)   # 배경 wafer 원(150mm)
+    _circ = _wafer_circle_params(d, cx, cy, crad, mask_col=cm)   # 실제 150mm wafer 원(vehicle 매칭)
     vals = pd.to_numeric(d[item], errors='coerce')
     lo = None if spec_low is None else float(spec_low)
     hi = None if spec_high is None else float(spec_high)
@@ -1536,17 +1563,18 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
     ct = _pick('TKOUT_TIME', 'tkout_time')
     cl = _pick('FAB_LOT_ID', 'fab_lot_id')
     crad = _pick('Chip_Radius', 'chip_radius')
+    cm = _pick('MASK', 'mask')                        # vehicle 매칭용(150mm 원 shot 크기 계산)
     if not (cx and cy and cw and ct):
         return None
 
-    cols = [c for c in [cx, cy, cw, ct, cl, crad, item] if c]
+    cols = [c for c in [cx, cy, cw, ct, cl, crad, cm, item] if c]
     d = df[cols].dropna(subset=[item]).copy()
     if lot_prefix and cl:
         d = d[d[cl].astype(str).str.startswith(str(lot_prefix))]
     if len(d) == 0:
         return None
     d[ct] = pd.to_datetime(d[ct], errors='coerce')
-    _circ = _wafer_circle_params(d, cx, cy, crad)   # 배경 wafer 원(150mm)
+    _circ = _wafer_circle_params(d, cx, cy, crad, mask_col=cm)   # 실제 150mm wafer 원(vehicle 매칭)
 
     grp_keys = [k for k in [cl, cw, ct] if k]
     sizes = d.groupby(grp_keys).size().reset_index(name='n')
@@ -2291,7 +2319,8 @@ def _render_item_charts(task):
         # ---- WF MAP 공유 컬러 스케일 (spec line 기준 diverging, HTML과 동일 규칙) ----
         wfmap_norm = _wfmap_norm(direction, wfmap_spec_low, wfmap_spec_high, item_df[item_name])
         # 배경 wafer 원(150mm) — radius(mm) 기반 중심·x/y 스케일 fit (모든 셀 공통)
-        _circ_ppt = _wafer_circle_params(item_df, map_x, map_y, col_rad)
+        _circ_ppt = _wafer_circle_params(item_df, map_x, map_y, col_rad,
+                                         mask_col=col_mask, main_vehicle=main_vehicle)   # 실제 150mm 원(vehicle 매칭)
         # 셀 공통 축범위: 데이터(패딩) + wafer 경계(타원)를 모두 포함(경계 안 잘리게)
         _px_lo, _px_hi = global_x_min, global_x_max
         _py_lo, _py_hi = global_y_min, global_y_max
