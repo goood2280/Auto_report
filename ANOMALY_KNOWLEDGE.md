@@ -148,6 +148,11 @@
 | **spec_out** (이탈 pt 수) | "**spec 이탈이 3개 이상**이면" | `spec_out >= 3` |
 | **spec_high** (스펙 상한) | "median이 **스펙 상한의 90%**를 넘으면" | `median > spec_high * 0.9` |
 | **spec_low** (스펙 하한) | "median이 **스펙 하한의 90%** 미만이면" | `median < spec_low * 0.9` |
+| **이상 없음(NOT)** | "`[B]`,`[C]`,`[D]`**에서 이상 수준 보이지 않으면**" | `not_items: B,C,D` (모두 이상 미만이어야 매칭) |
+| **산포 벌어짐(robust std)** | "`[D]`,`[C]`,`[B]`,`[A]`**로 갈수록 산포 수준이 벌어지면**" | `trend: asc` (robust std 배수가 그 순서로 단조 증가) |
+| **median 범위** | "**median이 10~30 사이**이고" | `median >= 10 AND median <= 30` |
+| **std 표기** | "**std(표준편차)가 100 이하**면" | `stddev <= 100` |
+| **링크 첨부** | 문장에 `https://...` URL을 그대로 적음 | 매칭 시 코멘트에 "참고: URL" 함께 표기 |
 
 - **등급(이상/주의)** 기준은 `analyze_commonality`와 동일합니다
   (이상 = spec 이탈 point 존재 / 주의 = 그 wafer 산포가 보통 wafer 대비 임계배수 초과).
@@ -175,11 +180,17 @@
 >   - `[RULE] [실제항목1]가 이상 수준이면 "AA 불량"을 밝힌다.`
 >   - `[RULE] [실제항목1],[실제항목2]가 모두 이상이면 "BB불량" 임을 밝힌다`
 >   - `[RULE] [실제항목3]가 주의 수준을 넘고 Median이 4이하이면 "Trend 대비 이상" 을 적어준다`
+>   - `[RULE] [항목1]가 이상수준이고 [항목2],[항목3],[항목4]에서 이상 수준 보이지 않으면 "BBB 불량" 임을 밝힌다`
+>   - `[RULE] [항목4],[항목3],[항목2],[항목1]로 갈 수록 산포 수준이 벌어지면 "CCC 불량" 임을 밝힌다. https://대시보드주소 링크를 같이 첨부한다.`
+>   - `[RULE] [항목1]가 이상수준이고 [항목1]의 median이 10~30 사이이고 std가 100 이하면 "AA Split 확인요망" 임을 밝힌다`
 
 <!-- NL_RULES:start -->
-[RULE] [ITEM_A]가 이상 수준이면 "AA 불량"을 밝힌다.
-[RULE] [ITEM_A],[ITEM_B]가 모두 이상이면 "BB불량" 임을 밝힌다
-[RULE] [ITEM_C]가 주의 수준을 넘고 Median이 4이하이면 "Trend 대비 이상" 을 적어준다
+[RULE] [VTH_N]가 이상 수준이면 "AA 불량"을 밝힌다.
+[RULE] [VTH_N],[VTH_P]가 모두 이상이면 "BB불량" 임을 밝힌다
+[RULE] [IDSAT_N]가 주의 수준을 넘고 Median이 4이하이면 "Trend 대비 이상" 을 적어준다
+[RULE] [VTH_N]가 이상수준이고 [IDSAT_P],[VTH_AVG],[IDSAT_RATIO]에서 이상 수준 보이지 않으면 "BBB 불량" 임을 밝힌다
+[RULE] [VTH_N]가 이상수준이고 [IDSAT_P],[VTH_AVG],[IDSAT_RATIO],[VTH_N]로 갈 수 록 산포 수준이 벌어지면 "CCC 불량" 임을 밝힌다. https://dashboard.example/ccc 링크를 같이 첨부한다.
+[RULE] [VTH_N]가 이상수준이고 [VTH_N]의 median이 0.1~0.9 사이이고 std가 100 이하면 "AA Split 확인요망" 임을 밝힌다
 <!-- NL_RULES:end -->
 
 > ### ⬆️ ⬆️ ⬆️ 여기까지가 🔴 ✏️ 수정 영역 ① (RULE 작성) 입니다 ⬆️ ⬆️ ⬆️

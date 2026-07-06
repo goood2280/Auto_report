@@ -835,6 +835,12 @@ RULE_FUNCTION_SPEC = """\
   disp_ratio > 2.0         : trigger의 worst wafer 산포배수(보통 wafer 대비) 비교
   stddev < 0.5             : trigger 대표 산포(wafer별 std 중앙값) 비교(우변: 숫자 또는 spec_high/spec_low[*계수])
   median > spec_high * 0.9 : trigger 대표 median(wafer별 median 중앙값) 비교(우변 동일)
+  NOT <원자>               : 원자의 부정 — "~가 아니면/이상이 보이지 않으면" (예: NOT sev(A, critical))
+  rstd_asc(A, B, C, ...)   : robust std 수준(보통 wafer 산포 대비 배수)이 나열 순서대로 점점 커짐
+                             ("산포가 벌어지는 방향") / rstd_desc(...)는 점점 작아짐
+  median(ITEM) <= x        : 지정 항목 대표 median(wafer median 중앙값) 비교(우변: 숫자 또는 spec_high/spec_low[*계수])
+  stddev(ITEM) <= x        : 지정 항목 대표 산포(wafer std 중앙값) 비교(우변 동일)
+  rstd(ITEM) >= x          : 지정 항목 대표 robust 산포(wafer robust std 중앙값) 비교
 등급 의미: 이상(critical)=spec 이탈 pt 존재 / 주의(warning)=wafer 산포가 보통 wafer 대비 임계배수 초과.
 항목명/CAT2명은 원 이름(ALIAS)·표시명 둘 다 인식된다(자연어에 적힌 표기 그대로 사용)."""
 
@@ -873,6 +879,10 @@ NL_PATTERN_HINTS = """\
   "산포가 x배 넘으면"(trigger)         → disp_ratio > x
   "stddev/표준편차가 x 이하면"         → stddev < x
   "median이 spec 상한의 N% 넘으면"     → median > spec_high * (N/100)  (하한이면 spec_low)
+  "B, C, D에서 이상이 보이지 않으면"   → NOT sev(B, critical) AND NOT sev(C, critical) AND NOT sev(D, critical)
+  "D, C, B, A로 갈수록 산포가 벌어지면" → rstd_asc(D, C, B, A)   (robust std 기준 증가 방향. 반대는 rstd_desc)
+  "A의 median이 x~y 사이면"            → median(A) >= x AND median(A) <= y
+  "A의 std(표준편차)가 x 이하면"       → stddev(A) <= x
   "(주의)" 표기가 있으면               → sev: warning (없으면 critical)
   "링크: URL"                          → link: "URL" (해당 분기의 link)
 판정명("큰따옴표 문구")은 note:에 그대로 넣는다. 따옴표가 없으면 문맥에서 짧은 판정 문구를 만들어 note에 넣는다."""
@@ -906,15 +916,20 @@ _ATOM_VALID_PATTERNS = [
     r'(stddev|std)\s*(>=|<=|==|<|>)\s*([\d.]+|spec_(high|low)(\s*\*\s*[\d.]+)?)$',
     r'median\s*(>=|<=|==|<|>)\s*([\d.]+|spec_(high|low)(\s*\*\s*[\d.]+)?)$',
     r'disp_ratio\s*(>=|<=|==|<|>)\s*[\d.]+$',
+    # ── robust std 방향/직접 비교 · 임의 항목 median/std 비교 원자 ──
+    r'rstd_(asc|desc)\([^()]+\)$',
+    r'(median|stddev|std|rstd)\([^()]+\)\s*(>=|<=|==|<|>)\s*([\d.]+|spec_(high|low)(\s*\*\s*[\d.]+)?)$',
 ]
 
 
 def _atom_valid(atom):
-    """조건 원자 하나가 [RULE] 평가기가 인식하는 문법인지 정적 확인."""
+    """조건 원자 하나가 [RULE] 평가기가 인식하는 문법인지 정적 확인.
+    선행 'NOT '/'!' 부정 접두는 벗겨내고 내부 원자 문법을 검사한다."""
     import re
     a = atom.strip()
     if not a:
         return False
+    a = re.sub(r'(?i)^(?:not\s+|!\s*)', '', a).strip()
     return any(re.match(p, a) for p in _ATOM_VALID_PATTERNS)
 
 
@@ -1431,6 +1446,10 @@ def _nl_json_ai(lines, llm_fn):
         '    "disp_ratio": ">2.0",\n'
         '    "spec_out": ">=3"\n'
         "  },\n"
+        '  "not_items": ["ITEM_C", "ITEM_D"],\n'
+        '  "trend_items": ["ITEM_D", "ITEM_C", "ITEM_B", "ITEM_A"],\n'
+        '  "trend": "asc",\n'
+        '  "link": "https://...",\n'
         '  "comment": "불량모드명"\n'
         "}\n\n"
         "규칙:\n"
@@ -1440,6 +1459,12 @@ def _nl_json_ai(lines, llm_fn):
         '- condition.median, stddev, disp_ratio, spec_out: 비교 연산자+숫자\n'
         '- condition.median/stddev 우변은 숫자 대신 "spec_high"/"spec_low"(선택 "*계수") 가능.\n'
         '    예: "median이 스펙 상한의 90% 넘으면" → "median": ">spec_high*0.9"\n'
+        '- "median이 10~30 사이면" 같은 범위 조건은 배열로: "median": [">=10", "<=30"] (모두 만족)\n'
+        '- not_items: "~에서 이상 수준이 보이지 않으면/없으면" 처럼 이상이 아니어야 하는 항목 배열.\n'
+        '    기본은 이상(abnormal) 미만이어야 매칭. 등급을 바꾸려면 "not_grade": ">=caution" 추가\n'
+        '- trend_items + trend: "D,C,B,A로 갈수록 산포가 벌어지면" → trend_items에 그 순서 그대로,\n'
+        '    trend는 "asc"(robust std 수준이 점점 커짐) 또는 "desc"(점점 작아짐)\n'
+        '- link: 자연어에 URL이 있으면 그대로 넣는다(판정 시 리포트에 함께 표기)\n'
         '- comment: 자연어에서 ""로 감싼 코멘트, 없으면 규칙 요약\n'
         "- 조건에 해당하지 않는 필드는 생략\n"
     )
@@ -1452,25 +1477,58 @@ def _nl_json_ai(lines, llm_fn):
 
 
 def _nl_json_keyword_parse(line):
-    """키워드 기반 자연어 한 줄 → JSON 규칙 dict 파싱."""
+    """키워드 기반 자연어 한 줄 → JSON 규칙 dict 파싱.
+
+    지원: 등급(이상/주의)·logic(모두)·median/stddev/disp_ratio/spec_out 수치 조건,
+    median 범위("10~30 사이"), not_items("~에서 이상 수준 보이지 않으면"),
+    trend_items("D,C,B,A로 갈수록 산포가 벌어지면" → robust std 기준 asc), link(URL).
+    """
     import re
 
-    # items: [] 안의 항목
-    items = re.findall(r'\[([^\]]+)\]', line)
-    if not items:
+    orig = line
+
+    # ── [] 항목을 '연속 묶음(cluster)' 단위로 수집 — 뒤따르는 문구로 역할 판정 ──
+    #   "[B],[C],[D]에서 이상 수준 보이지 않으면" → not_items
+    #   "[D],[C],[B],[A]로 갈수록 산포가 벌어지면" → trend_items(asc)
+    ms = list(re.finditer(r'\[([^\]]+)\]', line))
+    if not ms:
         return None
-    item_list = []
-    for it in items:
-        item_list.extend([x.strip() for x in it.split(',') if x.strip()])
+    clusters = []   # [names(list), start, end]
+    for m in ms:
+        names = [x.strip() for x in m.group(1).split(',') if x.strip()]
+        if clusters and not line[clusters[-1][2]:m.start()].strip(' \t,·'):
+            clusters[-1][0].extend(names)
+            clusters[-1][2] = m.end()
+        else:
+            clusters.append([names, m.start(), m.end()])
+
+    item_list, not_items, trend_items, trend = [], [], [], ''
+    for ci, (names, s, e) in enumerate(clusters):
+        nxt = clusters[ci + 1][1] if ci + 1 < len(clusters) else len(line)
+        tail = line[e:nxt]
+        if re.search(r'보이지\s*않|이상\s*(?:수준\s*)?(?:이|가)?\s*없', tail):
+            not_items.extend(names)
+        elif re.search(r'갈\s*수\s*록|갈수록', tail) and re.search(r'산포|std|표준편차', tail, re.I):
+            trend_items.extend(names)
+            trend = 'desc' if re.search(r'좁아|작아|줄어', tail) else 'asc'
+        else:
+            item_list.extend(names)
+    if not item_list and clusters:
+        item_list = list(clusters[0][0])   # 전부 not/trend로 빠지면 첫 묶음을 주체로
 
     # comment: "" 안의 코멘트
-    cm = re.findall(r'"([^"]+)"', line)
+    cm = re.findall(r'"([^"]+)"', orig)
     comment = cm[0] if cm else ''
 
-    # 조건 판정용 텍스트 — 항목([...])·코멘트("...")는 제거해 키워드 오검출 방지
+    # link: 자연어에 URL이 있으면 판정 시 함께 표기
+    lk = re.search(r'https?://[^\s"\'<>]+', orig)
+    link = lk.group(0).rstrip('.,);]») ') if lk else ''
+
+    # 조건 판정용 텍스트 — 항목([...])·코멘트("...")·URL은 제거해 키워드 오검출 방지
     #   (예: 코멘트 "Trend 대비 이상"의 '이상'이 grade를 오판하지 않도록)
-    cond_text = re.sub(r'"[^"]*"', ' ', line)
+    cond_text = re.sub(r'"[^"]*"', ' ', orig)
     cond_text = re.sub(r'\[[^\]]*\]', ' ', cond_text)
+    cond_text = re.sub(r'https?://\S+', ' ', cond_text)
     line = cond_text   # 이하 숫자/키워드 파싱은 조건 텍스트 기준
 
     cond = {}
@@ -1499,6 +1557,12 @@ def _nl_json_keyword_parse(line):
             op = '<' if ('미만' in line or '이하' in line or '아래' in line) else '>'
             cond['median'] = f'{op}spec_low*{float(m.group(1)) / 100:.4g}'
 
+    # median 범위 ("median이 10~30 사이") — 배열 조건(모두 만족)
+    if 'median' not in cond:
+        m = re.search(r'[Mm]edian\s*(?:이|가)?\s*([\d.]+)\s*[~∼〜]\s*([\d.]+)\s*(?:사이|이내|범위)?', line)
+        if m:
+            cond['median'] = [f'>={m.group(1)}', f'<={m.group(2)}']
+
     # median (숫자 직접 비교)
     if 'median' not in cond:
         m = re.search(r'[Mm]edian\s*(?:이|가)?\s*([\d.]+)\s*이하', line)
@@ -1509,12 +1573,12 @@ def _nl_json_keyword_parse(line):
             if m:
                 cond['median'] = f'>={m.group(1)}'
 
-    # stddev
-    m = re.search(r'[Ss]tddev\s*(?:가|이)?\s*([\d.]+)\s*이하', line)
+    # stddev (std/표준편차 표기 허용)
+    m = re.search(r'(?:[Ss]tddev|[Ss]td|표준편차)\s*(?:가|이)?\s*([\d.]+)\s*이하', line)
     if m:
         cond['stddev'] = f'<={m.group(1)}'
     else:
-        m = re.search(r'[Ss]tddev\s*(?:가|이)?\s*([\d.]+)\s*이상', line)
+        m = re.search(r'(?:[Ss]tddev|[Ss]td|표준편차)\s*(?:가|이)?\s*([\d.]+)\s*이상', line)
         if m:
             cond['stddev'] = f'>={m.group(1)}'
 
@@ -1535,7 +1599,15 @@ def _nl_json_keyword_parse(line):
     if not cond.get('grade'):
         cond['grade'] = '>=caution'
 
-    return {'items': item_list, 'condition': cond, 'comment': comment}
+    r = {'items': item_list, 'condition': cond, 'comment': comment}
+    if not_items:
+        r['not_items'] = not_items
+    if trend_items:
+        r['trend_items'] = trend_items
+        r['trend'] = trend or 'asc'
+    if link:
+        r['link'] = link
+    return r
 
 
 def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
@@ -1649,7 +1721,7 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
                 if fn and not fn(level, threshold):
                     return False
 
-        # numeric 조건들
+        # numeric 조건들 — 값은 단일식("<=4") 또는 배열([">=10","<=30"] = 범위, 모두 만족)
         num_fields = {
             'median': 'rep_median',
             'stddev': 'rep_std',
@@ -1660,11 +1732,17 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
             expr = cond.get(cond_key)
             if not expr:
                 continue
-            ok = _num_ok(expr, c.get(ctx_key), c)
-            if ok is None:      # 인식 불가한 조건식 → 그 조건은 스킵
-                continue
-            if not ok:
-                return False
+            _exprs = expr if isinstance(expr, (list, tuple)) else [expr]
+            for _e in _exprs:
+                # "10~30" 축약 표기도 범위로 인식
+                _mr = re.match(r'([\d.]+)\s*[~∼〜]\s*([\d.]+)$', str(_e).strip())
+                _sub = [f'>={_mr.group(1)}', f'<={_mr.group(2)}'] if _mr else [_e]
+                for _se in _sub:
+                    ok = _num_ok(_se, c.get(ctx_key), c)
+                    if ok is None:      # 인식 불가한 조건식 → 그 조건은 스킵
+                        continue
+                    if not ok:
+                        return False
 
         return True
 
@@ -1674,6 +1752,7 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
             cond = rule.get('condition', {})
             comment = rule.get('comment', '')
             logic = cond.get('logic', 'any')
+            link = str(rule.get('link') or '').strip()
 
             resolved = []
             for name in items_raw:
@@ -1696,6 +1775,48 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
             else:
                 matched = any(ok for _, _, ok in results)
 
+            # ── not_items: 나열 항목 '모두' 지정 등급(기본 이상) 미만이어야 매칭 ──
+            #   미해석(미측정/미발견) 항목은 '이상이 보이지 않음'으로 간주해 통과.
+            _not_notes = []
+            _not_raw = rule.get('not_items') or []
+            if _not_raw:
+                _ng = re.match(r'(?:>=)?\s*(\w+)', str(rule.get('not_grade', '>=abnormal')))
+                _need = _grade_map.get((_ng.group(1).lower() if _ng else 'abnormal'), 2)
+                for name in _not_raw:
+                    rk = _resolve_item(name, item_ctx)
+                    _lv = item_ctx.get(rk, {}).get('level', 0) if rk else 0
+                    _lbl = {2: '이상', 1: '주의', 0: '참고'}.get(_lv, '?')
+                    _not_notes.append(f"{_disp(rk) if rk else name}={_lbl}")
+                    if _lv >= _need:
+                        matched = False
+            # ── trend_items + trend: robust std 수준(보통 wafer 산포 대비 배수)이
+            #   나열 순서대로 점점 커짐(asc)/작아짐(desc) — "산포가 벌어지는 방향" ──
+            _tr_note = ''
+            _tr_raw = rule.get('trend_items') or []
+            if _tr_raw:
+                _dirn = str(rule.get('trend') or 'asc').lower()
+                _tvs = []
+                for name in _tr_raw:
+                    rk = _resolve_item(name, item_ctx)
+                    if not rk:
+                        _tvs = None
+                        break
+                    _tvs.append((name, rk, float(item_ctx[rk].get('rstd_ratio') or 0.0)))
+                if not _tvs or len(_tvs) < 2:
+                    matched = False
+                    _tr_note = f"trend 항목 미발견/부족: {_tr_raw}"
+                else:
+                    _vals = [v for _, _, v in _tvs]
+                    _mono = (all(_vals[i] < _vals[i + 1] for i in range(len(_vals) - 1))
+                             if _dirn != 'desc' else
+                             all(_vals[i] > _vals[i + 1] for i in range(len(_vals) - 1)))
+                    _sym = ' < ' if _dirn != 'desc' else ' > '
+                    _tr_note = ("rstd배수(robust): " +
+                                _sym.join(f"{_disp(rk)}={v:.2f}" for _, rk, v in _tvs) +
+                                (" (충족)" if _mono else " (방향 불충족)"))
+                    if not _mono:
+                        matched = False
+
             matched_items = [name for name, _, ok in results if ok]
             matched_keys = [rk for _, rk, ok in results if ok]   # merged_df 컬럼 키(차트/우선배치용)
             detail_parts = []
@@ -1710,16 +1831,22 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
                 if c.get('disp'):
                     parts.append(f"산포={float(c['disp']):.2f}배")
                 detail_parts.append(f"{_disp(rk)}({'O' if ok else 'X'}): {', '.join(parts)}")
+            if _not_notes:
+                detail_parts.append("이상없음 조건: " + ", ".join(_not_notes))
+            if _tr_note:
+                detail_parts.append(_tr_note)
 
             _rname = f"JSON#{ri+1} {comment}" if comment else f"JSON#{ri+1}"
             if matched:
                 _note = comment or ', '.join(matched_items)
                 _item0 = matched_keys[0] if matched_keys else (items_raw[0] if items_raw else '')
+                _detail = ' | '.join(detail_parts + ([f"참고: {link}"] if link else []))
                 _fd = _finding(
                     'CRITICAL', 'DEFECT_MODE', _item0,
                     f"[불량 모드] {_note}",
-                    ' | '.join(detail_parts),
-                    display_name=_disp(_item0) if _item0 else '')
+                    _detail,
+                    display_name=_disp(_item0) if _item0 else '',
+                    link=link)
                 # MD 규칙 순서(=우선순위)와 매칭 항목 키를 finding에 부착
                 #   → analyze_commonality 정렬 tie-break·차트 우선배치·요약 필터에 사용
                 _fd['rule_rank'] = ri
@@ -2447,6 +2574,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         worst_med_dev, worst_med_w, worst_med_val = 0.0, None, None
         worst_disp_ratio, worst_disp_w = 0.0, None
         _wstats = {}    # wafer별 {median, std, n} — 이상/주의 항목의 wafer 통계(요청: findings·AI·룰에 포함)
+        _rws = []       # wafer별 robust 산포(1.4826×MAD) — rstd/rstd_asc 룰 원자용
         if tgt_it is not None:
             for w, g in tgt_it.groupby(col_waf):
                 _s = pd.to_numeric(g[it], errors='coerce').dropna()
@@ -2457,6 +2585,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                                   'std': float(_s.std()) if len(_s) > 1 else 0.0,
                                   'n': int(len(_s))}
                 wm, ws = _robust(_s)
+                if ws:
+                    _rws.append(float(ws))
                 if wm is not None and w_center is not None and w_scatter:
                     d = abs(wm - w_center) / w_scatter
                     if d > worst_med_dev:
@@ -2557,6 +2687,12 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                     if _wstats else None)
         _rep_med = (float(pd.Series([v['median'] for v in _wstats.values()]).median())
                     if _wstats else _tmed)
+        # ── robust std 대표값 — rstd(ITEM)·rstd_asc/desc(산포 벌어짐 방향) 룰 원자용 ──
+        #   rep_rstd   = wafer별 robust 산포(1.4826×MAD)의 중앙값(단위 있음).
+        #   rstd_ratio = rep_rstd / 보통 wafer 산포(typ_wspread) — 단위 무관 배수라 '항목 간' 비교 가능.
+        _rep_rstd = (float(pd.Series(_rws).median()) if _rws else None)
+        _rstd_ratio = (float(_rep_rstd / typ_wspread)
+                       if (_rep_rstd is not None and typ_wspread) else 0.0)
         _item_ctx[it] = {
             'level': 2 if _sev == 'CRITICAL' else (1 if _sev == 'WARNING' else 0),
             'disp': float(worst_disp_ratio) if worst_disp_ratio else 0.0,
@@ -2564,6 +2700,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'tmed_pctile': _tmed_pct,
             # median/stddev 룰 조건용 — rep_median/rep_std, spec 경계(median > spec_high*0.9 등)
             'rep_std': _rep_std, 'rep_median': _rep_med,
+            'rep_rstd': _rep_rstd, 'rstd_ratio': _rstd_ratio,   # rstd()·rstd_asc/desc 원자용
             'spec_low': lo, 'spec_high': hi,
             'wafer_stats': _wstats,
             'spec_out_pt': int(n_out),           # spec_out(n)/spec_out_pt(ITEM) 규칙 함수용
@@ -2772,6 +2909,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
 
             def _eval_atom(atom):
                 atom = atom.strip()
+                # ── NOT 원자 : 'NOT <원자>' / '!<원자>' — 원자의 부정("~가 아니면/보이지 않으면") ──
+                m = re.match(r'(?i)^(?:not\s+|!\s*)(.+)$', atom)
+                if m:
+                    return not _eval_atom(m.group(1).strip())
                 # ── CAT2 그룹 기반 원자 (항목 원자보다 먼저 — 접미 _cat2로 구분) ──
                 # sev_cat2(CAT2) 연산자 등급 : 그 CAT2의 최대 item level과 비교
                 m = re.match(r'sev_cat2\(([^)]+)\)\s*(>=|<=|==|<|>)\s*(이상|주의|참고)$', atom)
@@ -2908,6 +3049,45 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                     _need = _LVL_KW[m.group(1).lower()]
                     _n = sum(1 for _cx in _item_ctx.values() if _cx.get('level', 0) >= _need)
                     return _cmp(_n, m.group(2), m.group(3))
+                # rstd_asc/desc(A,B,C,...) : robust std 수준(보통 wafer 산포 대비 배수)이
+                #   나열 순서대로 '점점 커짐(asc)/작아짐(desc)' — "산포가 벌어지는 방향" 판정
+                m = re.match(r'rstd_(asc|desc)\(([^()]+)\)$', atom)
+                if m:
+                    _ns = [t.strip() for t in m.group(2).split(',') if t.strip()]
+                    _vs = []
+                    for n in _ns:
+                        c = _find_ctx(n)
+                        if not c:
+                            return False
+                        _vs.append(float(c.get('rstd_ratio') or 0.0))
+                    if len(_vs) < 2:
+                        return False
+                    if m.group(1) == 'asc':
+                        return all(_vs[i] < _vs[i + 1] for i in range(len(_vs) - 1))
+                    return all(_vs[i] > _vs[i + 1] for i in range(len(_vs) - 1))
+                # median(ITEM)/stddev(ITEM)/rstd(ITEM) <op> RHS : 임의 항목 대표값 직접 비교
+                #   RHS = 숫자 또는 spec_high/spec_low[*계수] (그 ITEM의 spec 기준).
+                #   (median_low/median_pctile/median_dev_sigma 등은 '(' 앞이 달라 여기 매칭 안 됨)
+                m = re.match(r'(median|stddev|std|rstd)\(([^()]+)\)\s*(>=|<=|==|<|>)\s*(.+)$', atom)
+                if m:
+                    c = _find_ctx(m.group(2).strip())
+                    if not c:
+                        return False
+                    _key = {'median': 'rep_median', 'stddev': 'rep_std',
+                            'std': 'rep_std', 'rstd': 'rep_rstd'}[m.group(1)]
+                    v = c.get(_key)
+                    _rhs = m.group(4).strip()
+                    mm = re.match(r'(spec_high|spec_low)\s*(?:\*\s*([\d.]+))?$', _rhs)
+                    if mm:
+                        _base = c.get(mm.group(1))
+                        t = (float(_base) * (float(mm.group(2)) if mm.group(2) else 1.0)
+                             if _base is not None else None)
+                    else:
+                        try:
+                            t = float(_rhs)
+                        except ValueError:
+                            t = None
+                    return v is not None and t is not None and _cmp(v, m.group(3), t)
                 return False
 
             def _eval_when(expr):
@@ -2920,6 +3100,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             # ── 통합 [RULE] 체이닝용 원자 평가 (측정순서 함수·spec_out·all_sev(그룹,level) 등) ──
             def _eval_chain_atom(atom, tctx):
                 atom = atom.strip()
+                # NOT 원자 : 'NOT <원자>' / '!<원자>' — 원자의 부정(체이닝 원자 전부에 적용 가능)
+                m = re.match(r'(?i)^(?:not\s+|!\s*)(.+)$', atom)
+                if m:
+                    return not _eval_chain_atom(m.group(1).strip(), tctx)
                 _sq = (tctx or {}).get('seq', {})
                 # spec_out <op> n : trigger의 spec-out pt 수
                 m = re.match(r'spec_out\s*(>=|<=|==|<|>)\s*([\d.]+)$', atom)

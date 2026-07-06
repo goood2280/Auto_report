@@ -878,20 +878,21 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         _c = str(_f.get('cat2', '') or '').strip()
         if _c:
             return _c
-        return '지식 판정(규칙)' if _f.get('type') == 'KNOWLEDGE' else '기타'
+        if _f.get('type') == 'KNOWLEDGE':
+            return '지식 판정(규칙)'
+        if _f.get('type') == 'DEFECT_MODE':
+            return '불량 모드 판정(규칙)'
+        return '기타'
     _cat_order, _by_cat = [], {}
     for _f in findings:
         _c = _fcat(_f)
         if _c not in _by_cat:
             _by_cat[_c] = []; _cat_order.append(_c)
         _by_cat[_c].append(_f)
-    # 렌더 블록: 카테고리 헤더('H') + 그 카테고리 finding('F')들 → 카테고리별로 구분되어 보임
+    # 렌더 블록 — 요청 레이아웃: 1페이지 상단에 'Rule Check 결과' 먼저,
+    #   그 아래 카테고리(cat2)별 finding 그룹이 이어진다.
     _blocks = []
-    for _c in _cat_order:
-        _blocks.append(('H', _c))
-        for _f in _by_cat[_c]:
-            _blocks.append(('F', _f))
-    # 전체 anomaly rule 체크 결과(매칭/해당없음) — Finding 뒤에 요약 블록으로 덧붙임
+    # ① 전체 anomaly rule 체크 결과(매칭/해당없음) — 맨 앞 요약 블록
     _rt = list(rule_trace or [])
     if _rt:
         _rt_hit = sum(1 for _t in _rt if _t.get('matched'))
@@ -902,9 +903,26 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         for _t in _rt:
             if not _t.get('matched'):
                 _blocks.append(('R', _t))
-    # 블록(헤더+finding)이 많으면 페이지 분할
-    PER_PAGE = 26
-    _pages = [_blocks[i:i + PER_PAGE] for i in range(0, len(_blocks), PER_PAGE)] or [[]]
+    # ② 카테고리 헤더('H') + 그 카테고리 finding('F')들 → 카테고리별로 구분되어 보임
+    for _c in _cat_order:
+        _blocks.append(('H', _c))
+        for _f in _by_cat[_c]:
+            _blocks.append(('F', _f))
+    # 페이지 분할 — finding('F') 개수 기준: 1페이지 5개(참고사항·Rule Check 동거),
+    #   2페이지부터 15개씩. (헤더/Rule Check 줄은 개수에 포함하지 않되 안전 상한 40블록)
+    _FIRST_F = int(getattr(GLOBAL_CONFIG, 'anomaly_detail_first_page_items', 5) or 5)
+    _NEXT_F = int(getattr(GLOBAL_CONFIG, 'anomaly_detail_page_items', 15) or 15)
+    _MAX_BLOCKS = 40
+    _pages, _cur, _fcnt, _cap = [], [], 0, _FIRST_F
+    for _bk, _bv in _blocks:
+        if _cur and ((_bk == 'F' and _fcnt >= _cap) or len(_cur) >= _MAX_BLOCKS):
+            _pages.append(_cur)
+            _cur, _fcnt, _cap = [], 0, _NEXT_F
+        _cur.append((_bk, _bv))
+        if _bk == 'F':
+            _fcnt += 1
+    if _cur or not _pages:
+        _pages.append(_cur)
     _total = len(_pages)
 
     def _render_cat_header(_p, _txt):

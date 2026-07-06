@@ -702,6 +702,11 @@ class Config:
         self.anomaly_chart_figsize = (10, 4.0)     # 차트 크기 (width, height in inches)
         self.anomaly_chart_dpi = 120               # 차트 해상도 (DPI)
 
+        # ── Anomaly 상세(통계 자동 분석) PPT 페이지 분할 ──
+        #   1페이지: Rule Check 결과 + 첫 N개 finding / 2페이지부터: 페이지당 M개 finding
+        self.anomaly_detail_first_page_items = 5   # 1페이지 finding 수
+        self.anomaly_detail_page_items = 15        # 2페이지부터 페이지당 finding 수
+
         # ──────────────────────────────────────────────────────
         # 내부 상태 저장소 (Internal state storage)
         # ──────────────────────────────────────────────────────
