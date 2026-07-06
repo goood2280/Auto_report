@@ -1391,23 +1391,24 @@ def main():
                         def _has_png(_it):
                             _safe = re.sub(r'[\\/:*?"<>|]', '_', str(_it))
                             return os.path.exists(f"RUN/TEMP/{_safe}.png")
+                        # anomaly_exclude_items(+WF MAP 제외 키워드) → 이상/주의 차트에서 완전히 제외
+                        _excl_items = list(getattr(GLOBAL_CONFIG, 'anomaly_exclude_items', []) or [])
+                        _excl_items += [f"*{str(_k).strip()}*"
+                                        for _k in (getattr(GLOBAL_CONFIG, 'wfmap_exclude_keywords', []) or [])
+                                        if str(_k).strip()]
                         top_item_names = []
                         _seen = set()
                         for _f in (code_findings or []):
                             for _it in str(_f.get('item', '')).split(','):
                                 _it = _it.strip()
-                                if (not _it) or (_it in _seen) or (_it not in merged_df.columns) or (not _has_png(_it)):
+                                if (not _it) or (_it in _seen) or (_it not in merged_df.columns) or (not _has_png(_it)) \
+                                        or item_excluded(_it, _excl_items):
                                     continue
                                 top_item_names.append(_it); _seen.add(_it)
                                 if len(top_item_names) >= _top_n: break
                             if len(top_item_names) >= _top_n: break
                         if len(top_item_names) < _top_n and metrics_dict:
                             _sigma = getattr(GLOBAL_CONFIG, 'anomaly_deviation_sigma', 1.5)
-                            _excl_items = list(getattr(GLOBAL_CONFIG, 'anomaly_exclude_items', []) or [])
-                            # WF MAP 제외 키워드 항목도 anomaly 판정 대상에서 제외(부분일치 → *KEYWORD*)
-                            _excl_items += [f"*{str(_k).strip()}*"
-                                            for _k in (getattr(GLOBAL_CONFIG, 'wfmap_exclude_keywords', []) or [])
-                                            if str(_k).strip()]
                             _anom = [m for m in metrics_dict.values()
                                      if m.get('spec_out_count', 0) > 0 or m.get('deviation', 0.0) > _sigma]
                             _anom.sort(key=lambda m: (m.get('spec_out_count', 0), m.get('deviation', 0.0)), reverse=True)

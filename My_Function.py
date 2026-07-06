@@ -2389,12 +2389,11 @@ def _render_item_charts(task):
         has_lot = 'fab_lot_id' in tdf.columns
 
         # ---- 특정 항목: site별 모든 값 대신 tkout_time 기준 집계점으로 Trend 표시 ----
-        #   config.trend_tkout_agg = {ALIAS: 'P10'/'P90'/'MEDIAN'/'MEAN'}.
+        #   config.trend_tkout_agg = {ALIAS: 'P10'/'P90'/'MEDIAN'/'MEAN'}. base ALIAS 키('MAWIN')로
+        #   파생 컬럼(MAWIN_*)까지 매칭 — 이상/주의 판정(anomaly_engine)과 '동일한' 규칙(trend_agg_spec).
+        from anomaly_engine import trend_agg_spec as _trend_agg_spec
         _agg_map = cfg.get('trend_tkout_agg') or {}
-        _agg_spec = _agg_map.get(item_name) or _agg_map.get(spec_name)
-        # 'Window'가 들어간 항목(MAWIN 파생 포함)은 명시 설정이 없어도 Trend를 P10으로 집계
-        if not _agg_spec and ('window' in str(item_name).lower() or 'window' in str(spec_name).lower()):
-            _agg_spec = 'P10'
+        _agg_spec = _trend_agg_spec(item_name, _agg_map, spec_name)
         if _agg_spec:
             _s = str(_agg_spec).strip().upper()
             if _s in ('MEAN', 'AVG'):

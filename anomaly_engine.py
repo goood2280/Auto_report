@@ -320,6 +320,31 @@ def item_excluded(name, patterns):
     return any(fnmatch.fnmatch(s, str(p).upper()) for p in patterns)
 
 
+def trend_agg_spec(name, agg_map, spec_name=None):
+    """trend_tkout_agg 매칭 → 집계 스펙 문자열('P10'/'P90'/'MEDIAN'/'MEAN') 또는 None.
+
+    My_config.trend_tkout_agg = {키: 스펙}. 키는 base ALIAS(예: 'MAWIN')로 두어도 그 파생
+    컬럼(MAWIN_minus_margin, MAWIN_ovl_index …)까지 매칭되도록 아래 규칙으로 판정한다(대소문자 무시):
+      (1) 항목명/spec명이 키와 정확히 일치
+      (2) fnmatch 와일드카드(키에 * ? 사용, 예 'MAWIN_*')
+      (3) prefix — 항목명이 '키' 또는 '키_'로 시작(파생 컬럼 포함)
+      (4) 항목명/spec명에 'window' 포함 → 기본 'P10'(MA_Window 파생 자동 집계)
+    anomaly_engine(이상/주의 판정)과 My_Function(Trend 차트)이 같은 규칙을 쓰도록 공용 함수.
+    """
+    import fnmatch
+    names = [str(n) for n in (name, spec_name) if n not in (None, '')]
+    for key, spec in (agg_map or {}).items():
+        kl = str(key).lower()
+        for s in names:
+            sl = s.lower()
+            if sl == kl or fnmatch.fnmatch(sl, kl) or sl.startswith(kl + '_'):
+                return spec
+    for s in names:
+        if 'window' in s.lower():
+            return 'P10'
+    return None
+
+
 def _finding(sev, ftype, item, title, detail="", **extra):
     """Finding dict 생성. extra(display_name·cat2·spec_out_* 등)는 AI 해석 입력용 부가정보 —
     HTML/PPT 렌더러는 severity/title/detail만 읽으므로 키 추가에 안전하다."""
@@ -1574,9 +1599,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         _agg_map = (getattr(config, 'trend_tkout_agg', {}) or {}) if config else {}
 
         def _agg_fn_for(_it):
-            _spec = _agg_map.get(_it)
-            if not _spec and 'window' in str(_it).lower():
-                _spec = 'P10'
+            # base ALIAS 키(예 'MAWIN')로 파생 컬럼(MAWIN_*)까지 매칭 — Trend 차트와 동일 규칙
+            _spec = trend_agg_spec(_it, _agg_map)
             if not _spec:
                 return None
             _s = str(_spec).strip().upper()
