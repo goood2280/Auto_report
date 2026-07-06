@@ -28,7 +28,7 @@ import requests
 #    출력이 매번 발생하던 문제 방지 — 실제 쿼리는 My_Function 내부에서 지연 import한다.)
 from My_Function import *
 from My_config import GLOBAL_CONFIG
-from anomaly_engine import run_anomaly_pipeline, analyze_commonality, render_findings_html, interpret_with_ai, item_excluded
+from anomaly_engine import run_anomaly_pipeline, analyze_commonality, render_findings_html, interpret_with_ai, item_excluded, compile_nl_to_json
 
 # ==================================================================================================================================
 # GPT OSS 120B API 연결 설정
@@ -470,6 +470,16 @@ def main():
                 _ANOMALY_KNOWLEDGE_TEXT = inject_compiled_rules(_ANOMALY_KNOWLEDGE_TEXT, _nl_compiled)
     except Exception as _ne:
         print(f"[WARN] 자연어 규칙 처리 실패(수기 [RULE]만 사용): {_ne}")
+
+    # ── 자연어 규칙 → JSON 변환 (새 판정 엔진용) ──
+    _json_rules = None
+    if getattr(GLOBAL_CONFIG, 'anomaly_nl_autocompile', True):
+        try:
+            _json_rules = compile_nl_to_json(_ANOMALY_KNOWLEDGE_TEXT, _LLM_FN, cache_dir='RUN/AI')
+            if _json_rules:
+                print(f"[INFO] NL→JSON 규칙 {len(_json_rules)}개 로드")
+        except Exception as _je:
+            print(f"[WARN] NL→JSON 변환 실패: {_je}")
 
     reformatter = pd.read_csv(f'reformatter/{vehicle}_reformatter.csv')
 
@@ -981,7 +991,8 @@ def main():
                                 main_vehicle=vehicle, config=GLOBAL_CONFIG, reformatter=reformatter,
                                 knowledge_text=_ANOMALY_KNOWLEDGE_TEXT,
                                 item_stats_out=anomaly_item_stats,
-                                rule_trace_out=anomaly_rule_trace)
+                                rule_trace_out=anomaly_rule_trace,
+                                json_rules=_json_rules)
                             print(f"[INFO] commonality 분석: {len(code_findings)}건 finding")
                         except Exception as ce:
                             print(f"[WARN] commonality 분석 스킵 (오류): {ce}")
@@ -1532,25 +1543,61 @@ def main():
                                                     merged_df, item, spec_low=_slow, spec_high=_shigh,
                                                     target_lot=target_lot_id, max_maps=_wf_max)
                                                 if _wfmaps:
-                                                    _wf_cells = []
-                                                    for _wf in _wfmaps:
-                                                        # (label, b64, is_target) — 하위호환: 2-튜플이면 target 아님
-                                                        _lab, _b = _wf[0], _wf[1]
-                                                        _is_tgt = _wf[2] if len(_wf) > 2 else False
-                                                        # target lot WF MAP 라벨은 진한 파란색 + 볼드로 강조
-                                                        _lab_style = ('font-size:8px; white-space:nowrap; '
-                                                                      + ('color:#0033cc; font-weight:bold;' if _is_tgt else 'color:#555;'))
-                                                        # WF MAP img: 고정 58px width/height inline + attribute(포워딩 호환)
-                                                        #  네모칸 테두리(box)·wafer별 구분선 제거 → 원 + shot map만 깨끗하게
-                                                        _wf_cells.append(
-                                                            f'<img src="data:image/png;base64,{_b}" width="58" height="58" '
-                                                            'style="width:58px; height:58px; display:block; margin:0 auto; border:none;"/>'
-                                                            f'<div style="{_lab_style}">{_lab}</div>')
-                                                    # flex/grid 대신 table 배치(포워딩 유지) — 2행으로 붙게
-                                                    #  (WF MAP을 Trend 오른쪽에 2행만 차지하도록 열 수를 산정)
-                                                    _ncol2 = max(1, -(-len(_wf_cells) // 2))
-                                                    _wf_block = _html_table(_wf_cells, _ncol2, cellpad=2,
-                                                                            cellstyle='vertical-align:top; text-align:center;')
+                                                    # ── WF MAP 합성: 개별 img를 PIL로 합쳐 단일 이미지로 (메일 첨부 10개 제한 대응) ──
+                                                    # 각 WF MAP(58×58)과 라벨을 하나의 그리드 이미지로 병합 → <img> 1개로 축소
+                                                    # WF MAP 데이터는 전부 유지, 메일 HTML = fwd HTML 동일
+                                                    try:
+                                                        from PIL import Image as _PILImg, ImageDraw as _PILDraw, ImageFont as _PILFont
+                                                        import io as _io
+                                                        _CELL_W, _CELL_H = 62, 74   # 셀: 이미지(58)+여백 / 이미지(58)+라벨(16)
+                                                        _ncol2 = max(1, -(-len(_wfmaps) // 2))
+                                                        _nrow2 = -(-len(_wfmaps) // _ncol2)
+                                                        _comp_w = _ncol2 * _CELL_W
+                                                        _comp_h = _nrow2 * _CELL_H
+                                                        _comp = _PILImg.new('RGB', (_comp_w, _comp_h), (255, 255, 255))
+                                                        _draw = _PILDraw.Draw(_comp)
+                                                        try:
+                                                            _font = _PILFont.truetype("arial.ttf", 9)
+                                                        except Exception:
+                                                            _font = _PILFont.load_default()
+                                                        for _wi, _wf in enumerate(_wfmaps):
+                                                            _lab, _b = _wf[0], _wf[1]
+                                                            _is_tgt = _wf[2] if len(_wf) > 2 else False
+                                                            _col = _wi % _ncol2
+                                                            _row = _wi // _ncol2
+                                                            _ox = _col * _CELL_W + 2
+                                                            _oy = _row * _CELL_H
+                                                            # WF MAP 이미지 붙이기
+                                                            _wf_bytes = base64.b64decode(_b)
+                                                            _wf_img = _PILImg.open(_io.BytesIO(_wf_bytes)).resize((58, 58))
+                                                            _comp.paste(_wf_img, (_ox, _oy))
+                                                            # 라벨 텍스트 (target은 파란색 볼드)
+                                                            _lcolor = (0, 51, 204) if _is_tgt else (85, 85, 85)
+                                                            _draw.text((_ox, _oy + 59), str(_lab), fill=_lcolor, font=_font)
+                                                        # 합성 이미지 → base64
+                                                        _buf = _io.BytesIO()
+                                                        _comp.save(_buf, format='PNG', optimize=True)
+                                                        _comp_b64 = base64.b64encode(_buf.getvalue()).decode('utf-8')
+                                                        _wf_block = (
+                                                            f'<img src="data:image/png;base64,{_comp_b64}" '
+                                                            f'width="{_comp_w}" height="{_comp_h}" '
+                                                            f'style="width:{_comp_w}px; height:{_comp_h}px; display:block; border:none;"/>')
+                                                    except Exception as _comp_err:
+                                                        print(f"[WARN] WF MAP 합성 실패 ({item}), 개별 이미지 유지: {_comp_err}")
+                                                        # fallback: 기존 개별 이미지 방식
+                                                        _wf_cells = []
+                                                        for _wf in _wfmaps:
+                                                            _lab, _b = _wf[0], _wf[1]
+                                                            _is_tgt = _wf[2] if len(_wf) > 2 else False
+                                                            _lab_style = ('font-size:8px; white-space:nowrap; '
+                                                                          + ('color:#0033cc; font-weight:bold;' if _is_tgt else 'color:#555;'))
+                                                            _wf_cells.append(
+                                                                f'<img src="data:image/png;base64,{_b}" width="58" height="58" '
+                                                                'style="width:58px; height:58px; display:block; margin:0 auto; border:none;"/>'
+                                                                f'<div style="{_lab_style}">{_lab}</div>')
+                                                        _ncol2 = max(1, -(-len(_wf_cells) // 2))
+                                                        _wf_block = _html_table(_wf_cells, _ncol2, cellpad=2,
+                                                                                cellstyle='vertical-align:top; text-align:center;')
                                             except Exception as _we:
                                                 print(f"[WARN] spec-out WF MAP 스킵 ({item}): {_we}")
                                         # 이상 항목명(헤더) → 그 밑에 Trend(좌) + WF MAP(우, 2행)
@@ -1673,97 +1720,19 @@ def main():
                             _mail_fh = None
                             try:
                                 html_code_final = html_content   # 생성된 HTML 코드 문자열
+
+                                # ── 메일 본문 인라인 이미지 수 확인 (참고 로그) ──
+                                # WF MAP 합성(PIL 병합)으로 이미지 수를 줄였으므로, 10개 미만을 기대.
+                                # 만약 여전히 초과하면 경고만 출력(WF MAP은 절대 제거하지 않음).
+                                import re as _re_mail
+                                _img_pattern = r'<img\s[^>]*src="data:image/[^"]*"[^>]*/?\s*>'
+                                _n_inline = len(_re_mail.findall(_img_pattern, html_code_final, _re_mail.DOTALL))
+                                _n_total = _n_inline + 1   # +1 = PPT 첨부
+                                if _n_total >= 10:
+                                    print(f"[WARN] 메일 첨부 합계 {_n_total}개 (본문 이미지 {_n_inline} + PPT 1) — 10개 제한 초과 가능")
+                                else:
+                                    print(f"[INFO] 메일 첨부 합계 {_n_total}개 (본문 이미지 {_n_inline} + PPT 1) — 제한 이내")
+
                                 # 수신 그룹(=메일링 xlsx의 시트명). config email_receiver가 리스트면 첫 항목 사용.
                                 email_receiver_now = (email_receiver[0]
-                                                      if isinstance(email_receiver, (list, tuple)) and email_receiver
-                                                      else email_receiver)
-                                title = f'[HOL] {vehicle} {target_lot_id} {target_step_merged} HOL AUTO REPORT'
-
-                                email_list = get_email_list(email_list_path, email_receiver_now)
-
-                                payload_content = {
-                                    "content": f'{html_code_final}',
-                                    "receiverList": email_list,
-                                    "senderMailAddress": f"{KNOXID}@samsung.com",
-                                    "statusCode": "SENT",
-                                    "title": f'{title}',
-                                }
-                                payload = {'mailSendString': f'{payload_content}'}
-
-                                _ppt_full = os.path.join(low_qual_ppt_save_path, final_ppt_file_name_DX)
-                                _mail_fh = open(_ppt_full, 'rb')
-                                files = [
-                                    ('file', (final_ppt_file_name_DX, _mail_fh, 'application/vnd.ms-powerpoint'))
-                                ]
-                                headers = {'x-dep-ticket': GLOBAL_CONFIG.get("TICKET")}
-
-                                response = requests.request(
-                                    "POST", GLOBAL_CONFIG.get("url"),
-                                    headers=headers, data=payload, files=files)
-                                _sc = getattr(response, 'status_code', None)
-                                if _sc == 200:
-                                    print_status("메일 발송", "ok",
-                                                 f"{target_lot_id}_{target_DC_step} 완료 (수신 {len(email_list)}명, HTTP {_sc})")
-                                else:
-                                    # 200이 아니면 상세 에러 내용을 터미널에 출력
-                                    try:
-                                        _body = response.text
-                                    except Exception:
-                                        _body = '(응답 본문 읽기 실패)'
-                                    print_status("메일 발송", "fail",
-                                                 f"{target_lot_id}_{target_DC_step} — HTTP {_sc}")
-                                    print(f"[ERROR] 메일 발송 응답 오류 (HTTP {_sc}) 상세: {_body}")
-                            except Exception as _me:
-                                print_status("메일 발송", "fail", f"{target_lot_id}_{target_DC_step}: {_me}")
-                            finally:
-                                try:
-                                    if _mail_fh is not None:
-                                        _mail_fh.close()
-                                except Exception:
-                                    pass
-                        else:
-                            print_status("메일 발송", "off", "use_email_send=False → 스킵")
-
-                        log_to_file(f"{search_key} Report 발행 완료", query_log)
-                        # 소요 시간 + 산출물(HTML/PPT) 용량 출력
-                        _elapsed = time.perf_counter() - _t_report_start
-
-                        def _mb(_p):
-                            try:
-                                return f"{os.path.getsize(_p) / 1024**2:.2f}MB" if os.path.exists(_p) else "N/A"
-                            except OSError:
-                                return "N/A"
-                        _html_mb = _mb(f'{html_save_path}{fname}')
-                        _ppt_mb = _mb(f'{low_qual_ppt_save_path}{final_ppt_file_name_DX}')
-                        print_status("Report 발행 완료", "ok",
-                                     f"{search_key} — 소요 {_elapsed:.1f}s, HTML {_html_mb}, PPT {_ppt_mb}")
-
-                    except Exception as e:
-                        print_status("Report 발행 실패", "fail", f"{search_key}: {e}")
-                        traceback.print_exc()
-                        log_to_file(f"{search_key} Report 발행 실패: {e}", error_log)
-                        continue
-
-                    finally:
-                        clear_temp_inside_run()
-                        clear_anomaly_inside_run()
-                        clear_run_temp_files()   # 랏 리포트 완료 후 RUN/TEMP 내부 파일 비우기(폴더 유지)
-                        gc.collect()
-
-            else:
-                print("[INFO] dc_done_list가 비어있습니다. Report 발행 대상 없음")
-
-        else:
-            print(f"[INFO] DB_Setting_mode = {DB_Setting_mode}, report_making = {report_making}")
-            print("[INFO] Report 미발행 모드")
-
-        conn.close()
-        shutdown_chart_pool()   # 병렬 렌더링 워커 풀 정리 (atexit에도 등록되어 있으나 명시 종료)
-        print(f'[INFO] ============== {vehicle} 전체 프로세스 완료 ==============')
-
-    else:
-        print("[ERROR] reformatter 검증 실패. 프로그램 종료.")
-
-
-if __name__ == "__main__":
-    main()
+                                                      if isinstance(email_receiver, (list, tuple)

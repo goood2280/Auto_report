@@ -1315,6 +1315,356 @@ def _print_nl_mappings(res, cache_dir='RUN/AI'):
     print(f"===== 유효 {res['n_ok']}개 / 전체 {len(res['mappings'])}개  (매핑 파일: {_nl_cache_path(cache_dir)}) =====")
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  NL → JSON 규칙 변환 / JSON 기반 판정 엔진 (기존 [RULE] DSL과 병행)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _nl_json_cache_path(cache_dir='RUN/AI'):
+    import os
+    return os.path.join(cache_dir, 'nl_rules_json.json')
+
+
+def _load_nl_json_cache(cache_dir='RUN/AI'):
+    import json
+    try:
+        with open(_nl_json_cache_path(cache_dir), encoding='utf-8') as f:
+            d = json.load(f)
+        if isinstance(d, list):
+            return d
+    except Exception:
+        pass
+    return []
+
+
+def _save_nl_json_cache(rules, cache_dir='RUN/AI'):
+    import json, os
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(_nl_json_cache_path(cache_dir), 'w', encoding='utf-8') as f:
+            json.dump(rules, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[NL-JSON] 캐시 저장 실패: {e}")
+
+
+def convert_nl_to_json(nl_text, llm_fn=None, cache_dir='RUN/AI', use_cache=True):
+    """자연어 규칙(한 줄씩)을 JSON 규칙 배열로 변환.
+
+    반환: list[dict]  — 각 원소 {items, condition, comment}.
+    AI 가용 시 LLM으로, 불가 시 키워드 fallback으로 변환한다.
+    캐시: RUN/AI/nl_rules_json.json (동일 입력→동일 결과 보장).
+    """
+    import re, json
+
+    if not (nl_text or '').strip():
+        return []
+
+    # ── 캐시 확인 ──
+    if use_cache:
+        cached = _load_nl_json_cache(cache_dir)
+        if cached:
+            return cached
+
+    lines = [l.strip() for l in nl_text.splitlines() if l.strip()]
+    if not lines:
+        return []
+
+    # ── AI 변환 시도 ──
+    if llm_fn:
+        try:
+            rules = _nl_json_ai(lines, llm_fn)
+            if rules:
+                _save_nl_json_cache(rules, cache_dir)
+                return rules
+        except Exception as e:
+            print(f"[NL-JSON] AI 변환 실패, 키워드 fallback: {e}")
+
+    # ── 키워드 fallback ──
+    rules = []
+    for line in lines:
+        r = _nl_json_keyword_parse(line)
+        if r:
+            rules.append(r)
+    if rules:
+        _save_nl_json_cache(rules, cache_dir)
+    return rules
+
+
+def _nl_json_ai(lines, llm_fn):
+    """LLM에게 자연어 규칙을 JSON 배열로 변환 요청."""
+    import json
+    _system = (
+        "당신은 반도체 이상 탐지 규칙 변환기입니다. 아래 자연어 규칙 각각을 JSON 객체로 변환하세요.\n"
+        "출력은 JSON 배열만(설명문/코드펜스 금지). 순서를 유지하세요.\n\n"
+        "각 JSON 객체 형식:\n"
+        "{\n"
+        '  "items": ["ITEM_A", "ITEM_B"],\n'
+        '  "condition": {\n'
+        '    "grade": ">=abnormal",\n'
+        '    "logic": "any",\n'
+        '    "median": "<=4",\n'
+        '    "stddev": "<0.5",\n'
+        '    "disp_ratio": ">2.0",\n'
+        '    "spec_out": ">=3"\n'
+        "  },\n"
+        '  "comment": "불량모드명"\n'
+        "}\n\n"
+        "규칙:\n"
+        '- items: 자연어에서 []로 감싼 항목명 배열\n'
+        '- condition.grade: ">=abnormal"(이상 수준 이상), ">=caution"(주의 수준 이상), ">=info"(참고 이상)\n'
+        '- condition.logic: "all"(모두 만족), "any"(하나만, 기본값)\n'
+        '- condition.median, stddev, disp_ratio, spec_out: 비교 연산자+숫자\n'
+        '- comment: 자연어에서 ""로 감싼 코멘트, 없으면 규칙 요약\n'
+        "- 조건에 해당하지 않는 필드는 생략\n"
+    )
+    _user = "\n".join(f"- {l}" for l in lines)
+    raw = _strip_code_fences(llm_fn(_system, _user))
+    parsed = json.loads(raw)
+    if isinstance(parsed, list):
+        return [r for r in parsed if isinstance(r, dict) and 'items' in r]
+    return []
+
+
+def _nl_json_keyword_parse(line):
+    """키워드 기반 자연어 한 줄 → JSON 규칙 dict 파싱."""
+    import re
+
+    # items: [] 안의 항목
+    items = re.findall(r'\[([^\]]+)\]', line)
+    if not items:
+        return None
+    item_list = []
+    for it in items:
+        item_list.extend([x.strip() for x in it.split(',') if x.strip()])
+
+    # comment: "" 안의 코멘트
+    cm = re.findall(r'"([^"]+)"', line)
+    comment = cm[0] if cm else ''
+
+    cond = {}
+    low = line.lower().replace(' ', '')
+
+    # grade
+    if '이상수준' in low or '이상' in line:
+        cond['grade'] = '>=abnormal'
+    elif '주의수준' in low or '주의' in line:
+        cond['grade'] = '>=caution'
+
+    # logic
+    if '모두' in line or '둘다' in line or '둘 다' in line or '전부' in line:
+        cond['logic'] = 'all'
+    else:
+        cond['logic'] = 'any'
+
+    # median
+    m = re.search(r'[Mm]edian\s*(?:이|가)?\s*([\d.]+)\s*이하', line)
+    if m:
+        cond['median'] = f'<={m.group(1)}'
+    else:
+        m = re.search(r'[Mm]edian\s*(?:이|가)?\s*([\d.]+)\s*이상', line)
+        if m:
+            cond['median'] = f'>={m.group(1)}'
+
+    # stddev
+    m = re.search(r'[Ss]tddev\s*(?:가|이)?\s*([\d.]+)\s*이하', line)
+    if m:
+        cond['stddev'] = f'<={m.group(1)}'
+    else:
+        m = re.search(r'[Ss]tddev\s*(?:가|이)?\s*([\d.]+)\s*이상', line)
+        if m:
+            cond['stddev'] = f'>={m.group(1)}'
+
+    # disp_ratio / 산포
+    m = re.search(r'산포\s*(?:가|이)?\s*([\d.]+)\s*배', line)
+    if m:
+        cond['disp_ratio'] = f'>={m.group(1)}'
+    else:
+        m = re.search(r'disp_ratio\s*(>=|<=|>|<)\s*([\d.]+)', line, re.I)
+        if m:
+            cond['disp_ratio'] = f'{m.group(1)}{m.group(2)}'
+
+    # spec_out
+    m = re.search(r'spec.?out\s*(?:이|가)?\s*([\d]+)\s*(?:개|이상)', line, re.I)
+    if m:
+        cond['spec_out'] = f'>={m.group(1)}'
+
+    if not cond.get('grade'):
+        cond['grade'] = '>=caution'
+
+    return {'items': item_list, 'condition': cond, 'comment': comment}
+
+
+def evaluate_json_rules(json_rules, item_ctx, disp_fn=None):
+    """JSON 규칙 배열을 _item_ctx와 대조하여 findings + rule_trace 반환.
+
+    Parameters
+    ----------
+    json_rules : list[dict]  — convert_nl_to_json 결과
+    item_ctx   : dict        — {item_key: {level, disp, rep_median, rep_std, spec_out_pt, ...}}
+    disp_fn    : callable|None — 표시명 변환 함수 (없으면 원본)
+
+    Returns
+    -------
+    (findings: list[dict], rule_trace: list[dict])
+    """
+    import re
+
+    _disp = disp_fn or (lambda x: x)
+    _grade_map = {'abnormal': 2, 'caution': 1, 'info': 0}
+    findings = []
+    rule_trace = []
+
+    def _parse_cmp(expr):
+        """비교 표현식 '>=2.0' → (op_fn, value)."""
+        if not expr:
+            return None
+        m = re.match(r'(>=|<=|>|<|==)\s*([\d.]+)', str(expr))
+        if not m:
+            return None
+        op_str, val = m.group(1), float(m.group(2))
+        ops = {'>=': lambda x: x >= val, '<=': lambda x: x <= val,
+               '>': lambda x: x > val, '<': lambda x: x < val,
+               '==': lambda x: x == val}
+        return ops.get(op_str)
+
+    def _resolve_item(name, ctx):
+        """항목명 → _item_ctx 키 매칭(정확 → 대소문자무시 → 부분매칭)."""
+        if name in ctx:
+            return name
+        for k in ctx:
+            if k.lower() == name.lower():
+                return k
+        for k in ctx:
+            if name.lower() in k.lower() or k.lower() in name.lower():
+                return k
+        return None
+
+    def _check_item(item_key, cond, ctx):
+        """하나의 항목이 조건을 충족하는지 검사. 충족=True."""
+        c = ctx.get(item_key)
+        if not c:
+            return False
+
+        # grade 조건
+        grade_expr = cond.get('grade')
+        if grade_expr:
+            m = re.match(r'(>=|<=|>|<|==)\s*(\w+)', str(grade_expr))
+            if m:
+                op_str = m.group(1)
+                grade_name = m.group(2).lower()
+                threshold = _grade_map.get(grade_name, 0)
+                level = c.get('level', 0)
+                ops = {'>=': lambda x, t: x >= t, '<=': lambda x, t: x <= t,
+                       '>': lambda x, t: x > t, '<': lambda x, t: x < t,
+                       '==': lambda x, t: x == t}
+                fn = ops.get(op_str)
+                if fn and not fn(level, threshold):
+                    return False
+
+        # numeric 조건들
+        num_fields = {
+            'median': 'rep_median',
+            'stddev': 'rep_std',
+            'disp_ratio': 'disp',
+            'spec_out': 'spec_out_pt',
+        }
+        for cond_key, ctx_key in num_fields.items():
+            expr = cond.get(cond_key)
+            if not expr:
+                continue
+            fn = _parse_cmp(expr)
+            if not fn:
+                continue
+            val = c.get(ctx_key)
+            if val is None:
+                return False
+            try:
+                if not fn(float(val)):
+                    return False
+            except (TypeError, ValueError):
+                return False
+
+        return True
+
+    for ri, rule in enumerate(json_rules):
+        try:
+            items_raw = rule.get('items', [])
+            cond = rule.get('condition', {})
+            comment = rule.get('comment', '')
+            logic = cond.get('logic', 'any')
+
+            resolved = []
+            for name in items_raw:
+                rk = _resolve_item(name, item_ctx)
+                if rk:
+                    resolved.append((name, rk))
+
+            if not resolved:
+                rule_trace.append({
+                    'kind': 'JSON_RULE', 'name': f"JSON#{ri+1} {comment or items_raw}",
+                    'cond': str(cond), 'matched': False,
+                    'result': '항목 미발견', 'note': f"items={items_raw}"
+                })
+                continue
+
+            results = [(name, rk, _check_item(rk, cond, item_ctx)) for name, rk in resolved]
+
+            if logic == 'all':
+                matched = all(ok for _, _, ok in results)
+            else:
+                matched = any(ok for _, _, ok in results)
+
+            matched_items = [name for name, _, ok in results if ok]
+            detail_parts = []
+            for name, rk, ok in results:
+                c = item_ctx.get(rk, {})
+                lbl = {2: '이상', 1: '주의', 0: '참고'}.get(c.get('level', 0), '?')
+                parts = [f"등급={lbl}"]
+                if c.get('rep_median') is not None:
+                    parts.append(f"median={float(c['rep_median']):.4g}")
+                if c.get('rep_std') is not None:
+                    parts.append(f"stddev={float(c['rep_std']):.4g}")
+                if c.get('disp'):
+                    parts.append(f"산포={float(c['disp']):.2f}배")
+                detail_parts.append(f"{_disp(rk)}({'O' if ok else 'X'}): {', '.join(parts)}")
+
+            _rname = f"JSON#{ri+1} {comment}" if comment else f"JSON#{ri+1}"
+            if matched:
+                _note = comment or ', '.join(matched_items)
+                findings.append(_finding(
+                    'CRITICAL', 'DEFECT_MODE',
+                    matched_items[0] if matched_items else (items_raw[0] if items_raw else ''),
+                    f"[불량 모드] {_note}",
+                    ' | '.join(detail_parts),
+                    display_name=_disp(matched_items[0]) if matched_items else ''))
+
+            rule_trace.append({
+                'kind': 'JSON_RULE', 'name': _rname,
+                'cond': str(cond),
+                'matched': matched,
+                'result': f"매칭 → [불량 모드] {comment}" if matched else '조건 미충족',
+                'note': ' | '.join(detail_parts)
+            })
+        except Exception:
+            continue
+
+    return findings, rule_trace
+
+
+def compile_nl_to_json(knowledge_text, llm_fn=None, cache_dir='RUN/AI'):
+    """NL_RULES(자연어 규칙) → JSON 규칙 컴파일. 결과 list[dict] 반환(없으면 []).
+
+    compile_nl_rules의 JSON 병행 버전. Main.py에서 호출하여
+    analyze_commonality의 json_rules 인자로 전달한다.
+    """
+    nl = _extract_nl_rules(knowledge_text)
+    if not nl:
+        return []
+    rules = convert_nl_to_json(nl, llm_fn, cache_dir=cache_dir, use_cache=True)
+    if rules:
+        print(f"[NL→JSON] 자연어 → JSON 규칙 {len(rules)}개 변환 완료 (캐시: {_nl_json_cache_path(cache_dir)})")
+    return rules
+
+
 def preview_nl_rules(md_path, llm_fn=None, cache_dir='RUN/AI'):
     """자연어 규칙을 변환해 원문→when 매핑을 출력하고 캐시를 갱신(MD·발행 변경 없음).
     엔지니어가 '무엇으로 변환되는지' 미리 확인·캐시 정비용."""
@@ -1376,7 +1726,8 @@ def _mark_nl_converted(md, mappings):
 
 def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         main_vehicle=None, config=None, reformatter=None,
-                        knowledge_text="", item_stats_out=None, rule_trace_out=None):
+                        knowledge_text="", item_stats_out=None, rule_trace_out=None,
+                        json_rules=None):
     """코드 기반 다중 detector로 이상/commonality Finding 리스트를 산출.
 
     AI 사용 여부와 무관하게 항상 코드로 동작합니다. 각 detector는 독립적으로
@@ -2672,6 +3023,17 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             if _suppress_disp_items:
                 findings[:] = [f for f in findings
                                if not (f.get('type') == 'DISPERSION' and f.get('item') in _suppress_disp_items)]
+
+            # ── JSON 규칙 평가 (NL→JSON 경로) ──
+            if json_rules:
+                try:
+                    _jr_findings, _jr_trace = evaluate_json_rules(json_rules, _item_ctx, disp_fn=_disp)
+                    findings.extend(_jr_findings)
+                    _rule_trace.extend(_jr_trace)
+                    if _jr_findings:
+                        print(f"[JSON RULE] {len(_jr_findings)}개 불량 모드 매칭")
+                except Exception as _je:
+                    print(f"[WARN] JSON 규칙 평가 실패: {_je}")
     except Exception as _ke:
         print(f"[WARN] 지식 규칙/불량모드 평가 실패: {_ke}")
 
@@ -2819,179 +3181,4 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
         except Exception:
             _stats_block = ''
 
-    # few-shot 판정 예시(RUN/EXAMPLE/*.md, 선택) — 과거 '입력→확정 판정' 사례
-    def _load_examples():
-        try:
-            import os, glob
-            _dir = (getattr(config, 'ai_examples_dir', None) if config else None) \
-                or os.path.join('RUN', 'EXAMPLE')
-            if not os.path.isdir(_dir):
-                return ''
-            _maxn = int(getattr(config, 'ai_examples_max', 5) or 5) if config else 5
-            _maxc = int(getattr(config, 'ai_examples_max_chars', 6000) or 6000) if config else 6000
-            parts, total = [], 0
-            for fp in sorted(glob.glob(os.path.join(_dir, '*.md'))):
-                if os.path.basename(fp).startswith('_'):   # _TEMPLATE 등 스킵
-                    continue
-                if len(parts) >= _maxn:
-                    break
-                try:
-                    with open(fp, encoding='utf-8') as _ef:
-                        txt = _ef.read().strip()
-                except Exception:
-                    continue
-                if not txt or total + len(txt) > _maxc:
-                    continue
-                parts.append(f"--- 예시: {os.path.basename(fp)} ---\n{txt}")
-                total += len(txt)
-            return '\n\n'.join(parts)
-        except Exception:
-            return ''
-    _examples = _load_examples()
-    _examples_block = (
-        "\n\n[판정 예시] 과거 실제 사례(관찰 입력 → 후행 확인된 판정)입니다. 입력이 유사하면 "
-        "같은 판정을 우선 적용하세요. 예시가 판정표와 충돌하면 예시(실사례)가 우선합니다.\n"
-        + _examples) if _examples else ''
-
-    # ── AI 입력/출력 덤프 ──
-    #   LLM에 실제로 보낸 system/user 프롬프트와 응답을 RUN/AI에 남긴다(삭제하지 않음 — 감사/재현용).
-    #   (측정 raw/reformatter는 AI에 전달하지 않음 — findings 요약 + 지식베이스 텍스트만)
-    _io = []
-
-    def _stage(name, system, user):
-        out = llm_fn(system, user)
-        _io.append({"stage": name, "system": system, "user": user, "output": out})
-        return out
-
-    def _dump_ai_input():
-        try:
-            import os
-            _outdir = os.path.join('RUN', 'AI')   # AI 인풋파일 보관 폴더(사이클 종료 후에도 유지)
-            os.makedirs(_outdir, exist_ok=True)
-            _safe = str(target_lot_id).replace('/', '_').replace('\\', '_') or 'lot'
-            _base = os.path.join(_outdir, f"ai_input_{_safe}")
-            with open(_base + '.json', 'w', encoding='utf-8') as _jf:
-                json.dump({"target_lot_id": target_lot_id,
-                           "findings": [_slim(f) for f in findings],
-                           "stages": _io}, _jf, ensure_ascii=False, indent=2, default=str)
-            _lines = [f"# AI 입력/출력 덤프 — lot {target_lot_id}", "",
-                      "> `anomaly_engine.interpret_with_ai`가 LLM에 실제로 보낸 system/user 프롬프트와 응답.",
-                      "> 측정 raw 데이터/reformatter는 전달하지 않고, 코드 findings 요약 + ANOMALY_KNOWLEDGE.md 텍스트만 넣는다.",
-                      "", "## 입력 findings (JSON)", "", "```json", fjson, "```", ""]
-            for _i, _s in enumerate(_io, 1):
-                _lines += [f"## [{_i}] {_s['stage']}", "", "### system (프롬프트 + 지식베이스)",
-                           "```", str(_s['system']), "```", "",
-                           "### user (직전 단계 산출/데이터)", "```", str(_s['user']), "```", "",
-                           "### output (LLM 응답)", "```", str(_s['output']), "```", ""]
-            with open(_base + '.md', 'w', encoding='utf-8') as _mf:
-                _mf.write("\n".join(_lines))
-            print(f"[anomaly] AI 입력 덤프 저장: {_base}.md / .json ({len(_io)} stage)")
-        except Exception as _de:
-            print(f"[WARN] AI 입력 덤프 저장 실패: {_de}")
-
-    # ── 호출 모드: 'multi'(기본, Triage→Root-cause→Final 3회) / 'single'(Final 1회) ──
-    #   single은 비용/지연 1/3, 단계간 오류 전파 없음. 모델이 약해 그룹핑 품질이 떨어지면 multi.
-    _mode = (str(getattr(config, 'ai_stage_mode', 'multi') or 'multi').lower()
-             if config else 'multi')
-    try:
-        triage = rootcause = ''
-        if _mode != 'single':
-            # ── 1단계: Triage / 현상 그룹핑 ──
-            triage = _stage(
-                "① Triage",
-                "당신은 반도체 TEG 데이터 분석가입니다. 코드가 산출한 이상 finding 목록을 "
-                "현상(phenomenon) 단위로 묶고 중요도 순으로 3~6개로 정리하세요. "
-                "각 finding에는 item(원 이름)·display_name(후처리 표시명)·cat2(항목 카테고리)가 있습니다. "
-                "**그룹핑 기준: cat2가 같은 항목은 하나의 현상으로 묶고**, 현상 머리에 `[CAT2]`를 표기하세요 "
-                "(cat2가 없는 항목은 항목명 유사성으로 묶음). 항목명은 display_name(표시명)으로 적되 "
-                "원 이름이 다르면 괄호로 병기하세요. "
-                "PCHK(is_pchk=true, 측정 의심)가 있으면 최상단에 별도 표기하고, "
-                "meas_overlap_examples·spec_out_positions의 wafer·좌표·PGM(pt)를 근거로 "
-                "**어느 wafer/PGM(pt)에서 어떤 항목과 동일 shot으로 겹치는지** 명시하세요. "
-                "각 현상에는 wafer별 이상 pt 수(detail)와 함께 위치 요약(특이맵 패턴 spec_out_pattern, "
-                "spec_out_zone: Center/Middle/Edge 분포, PGM(pt) 목록)을 덧붙이고, "
-                "wafer간 반복 코멘트(spec_out_commonality — 동일 shot 반복/유사 위치 반복)가 있으면 "
-                "**그대로 인용**하세요(반복 위치는 systematic 가능성 신호). "
-                "[항목 통계]가 주어지면 target median의 모집단 내 백분위(median_pctile)·산포배수 등 "
-                "특기할 수치를 현상 서술에 활용하세요. 간결한 불릿으로. "
-                "**주어진 finding·[항목 통계]에 적힌 사실(항목·spec-out·이탈 수치·위치·패턴·PGM(pt))만 사용**하고, "
-                "원인·해석·반도체 공정 지식을 추가하지 마세요(요약/그룹핑만).",
-                f"대상 lot: {target_lot_id}\n[findings]\n{fjson}{_stats_block}")
-
-            # ── 2단계: Root-cause (지식베이스 참고) ──
-            rootcause = _stage(
-                "② Root-cause",
-                "당신은 수율/공정 엔지니어입니다. 아래 [지식베이스]에 **명시적으로 적힌 내용만** "
-                "근거로 각 현상을 연결하세요. **[지식베이스]에 적혀있지 않은 원인·반도체 공정 지식"
-                "(예: '산화막 두께', '식각 균일성' 등)은 절대 추측하거나 지어내지 마세요.** "
-                "[지식베이스]에 해당 근거가 없으면 그 현상은 반드시 '지식베이스 미기재 — 추가 분석 필요'"
-                "라고만 적고, 임의의 원인을 붙이지 마세요. 데이터(finding)에서 관찰된 사실과 "
-                "지식베이스에 적힌 문장 외에는 기술하지 마세요.\n"
-                f"[지식베이스]\n{knowledge_text or '(지식베이스 없음)'}",
-                f"[현상 정리]\n{triage}")
-
-        # ── 최종 판단 + 불량 모드 판정 — 구조화 JSON 출력 → 코드 검증·HTML 조립 ──
-        #   spec-out Index 조합을 [지식베이스]의 '불량 모드 판정표'와 대조하여 판정.
-        #   여러 모드가 동시 매칭되면 표에서 더 위(번호 작은) 모드를 택한다.
-        #   LINK/COMMENT는 LLM이 아니라 코드가 판정표에서 첨부(할루시네이션 차단, LINK는 선택).
-        _final_sys = (
-            "당신은 책임 엔지니어입니다. 아래 현상/근거를 종합해 최종 판단을 내리되, "
-            "**[지식베이스]와 관찰된 데이터(finding·항목 통계)에 있는 내용만** 사용하세요. "
-            "**[지식베이스]에 적혀있지 않은 반도체 공정 지식·원인·조치(예: '산화막 두께', "
-            "'식각 균일성' 등 md에 없는 도메인 지식)를 임의로 판단하거나 추가하지 마세요.** "
-            "[지식베이스]의 '판정 규칙'(ANOMALY_RULES 마커 사이의 [RULE] 블록들)을 이용해 "
-            "spec-out Index 조합으로부터 불량 모드를 판정하세요(각 [RULE] **분기의 note 문구가 곧 불량 모드명**). "
-            "**[RULE]에 정의된 note 문구 외의 불량 모드명을 새로 만들지 마세요 — 매칭되는 규칙이 없으면 "
-            "defect_mode는 반드시 null**로 출력합니다(임의 모드명 생성 금지). "
-            "Index명은 원 이름과 표시명 어느 쪽으로 적혀 있어도 같은 항목으로 인식하고, [RULE]의 "
-            "CAT2 조건은 finding의 cat2와 대조합니다. 규칙은 위에서부터 우선순위가 높고 여러 모드가 동시 매칭되면 "
-            "**가장 위(먼저 정의된)** 모드 하나로 판정합니다(한 [RULE] 안에서는 먼저 만족한 분기 하나). "
-            "측정 의심(PCHK 동일 shot 겹침)이 있으면 [지식베이스]의 '측정이상 추정 규칙'을 적용해 "
-            "겹친 wafer·좌표·PGM(pt)를 명시하고 불량 단정 전 재측정 권고를 우선하며, "
-            "해당 site를 제외한 나머지 spec-out만으로 불량 모드를 판정하세요. "
-            "항목명은 표시명(display_name) 기준으로 서술합니다. "
-            "**출력은 아래 형식의 JSON 객체 하나만**(코드펜스·설명문·HTML 금지): "
-            '{"defect_mode": "<매칭된 [RULE] 분기의 note 문구(=불량 모드) 그대로. 매칭 없으면 null>", '
-            '"basis_items": ["<근거가 된 Index 표시명>", ...], '
-            '"summary": "<종합 판단 1~2문장 — finding·지식베이스에 근거한 판단만>", '
-            '"phenomenon": "<핵심 현상 — 관찰된 사실만. 어느 Index가 어느 wafer/특이맵 패턴·PGM(pt)에서 어떻게 spec-out/이탈했는지. 원인 추측 금지>", '
-            '"actions": "<권고 조치 — 지식베이스·RULE의 NOTE에 명시된 것만. 없으면 \'지식베이스 미기재\'>", '
-            '"meas_suspect": "<측정이상 추정 서술(겹친 wafer·좌표·PGM(pt) 명시) 또는 null>"} '
-            "URL/링크는 출력하지 마세요 — 코드가 매칭 RULE의 LINK를 자동 첨부합니다(LINK 없는 모드도 있음)."
-            f"{_examples_block}\n"
-            f"[지식베이스]\n{knowledge_text or '(지식베이스 없음)'}")
-        _spec_line = f"[spec-out Index 조합]\n{', '.join(spec_items) if spec_items else '(없음)'}"
-        if _mode == 'single':
-            _final_sys += ("\n(단일 호출 모드: [현상]/[근거] 대신 [findings] JSON이 직접 주어집니다. "
-                           "cat2가 같은 finding을 스스로 현상 단위로 묶어 판단하고, PCHK(is_pchk)가 "
-                           "있으면 meas_overlap_*로 측정이상 추정을 먼저 검토하세요.)")
-            _final_user = (f"대상 lot: {target_lot_id}\n[findings]\n{fjson}\n\n"
-                           f"{_spec_line}{_stats_block}")
-            final = _stage("① Final(단일 호출)", _final_sys, _final_user)
-        else:
-            _final_user = f"{_spec_line}\n\n[현상]\n{triage}\n\n[근거]\n{rootcause}{_stats_block}"
-            final = _stage("③ Final", _final_sys, _final_user)
-
-        # 응답이 JSON 객체가 아니면 같은 입력으로 1회 재시도(형식 지시 강화) — 그래도
-        # 실패하면 _assemble_final_html이 텍스트/HTML 폴백으로 처리(하위호환).
-        if _extract_json_obj(final) is None:
-            final = _stage(
-                "Final(JSON 재시도)",
-                "직전 응답이 JSON 객체 형식이 아니었습니다. 다른 텍스트/코드펜스 없이 "
-                "반드시 JSON 객체 하나만 출력하세요.\n" + _final_sys, _final_user)
-
-        body = _assemble_final_html(final, _parse_defect_modes(knowledge_text))
-        note = ('<div style="font-size:11px; color:#9aa0a6; font-style:italic; margin:2px 0 4px;">'
-                '※ 아래 내용은 AI가 자동 생성한 참고용 요약입니다. 보조 자료로만 활용하세요.</div>')
-        # 본문은 검정 글씨 + 글머리 점 제거(list-style:none)
-        return note + (
-            '<div class="ai-interp" style="color:#1a1a1a; font-size:13px;">'
-            '<style>.ai-interp ul{list-style:none; padding-left:0; margin:4px 0;} '
-            '.ai-interp li{margin-bottom:4px;}</style>'
-            f'{body}</div>')
-    except Exception as e:
-        print(f"[anomaly] AI 다단계 해석 실패(코드 분석으로 대체): {e}")
-        return None
-    finally:
-        # 성공/실패와 무관하게 지금까지 조립된 AI 입력/출력을 남긴다.
-        _dump_ai_input()
+    # few-shot 판정 예시(RUN/EXAMPLE/*.md, 선택) — 과거 '입력→확정 판정

@@ -2392,7 +2392,7 @@ def _render_item_charts(task):
                                            w_grp[map_y].astype(float).values, _shot_px, _shot_py,
                                            values=w_grp[item_name].astype(float).values,
                                            cmap=_wfmap_cmap(direction), norm=wfmap_norm)
-                    _add_wafer_circle(ax, _circ_ppt, lw=0.5)   # 배경 wafer 원
+                    _add_wafer_circle(ax, _circ_ppt, color='#000000', lw=1.0)   # 배경 wafer 원 (HTML과 동일)
                 ax.set_facecolor('white')
                 # 마지막(맨 아래) PGM 행에만 wafer 번호 표기
                 if r == grid_rows - 1:
@@ -2518,27 +2518,15 @@ def _render_item_charts(task):
                     veh_other = tdf[~tdf.index.isin(tgt_idx)]; wv = tdf.iloc[0:0]
                 # (배경) 타 root의 main-vehicle lot — root_lot_id 그룹별 색·모양, 범례는 1개로 통합
                 if len(veh_other) > 0:
-                    _bg_labeled = False
-                    if _root_col:
-                        for _rt, _g in veh_other.groupby(veh_other[_root_col].astype(str)):
-                            _cc, _mk = root_style.get(str(_rt), (C_NEUTRAL, 'o'))
-                            _lbl = None
-                            if not _bg_labeled:
-                                _lbl = '타 lot (root별 색/모양)'; _bg_labeled = True
-                            ax.scatter(_g['tkout_time'], _g[item_name], s=10, alpha=0.5,
-                                       color=_cc, marker=_mk, label=_lbl,
-                                       edgecolors='black', linewidths=0.3, zorder=2)
-                    else:
-                        ax.scatter(veh_other['tkout_time'], veh_other[item_name], s=10, alpha=0.5,
-                                   color=C_NEUTRAL, label=str(main_vehicle),
-                                   edgecolors='black', linewidths=0.3, zorder=2)
+                    ax.scatter(veh_other['tkout_time'], veh_other[item_name], s=10, alpha=0.5,
+                               color=C_VEHICLE, label=str(main_vehicle),
+                               edgecolors='black', linewidths=0.3, zorder=2)
                 if len(wv) > 0:
                     # with_vehicle은 mask(=실제 vehicle 명)별로 분리하여 각각 다른 색 + 개별 범례
                     for _wi, _wv_name in enumerate(sorted(wv['mask'].dropna().unique()) if has_mask else []):
                         _wv_grp = wv[wv['mask'] == _wv_name]
                         if len(_wv_grp) == 0: continue
-                        _wv_color = WV_PALETTE[_wi % len(WV_PALETTE)]
-                        ax.scatter(_wv_grp['tkout_time'], _wv_grp[item_name], s=10, alpha=0.5, color=_wv_color, label=str(_wv_name), edgecolors='black', linewidths=0.3, zorder=3)
+                        ax.scatter(_wv_grp['tkout_time'], _wv_grp[item_name], s=10, alpha=0.5, color=C_WV, label=str(_wv_name), edgecolors='black', linewidths=0.3, zorder=3)
                 if len(tgt) > 0:
                     _report_lot = str(target_lot_id)
                     # 리포트 root 그룹의 색·모양(형제 lot에 사용)
@@ -3896,3 +3884,4 @@ def wipdata_query():
     except Exception as e:
         print(f"wipdata_query 에러가 발생했습니다: {e}")
         traceback.print_exc()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
