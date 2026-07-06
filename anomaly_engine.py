@@ -1015,57 +1015,21 @@ def _strip_code_fences(text):
 def compile_nl_rules(knowledge_text, llm_fn, cache_dir='RUN/AI'):
     """NL_RULES(자연어 규칙) → [RULE] 텍스트 컴파일. 컴파일 결과 텍스트 반환(없으면 '').
 
-    구조 = 'LLM 1회 생성 → 코드(결정론) 검증 → 실패 시 오류 피드백 재시도 1회 → 유효 블록만 적용'.
-    다단계 AI(의도 분해/항목 매핑/조합을 별도 호출)로 나누지 않는 이유: 변환 대상 DSL이 작고
-    검증기가 코드로 존재하므로, 생성-검증 루프가 다단계 분해보다 단순하고 오류 전파가 없다
-    (검증 실패 시 정확한 오류 문구가 재시도 프롬프트로 들어가 자가 수정됨).
-    캐시(RUN/AI/nl_rules_compiled.json)로 같은 자연어 원문엔 LLM을 다시 호출하지 않는다.
+    문구별 캐시(RUN/AI/nl_rules_map.json)로 '같은 문구 → 항상 같은 when 코드'를 보장한다:
+    캐시에 있는 문구는 AI 호출 없이 매핑대로, 새 문구만 AI(연결 시)/키워드 fallback으로 변환·저장.
+    LLM 미연결이어도 키워드 fallback으로 변환되므로 AI-optional이 유지된다(발행 시 바로 적용).
     """
-    import hashlib
-    import json as _json
-    import os
-    from datetime import datetime as _dt
-
     nl = _extract_nl_rules(knowledge_text)
     if not nl:
         return ''
-    src_sha = hashlib.sha256(nl.encode('utf-8')).hexdigest()
-    cache_path = os.path.join(cache_dir, 'nl_rules_compiled.json')
-
-    # ── 캐시 히트: 자연어 원문이 그대로면 LLM 호출 없이 이전 컴파일 결과 재사용 ──
-    try:
-        with open(cache_path, encoding='utf-8') as _cf:
-            _c = _json.load(_cf)
-        if _c.get('source_sha') == src_sha and _c.get('compiled'):
-            print(f"[NL RULES] 캐시 사용({_c.get('n_rules', '?')}개 규칙) — 자연어 규칙 변경 없음")
-            return _c['compiled']
-    except Exception:
-        pass
-
-    if llm_fn is None:
-        print("[WARN] NL RULES: 자연어 규칙이 있으나 LLM 미연결·캐시 없음 → 이번 실행 미적용(수기 [RULE]만 동작)")
+    res = convert_nl_rules(nl, llm_fn, cache_dir=cache_dir, use_cache=True)
+    if res['n_ok'] == 0 or not res['compiled'].strip():
+        print("[NL RULES] 유효한 [RULE] 변환 결과 없음 → 미적용(변환불가 규칙은 수기 [RULE] 권장)")
         return ''
-
-    compiled, n, errs = _nl_ai_compile(nl, llm_fn)
-    if errs:
-        _c2, _n2, _dropped = _keep_valid_rule_blocks(compiled)
-        compiled, n = _c2, _n2
-        print(f"[WARN] NL RULES: 일부 규칙 변환 실패 → 유효 {n}개만 적용, {_dropped}개 제외 ({'; '.join(errs[:3])})")
-    if n == 0 or not compiled.strip():
-        print("[WARN] NL RULES: 유효한 [RULE] 변환 결과 없음 → 미적용")
-        return ''
-
-    try:
-        os.makedirs(cache_dir, exist_ok=True)
-        with open(cache_path, 'w', encoding='utf-8') as _cf:
-            _json.dump({'source_sha': src_sha, 'source_nl': nl, 'compiled': compiled,
-                        'n_rules': n, 'errors': errs,
-                        'generated': _dt.now().strftime('%Y-%m-%d %H:%M:%S')},
-                       _cf, ensure_ascii=False, indent=2)
-    except Exception as _we:
-        print(f"[WARN] NL RULES 캐시 저장 실패: {_we}")
-    print(f"[NL RULES] 자연어 규칙 → [RULE] {n}개 컴파일 완료 (검증 통과, 캐시: {cache_path})")
-    return compiled
+    s = res['stats']
+    print(f"[NL RULES] 자연어 → [RULE] {res['n_ok']}개 적용 "
+          f"(AI {s['ai']} · 키워드 {s['keyword']} · 캐시 {s['cache']}, 매핑: {_nl_cache_path(cache_dir)})")
+    return res['compiled']
 
 
 def inject_compiled_rules(knowledge_text, compiled_text):
@@ -1076,7 +1040,7 @@ def inject_compiled_rules(knowledge_text, compiled_text):
     """
     if not (compiled_text or '').strip():
         return knowledge_text
-    _hdr = "\n# ── 자연어 규칙(NL_RULES) 자동 컴파일 결과 — 원문/검증은 RUN/AI/nl_rules_compiled.json ──\n"
+    _hdr = "\n# ── 자연어 규칙(NL_RULES) 변환 결과 — 문구↔코드 매핑은 RUN/AI/nl_rules_map.json ──\n"
     _mk = 'ANOMALY_RULES:end'
     i = (knowledge_text or '').find(_mk)
     if i == -1:
@@ -1121,27 +1085,44 @@ def _nl_fallback_compile(nl_text):
             conds.append('sev >= 1')
         elif re.search(r'(둘\s*다|모두).*이상', low) and len(items) >= 2:
             conds.append(f"all_sev({', '.join(items[:3])}, critical)")
-        elif re.search(r'이상', low) and not re.search(r'\d+\s*(개|매|배|시그마|%|퍼센트)\s*이상', low) \
+        elif re.search(r'이상', low) and not re.search(r'\d[\d.]*\s*(개|매|배|시그마|점|%|퍼센트)?\s*이상', low) \
                 and 'spec' not in low.lower():
+            # '숫자(+단위) 이상'(수치/개수 비교)이 아닌, 등급 '이상'만 sev>=2로
             conds.append('sev >= 2')
         elif '주의' in low:
             conds.append('sev >= 1')
-        # ── 산포 N배 → disp_ratio ──
-        m = re.search(r'산포가?\s*([\d.]+)\s*배', low)
+        # 비교연산자 키워드 매핑 (한국어)
+        _OPS = {'이상': '>=', '이하': '<=', '초과': '>', '넘': '>', '미만': '<', '아래': '<'}
+
+        def _op(seg, default='>'):
+            m = re.search(r'(이상|이하|초과|미만|넘|아래)', seg)
+            return _OPS[m.group(1)] if m else default
+        # ── 산포/N배 → disp_ratio (맥락: 배수 비교) ──
+        m = re.search(r'산포가?\s*([\d.]+)\s*배', low) or re.search(r'([\d.]+)\s*배\s*(?:넘|초과|이상)', low)
         if m:
-            conds.append(f"disp_ratio > {m.group(1)}")
-        # ── stddev/표준편차/산포 N 이하 → stddev ──
-        m = re.search(r'(?:stddev|표준편차)\s*(?:가|이)?\s*([\d.]+)\s*(?:이하|이내|미만)', low)
+            conds.append(f"disp_ratio {_op(low[m.end():m.end()+8], '>')} {m.group(1)}")
+        # ── stddev/표준편차 N 이상/이하/넘 → stddev ──
+        m = re.search(r'(?:stddev|표준편차)\s*(?:가|이|은|는)?\s*([\d.]+)\s*(이하|이내|미만|이상|초과|넘)', low)
         if m:
-            conds.append(f"stddev < {m.group(1)}")
-        # ── median vs spec 상한/하한(계수 %) → median ──
-        m = re.search(r'median.*?spec\s*상한.*?([\d.]+)\s*%', low)
-        if m:
-            conds.append(f"median > spec_high * {float(m.group(1)) / 100:.3g}")
+            conds.append(f"stddev {_OPS.get(m.group(2), '<') if m.group(2) != '이내' else '<'} {m.group(1)}")
+        # ── median vs spec 상한/하한(계수 %) → median > spec_high*(N/100) 등 ──
+        m = re.search(r'(?:median|값|중앙값)?.{0,12}?spec\s*상한[의\s]*([\d.]+)\s*%', low)
+        if m and re.search(r'(median|값|중앙값|넘|초과|이상|근접)', low):
+            conds.append(f"median {_op(low, '>')} spec_high * {float(m.group(1)) / 100:.4g}")
         else:
-            m = re.search(r'median.*?spec\s*하한.*?([\d.]+)\s*%', low)
+            m = re.search(r'(?:median|값|중앙값)?.{0,12}?spec\s*하한[의\s]*([\d.]+)\s*%', low)
+            if m and re.search(r'(median|값|중앙값|미만|이하|낮)', low):
+                conds.append(f"median {_op(low, '<')} spec_low * {float(m.group(1)) / 100:.4g}")
+        # ── median/값/중앙값 N 이상/이하/넘/미만 (숫자 직접) → median <op> N ──
+        if not any(c.startswith('median') for c in conds):
+            m = re.search(r'(?:median|값|중앙값)\s*(?:이|가|은|는)?\s*([\d.]+)\s*(이상|이하|초과|미만|넘)', low)
             if m:
-                conds.append(f"median < spec_low * {float(m.group(1)) / 100:.3g}")
+                conds.append(f"median {_OPS[m.group(2)]} {m.group(1)}")
+            # ── median 높/낮(숫자 없음) → median_high/median_low(trigger) ──
+            elif trigger and re.search(r'median.{0,6}(매우\s*)?높', low):
+                conds.append(f"median_high({trigger})")
+            elif trigger and re.search(r'median.{0,6}(매우\s*)?낮', low):
+                conds.append(f"median_low({trigger})")
         # ── 측정 앞부분 집중 → seq_front_heavy ──
         if re.search(r'(앞부분|전면|앞쪽|앞).{0,6}(집중|몰려|많)', low):
             conds.append('seq_front_heavy')
@@ -1182,32 +1163,203 @@ def _nl_fallback_compile(nl_text):
     return '\n\n'.join(blocks), maps
 
 
-def convert_nl_rules(nl_text, llm_fn=None):
-    """자연어 규칙 → [RULE] 변환. AI(llm_fn) 우선, 실패/미연결 시 키워드 fallback.
+# ── 자연어↔코드 매핑 캐시 (일관성: 같은 문구 → 항상 같은 when 코드, 엔지니어 편집 가능) ──
+_NL_CACHE_HELP = ("자연어 문구 → when 코드 매핑(일관성 보장). 같은 문구는 항상 이 매핑대로 변환됩니다. "
+                  "각 항목의 when/trigger/sev/note를 직접 고치면 다음 발행부터 반영됩니다. "
+                  "문구(키)를 지우면 다음 발행 때 다시 변환(AI/키워드)합니다.")
 
-    반환 {'compiled', 'method'('AI'|'키워드'|'none'), 'mappings':[{nl,block,ok,reason}], 'n_ok'}.
-    적용/캐시는 하지 않는다(호출부에서 확인 후 적용).
-    """
-    nl = (nl_text or '').strip()
-    if not nl:
-        return {'compiled': '', 'method': 'none', 'mappings': [], 'n_ok': 0}
+
+def _nl_cache_path(cache_dir='RUN/AI'):
+    import os
+    return os.path.join(cache_dir, 'nl_rules_map.json')
+
+
+def _nl_norm(line):
+    """자연어 문구 정규화(캐시 키): 앞 '- ' 제거 + 공백 축약."""
+    import re
+    return re.sub(r'\s+', ' ', re.sub(r'^\s*[-*]\s+', '', str(line or ''))).strip()
+
+
+def load_nl_cache(cache_dir='RUN/AI'):
+    import json
+    try:
+        with open(_nl_cache_path(cache_dir), encoding='utf-8') as f:
+            d = json.load(f)
+        if isinstance(d, dict) and isinstance(d.get('mappings'), dict):
+            return d
+    except Exception:
+        pass
+    return {'_help': _NL_CACHE_HELP, 'mappings': {}}
+
+
+def save_nl_cache(cache, cache_dir='RUN/AI'):
+    import json, os
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        cache['_help'] = _NL_CACHE_HELP
+        with open(_nl_cache_path(cache_dir), 'w', encoding='utf-8') as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception as _e:
+        print(f"[NL] 캐시 저장 실패: {_e}")
+
+
+def _fields_from_block(block):
+    """[RULE] 블록 텍스트 → {trigger, sev, when, note, link} (첫 게이트/노트만 — 캐시·표시용)."""
+    import re
+    f = {'trigger': '', 'sev': '', 'when': '', 'note': '', 'link': ''}
+    for ln in str(block or '').splitlines():
+        m = re.match(r'\s*(trigger|sev|when|note|link)\s*:\s*(.*)$', ln, re.I)
+        if m:
+            k = m.group(1).lower(); v = m.group(2).strip().strip('"').strip()
+            if k in f and not f[k]:
+                f[k] = v
+    return f
+
+
+def _block_from_fields(f):
+    """캐시 필드(trigger/sev/when/note/link) → [RULE] 블록 텍스트로 재구성."""
+    _name = (f.get('note') or f.get('trigger') or '자연어 규칙').strip()
+    out = ['[RULE]', f'name: {_name}']
+    if f.get('trigger'):
+        out.append(f"trigger: {f['trigger']}")
+    out.append(f"sev: {f.get('sev') or 'critical'}")
+    out.append(f"when: {f.get('when', '')}")
+    out.append(f'note: "{f.get("note") or _name}"')
+    if f.get('link'):
+        out.append(f'link: "{f["link"]}"')
+    return '\n'.join(out)
+
+
+def _convert_one_fields(line, llm_fn):
+    """자연어 한 줄 → 필드 dict(trigger/sev/when/note/link/method) 또는 None(변환 실패).
+    AI(llm_fn) 우선 → 실패/미연결 시 키워드 fallback."""
+    import re
     if llm_fn is not None:
         try:
-            compiled, n, errs = _nl_ai_compile(nl, llm_fn)
-            if errs:
-                compiled, n, _ = _keep_valid_rule_blocks(compiled)
-            if n > 0 and compiled.strip():
-                # AI는 블록 단위 매핑을 못 주므로 [RULE] 블록별로 나눠 표시
-                import re
-                _blks = ['[RULE]\n' + b.strip() for b in re.split(r'(?im)^\s*\[RULE\]\s*$', compiled)[1:] if b.strip()]
-                maps = [{'nl': '(AI 변환 — 자연어 원문 전체)', 'block': b, 'ok': True, 'reason': ''} for b in _blks]
-                return {'compiled': compiled, 'method': 'AI', 'mappings': maps, 'n_ok': n}
-            print("[NL] AI 변환 결과가 유효하지 않음 → 키워드 fallback 사용")
-        except Exception as _e:
-            print(f"[NL] AI 변환 실패 → 키워드 fallback: {_e}")
-    compiled, maps = _nl_fallback_compile(nl)
-    return {'compiled': compiled, 'method': '키워드', 'mappings': maps,
-            'n_ok': sum(1 for m in maps if m['ok'])}
+            compiled, n, errs = _nl_ai_compile(line, llm_fn)
+            if not errs and n >= 1:
+                _blks = [b for b in re.split(r'(?im)^\s*\[RULE\]\s*$', compiled)[1:] if b.strip()]
+                if _blks:
+                    fa = _fields_from_block('[RULE]\n' + _blks[0])
+                    if fa.get('when') or fa.get('note'):
+                        fa['method'] = 'AI'
+                        return fa
+        except Exception:
+            pass
+    _comp, _maps = _nl_fallback_compile(line)
+    if _maps and _maps[0].get('ok'):
+        fk = _fields_from_block(_maps[0]['block']); fk['method'] = '키워드'
+        return fk
+    return None
+
+
+def convert_nl_rules(nl_text, llm_fn=None, cache_dir='RUN/AI', use_cache=True):
+    """자연어 규칙(줄 단위) → [RULE] 변환. 문구별 캐시로 '같은 문구 → 같은 코드' 보장.
+
+    - 캐시 히트(같은 문구): AI 호출 없이 매핑대로 변환(엔지니어가 캐시의 when 등을 고치면 그대로 반영).
+    - 캐시 미스: AI(llm_fn) 우선 → 실패/미연결 시 키워드 fallback → 캐시에 저장.
+    반환 {'compiled', 'mappings':[{nl,block,ok,method,reason}], 'n_ok', 'stats':{ai,keyword,cache}}.
+    """
+    from datetime import datetime as _dt
+    lines = [l.strip() for l in (nl_text or '').splitlines() if l.strip()]
+    if not lines:
+        return {'compiled': '', 'mappings': [], 'n_ok': 0, 'stats': {'ai': 0, 'keyword': 0, 'cache': 0}}
+    cache = load_nl_cache(cache_dir) if use_cache else {'mappings': {}}
+    maps, blocks = [], []
+    stats = {'ai': 0, 'keyword': 0, 'cache': 0}
+    changed = False
+    for raw in lines:
+        key = _nl_norm(raw)
+        ent = cache['mappings'].get(key) if use_cache else None
+        if ent and (ent.get('when') or ent.get('note')):
+            fields = {k: ent.get(k, '') for k in ('trigger', 'sev', 'when', 'note', 'link')}
+            method = f"캐시({ent.get('method', '?')})"; stats['cache'] += 1
+        else:
+            fields = _convert_one_fields(raw, llm_fn)
+            if fields is None:
+                _blk = f"# 변환불가: {raw}"
+                blocks.append(_blk)
+                maps.append({'nl': raw, 'block': _blk, 'ok': False, 'method': '',
+                             'reason': '지원하는 조건으로 변환 불가(수기 [RULE] 권장)'})
+                continue
+            method = fields.get('method', '키워드')
+            stats['ai' if method == 'AI' else 'keyword'] += 1
+            if use_cache:
+                cache['mappings'][key] = {'when': fields.get('when', ''), 'note': fields.get('note', ''),
+                                          'trigger': fields.get('trigger', ''), 'sev': fields.get('sev', 'critical'),
+                                          'link': fields.get('link', ''), 'method': method,
+                                          'updated': _dt.now().strftime('%Y-%m-%d %H:%M:%S')}
+                changed = True
+        block = _block_from_fields(fields)
+        _n, _errs = _validate_rules_text(block)
+        ok = (_n == 1 and not _errs)
+        maps.append({'nl': raw, 'block': block, 'ok': ok, 'method': method,
+                     'reason': ('' if ok else '; '.join(_errs))})
+        if ok:
+            blocks.append(block)
+    if use_cache and changed:
+        save_nl_cache(cache, cache_dir)
+    return {'compiled': '\n\n'.join(blocks), 'mappings': maps,
+            'n_ok': len(blocks), 'stats': stats}
+
+
+def _print_nl_mappings(res, cache_dir='RUN/AI'):
+    print(f"\n===== 자연어 → [RULE] 변환 결과 "
+          f"(AI {res['stats']['ai']} · 키워드 {res['stats']['keyword']} · 캐시 {res['stats']['cache']}) =====")
+    for m in res['mappings']:
+        _f = _fields_from_block(m['block'])
+        print(f"[{'OK ' if m.get('ok') else '실패'}][{m.get('method', '')}] {m['nl']}")
+        print(f"        → when: {_f.get('when', '') or m['block']}")
+        if not m.get('ok') and m.get('reason'):
+            print(f"        (사유: {m['reason']})")
+    print(f"===== 유효 {res['n_ok']}개 / 전체 {len(res['mappings'])}개  (매핑 파일: {_nl_cache_path(cache_dir)}) =====")
+
+
+def preview_nl_rules(md_path, llm_fn=None, cache_dir='RUN/AI'):
+    """자연어 규칙을 변환해 원문→when 매핑을 출력하고 캐시를 갱신(MD·발행 변경 없음).
+    엔지니어가 '무엇으로 변환되는지' 미리 확인·캐시 정비용."""
+    try:
+        with open(md_path, encoding='utf-8') as f:
+            nl = _extract_nl_rules(f.read())
+    except Exception as e:
+        print(f"[NL] MD 읽기 실패: {e}"); return False
+    if not nl:
+        print("[NL] NL_RULES 마커에 자연어 규칙이 없습니다."); return False
+    res = convert_nl_rules(nl, llm_fn, cache_dir=cache_dir, use_cache=True)
+    _print_nl_mappings(res, cache_dir)
+    return res['n_ok'] > 0
+
+
+def apply_nl_rules_to_md(md_path, llm_fn=None, cache_dir='RUN/AI'):
+    """자연어 규칙을 변환해 '바로' MD에 [RULE]로 적용(확인 단계 없음).
+
+    - NL_RULES 자연어를 문구별 캐시로 변환(같은 문구→같은 코드) 후 매핑 출력.
+    - ANOMALY_RULES 마커 안에 [RULE] 주입(각 위에 '# NL: <원문>' 주석) + NL_RULES 원문을
+      '<!-- (변환완료) -->' 주석으로 치환(추적성·재변환 방지).
+    반환 True(적용)/False(적용할 유효 규칙 없음/오류).
+    """
+    try:
+        with open(md_path, encoding='utf-8') as f:
+            md = f.read()
+    except Exception as e:
+        print(f"[NL] MD 읽기 실패: {e}"); return False
+    nl = _extract_nl_rules(md)
+    if not nl:
+        print("[NL] NL_RULES 마커에 변환할 자연어 규칙이 없습니다."); return False
+    res = convert_nl_rules(nl, llm_fn, cache_dir=cache_dir, use_cache=True)
+    _print_nl_mappings(res, cache_dir)
+    if res['n_ok'] == 0 or not res['compiled'].strip():
+        print("[NL] 유효한 [RULE] 변환 결과가 없어 적용하지 않습니다."); return False
+    _ann = [f"# NL: {m['nl']}  (변환: {m.get('method', '')})\n{m['block'].strip()}"
+            for m in res['mappings'] if m.get('ok')]
+    new_md = _mark_nl_converted(inject_compiled_rules(md, "\n\n".join(_ann)), res['mappings'])
+    try:
+        with open(md_path, 'w', encoding='utf-8') as f:
+            f.write(new_md)
+    except Exception as e:
+        print(f"[NL] MD 쓰기 실패: {e}"); return False
+    print(f"[NL] {len(_ann)}개 규칙을 ANOMALY_RULES에 바로 적용했습니다(추적 주석 포함) → {md_path}")
+    return True
 
 
 def _mark_nl_converted(md, mappings):
@@ -1217,62 +1369,9 @@ def _mark_nl_converted(md, mappings):
         return md
     seg = md[s:e]
     for m in mappings:
-        if m.get('ok') and m.get('nl') and not m['nl'].startswith('(AI') and m['nl'] in seg:
+        if m.get('ok') and m.get('nl') and m['nl'] in seg:
             seg = seg.replace(m['nl'], f"<!-- (변환완료→ANOMALY_RULES) {m['nl']} -->")
     return md[:s] + seg + md[e:]
-
-
-def apply_nl_rules_to_md(md_path, llm_fn=None, assume_yes=False):
-    """자연어 규칙을 변환·표시하고 '확인 후' MD에 [RULE]로 적용(자동 적용 아님).
-
-    - NL_RULES 마커의 자연어를 변환(AI 우선, 없으면 키워드 fallback)해 원문→[RULE] 매핑을 출력.
-    - 확인(y/N; assume_yes=True면 자동 승인) 후에만 ANOMALY_RULES 마커 안에 [RULE] 주입.
-      각 [RULE] 위에 '# NL: <원문>  (변환: AI|키워드)' 주석을 남겨 추적 가능하게 한다.
-    - 적용한 자연어 원문은 NL_RULES에서 '<!-- (변환완료) -->' 주석으로 바꿔 재변환을 막는다.
-    반환 True(적용)/False(미적용).
-    """
-    try:
-        with open(md_path, encoding='utf-8') as f:
-            md = f.read()
-    except Exception as e:
-        print(f"[NL] MD 읽기 실패: {e}")
-        return False
-    nl = _extract_nl_rules(md)
-    if not nl:
-        print("[NL] NL_RULES 마커에 변환할 자연어 규칙이 없습니다.")
-        return False
-    res = convert_nl_rules(nl, llm_fn)
-    print(f"\n===== 자연어 규칙 → [RULE] 변환 결과 (방식: {res['method']}) =====")
-    for m in res['mappings']:
-        print(f"[{'OK ' if m.get('ok') else '실패'}] 자연어: {m['nl']}")
-        for _bl in m['block'].splitlines():
-            print(f"        {_bl}")
-        if not m.get('ok') and m.get('reason'):
-            print(f"        (사유: {m['reason']})")
-    print(f"===== 유효 {res['n_ok']}개 / 전체 {len(res['mappings'])}개 =====")
-    if res['n_ok'] == 0 or not res['compiled'].strip():
-        print("[NL] 유효한 [RULE] 변환 결과가 없어 적용하지 않습니다.")
-        return False
-    if not assume_yes:
-        try:
-            ans = input("이대로 ANOMALY_RULES에 적용할까요? [y/N]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            ans = 'n'
-        if ans not in ('y', 'yes'):
-            print("[NL] 취소 — 적용하지 않았습니다.")
-            return False
-    _ann = [f"# NL: {m['nl']}  (변환: {res['method']})\n{m['block'].strip()}"
-            for m in res['mappings'] if m.get('ok') and m['block'].strip().startswith('[RULE]')]
-    new_md = inject_compiled_rules(md, "\n\n".join(_ann))
-    new_md = _mark_nl_converted(new_md, res['mappings'])
-    try:
-        with open(md_path, 'w', encoding='utf-8') as f:
-            f.write(new_md)
-    except Exception as e:
-        print(f"[NL] MD 쓰기 실패: {e}")
-        return False
-    print(f"[NL] {len(_ann)}개 규칙을 ANOMALY_RULES에 적용했습니다(추적 주석 포함) → {md_path}")
-    return True
 
 
 def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,

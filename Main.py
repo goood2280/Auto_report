@@ -289,12 +289,12 @@ def main():
     raw_arg = sys.argv[1]
     trigger_flag = False
 
-    # ── CLI: 자연어 규칙 변환·확인·적용 도구 (리포트 생성과 별개) ──
-    #   python Main.py --convert-nl-rules      : 변환 결과(자연어→[RULE]) 표시 후 y/N 확인하고 MD에 적용
-    #   python Main.py --convert-nl-rules-yes  : 확인 없이 적용(자동 승인 — 배치용)
-    #   AI(GPT OSS 120B) 연결 시 AI 변환, 미연결 시 키워드 fallback으로 변환한다.
-    if raw_arg in ('--convert-nl-rules', '--convert-nl-rules-yes'):
-        from anomaly_engine import apply_nl_rules_to_md
+    # ── CLI: 자연어 규칙 변환 도구 (리포트 생성과 별개) ──
+    #   python Main.py --convert-nl-rules      : 변환 결과(자연어→when) 미리보기 + 매핑 캐시 갱신(발행/MD 변경 없음)
+    #   python Main.py --convert-nl-rules-md   : 변환해서 '바로' MD의 ANOMALY_RULES에 [RULE]로 적용(확인 없음)
+    #   AI(GPT OSS 120B) 연결 시 AI 변환, 미연결 시 키워드 fallback. 같은 문구는 캐시로 항상 같은 코드.
+    if raw_arg in ('--convert-nl-rules', '--convert-nl-rules-md'):
+        from anomaly_engine import preview_nl_rules, apply_nl_rules_to_md
 
         def _cli_llm(system, user):
             r = gpt_client.chat.completions.create(
@@ -309,7 +309,11 @@ def main():
         if not (_kp and os.path.exists(_kp)):
             print(f"[NL] anomaly_knowledge_path를 찾을 수 없습니다: {_kp}")
             sys.exit(1)
-        _ok = apply_nl_rules_to_md(_kp, llm_fn=_llm, assume_yes=raw_arg.endswith('-yes'))
+        _cd = os.path.join('RUN', 'AI')
+        if raw_arg.endswith('-md'):
+            _ok = apply_nl_rules_to_md(_kp, llm_fn=_llm, cache_dir=_cd)
+        else:
+            _ok = preview_nl_rules(_kp, llm_fn=_llm, cache_dir=_cd)
         sys.exit(0 if _ok else 2)
 
     # (TRIGGER) 제거
@@ -452,21 +456,18 @@ def main():
     except Exception as _ke:
         print(f"[WARN] 이상 지식베이스 로드 실패: {_ke}")
 
-    # ── 자연어 규칙(NL_RULES) — 확인 후 적용 원칙(발행 시 자동 적용 X) ──
-    #   기본: 발행 시 자동 컴파일·적용하지 않는다. 엔지니어가 `python Main.py --convert-nl-rules`로
-    #   변환 결과(자연어→[RULE])를 확인·승인해 MD에 [RULE]로 남긴 뒤(추적 주석 포함) 사용한다.
-    #   (하위호환) config.anomaly_nl_autocompile=True면 예전처럼 시작 시 1회 자동 컴파일·주입.
+    # ── 자연어 규칙(NL_RULES) → [RULE] 발행 시 '바로 적용' (문구별 캐시로 일관 변환) ──
+    #   NL_RULES 마커의 자연어를 문구별 캐시(RUN/AI/nl_rules_map.json)로 변환해 in-memory 적용한다:
+    #   같은 문구는 항상 같은 when 코드(캐시), 새 문구만 AI(연결 시)/키워드 fallback으로 변환.
+    #   엔지니어는 발행 결과를 보고 자연어(또는 캐시의 when)를 고쳐 다시 발행하며 조정한다.
+    #   (config.anomaly_nl_autocompile=False로 두면 발행 시 자동 적용을 끌 수 있음 — 기본 True.)
     try:
-        from anomaly_engine import _extract_nl_rules, compile_nl_rules, inject_compiled_rules
-        _pending_nl = _extract_nl_rules(_ANOMALY_KNOWLEDGE_TEXT)
-        if getattr(GLOBAL_CONFIG, 'anomaly_nl_autocompile', False):
+        if getattr(GLOBAL_CONFIG, 'anomaly_nl_autocompile', True):
+            from anomaly_engine import compile_nl_rules, inject_compiled_rules
             _nl_compiled = compile_nl_rules(_ANOMALY_KNOWLEDGE_TEXT, _LLM_FN,
                                             cache_dir=os.path.join('RUN', 'AI'))
             if _nl_compiled:
                 _ANOMALY_KNOWLEDGE_TEXT = inject_compiled_rules(_ANOMALY_KNOWLEDGE_TEXT, _nl_compiled)
-        elif _pending_nl:
-            print("[NL] NL_RULES에 미적용 자연어 규칙이 있습니다 → `python Main.py --convert-nl-rules`로 "
-                  "변환·확인 후 적용하세요(발행 시 자동 적용 안 함).")
     except Exception as _ne:
         print(f"[WARN] 자연어 규칙 처리 실패(수기 [RULE]만 사용): {_ne}")
 
