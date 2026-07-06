@@ -1735,4 +1735,95 @@ def main():
 
                                 # 수신 그룹(=메일링 xlsx의 시트명). config email_receiver가 리스트면 첫 항목 사용.
                                 email_receiver_now = (email_receiver[0]
-                                                      if isinstance(email_receiver, (list, tuple)
+                                                      if isinstance(email_receiver, (list, tuple)) and email_receiver
+                                                      else email_receiver)
+                                title = f'[HOL] {vehicle} {target_lot_id} {target_step_merged} HOL AUTO REPORT'
+
+                                email_list = get_email_list(email_list_path, email_receiver_now)
+
+                                payload_content = {
+                                    "content": f'{html_code_final}',
+                                    "receiverList": email_list,
+                                    "senderMailAddress": f"{KNOXID}@samsung.com",
+                                    "statusCode": "SENT",
+                                    "title": f'{title}',
+                                }
+                                payload = {'mailSendString': f'{payload_content}'}
+
+                                _ppt_full = os.path.join(low_qual_ppt_save_path, final_ppt_file_name_DX)
+                                _mail_fh = open(_ppt_full, 'rb')
+                                files = [
+                                    ('file', (final_ppt_file_name_DX, _mail_fh, 'application/vnd.ms-powerpoint'))
+                                ]
+                                headers = {'x-dep-ticket': GLOBAL_CONFIG.get("TICKET")}
+
+                                response = requests.request(
+                                    "POST", GLOBAL_CONFIG.get("url"),
+                                    headers=headers, data=payload, files=files)
+                                _sc = getattr(response, 'status_code', None)
+                                if _sc == 200:
+                                    print_status("메일 발송", "ok",
+                                                 f"{target_lot_id}_{target_DC_step} 완료 (수신 {len(email_list)}명, HTTP {_sc})")
+                                else:
+                                    # 200이 아니면 상세 에러 내용을 터미널에 출력
+                                    try:
+                                        _body = response.text
+                                    except Exception:
+                                        _body = '(응답 본문 읽기 실패)'
+                                    print_status("메일 발송", "fail",
+                                                 f"{target_lot_id}_{target_DC_step} — HTTP {_sc}")
+                                    print(f"[ERROR] 메일 발송 응답 오류 (HTTP {_sc}) 상세: {_body}")
+                            except Exception as _me:
+                                print_status("메일 발송", "fail", f"{target_lot_id}_{target_DC_step}: {_me}")
+                            finally:
+                                try:
+                                    if _mail_fh is not None:
+                                        _mail_fh.close()
+                                except Exception:
+                                    pass
+                        else:
+                            print_status("메일 발송", "off", "use_email_send=False → 스킵")
+
+                        log_to_file(f"{search_key} Report 발행 완료", query_log)
+                        # 소요 시간 + 산출물(HTML/PPT) 용량 출력
+                        _elapsed = time.perf_counter() - _t_report_start
+
+                        def _mb(_p):
+                            try:
+                                return f"{os.path.getsize(_p) / 1024**2:.2f}MB" if os.path.exists(_p) else "N/A"
+                            except OSError:
+                                return "N/A"
+                        _html_mb = _mb(f'{html_save_path}{fname}')
+                        _ppt_mb = _mb(f'{low_qual_ppt_save_path}{final_ppt_file_name_DX}')
+                        print_status("Report 발행 완료", "ok",
+                                     f"{search_key} — 소요 {_elapsed:.1f}s, HTML {_html_mb}, PPT {_ppt_mb}")
+
+                    except Exception as e:
+                        print_status("Report 발행 실패", "fail", f"{search_key}: {e}")
+                        traceback.print_exc()
+                        log_to_file(f"{search_key} Report 발행 실패: {e}", error_log)
+                        continue
+
+                    finally:
+                        clear_temp_inside_run()
+                        clear_anomaly_inside_run()
+                        clear_run_temp_files()   # 랏 리포트 완료 후 RUN/TEMP 내부 파일 비우기(폴더 유지)
+                        gc.collect()
+
+            else:
+                print("[INFO] dc_done_list가 비어있습니다. Report 발행 대상 없음")
+
+        else:
+            print(f"[INFO] DB_Setting_mode = {DB_Setting_mode}, report_making = {report_making}")
+            print("[INFO] Report 미발행 모드")
+
+        conn.close()
+        shutdown_chart_pool()   # 병렬 렌더링 워커 풀 정리 (atexit에도 등록되어 있으나 명시 종료)
+        print(f'[INFO] ============== {vehicle} 전체 프로세스 완료 ==============')
+
+    else:
+        print("[ERROR] reformatter 검증 실패. 프로그램 종료.")
+
+
+if __name__ == "__main__":
+    main()

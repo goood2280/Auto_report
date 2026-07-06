@@ -3181,4 +3181,179 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
         except Exception:
             _stats_block = ''
 
-    # few-shot 판정 예시(RUN/EXAMPLE/*.md, 선택) — 과거 '입력→확정 판정
+    # few-shot 판정 예시(RUN/EXAMPLE/*.md, 선택) — 과거 '입력→확정 판정' 사례
+    def _load_examples():
+        try:
+            import os, glob
+            _dir = (getattr(config, 'ai_examples_dir', None) if config else None) \
+                or os.path.join('RUN', 'EXAMPLE')
+            if not os.path.isdir(_dir):
+                return ''
+            _maxn = int(getattr(config, 'ai_examples_max', 5) or 5) if config else 5
+            _maxc = int(getattr(config, 'ai_examples_max_chars', 6000) or 6000) if config else 6000
+            parts, total = [], 0
+            for fp in sorted(glob.glob(os.path.join(_dir, '*.md'))):
+                if os.path.basename(fp).startswith('_'):   # _TEMPLATE 등 스킵
+                    continue
+                if len(parts) >= _maxn:
+                    break
+                try:
+                    with open(fp, encoding='utf-8') as _ef:
+                        txt = _ef.read().strip()
+                except Exception:
+                    continue
+                if not txt or total + len(txt) > _maxc:
+                    continue
+                parts.append(f"--- 예시: {os.path.basename(fp)} ---\n{txt}")
+                total += len(txt)
+            return '\n\n'.join(parts)
+        except Exception:
+            return ''
+    _examples = _load_examples()
+    _examples_block = (
+        "\n\n[판정 예시] 과거 실제 사례(관찰 입력 → 후행 확인된 판정)입니다. 입력이 유사하면 "
+        "같은 판정을 우선 적용하세요. 예시가 판정표와 충돌하면 예시(실사례)가 우선합니다.\n"
+        + _examples) if _examples else ''
+
+    # ── AI 입력/출력 덤프 ──
+    #   LLM에 실제로 보낸 system/user 프롬프트와 응답을 RUN/AI에 남긴다(삭제하지 않음 — 감사/재현용).
+    #   (측정 raw/reformatter는 AI에 전달하지 않음 — findings 요약 + 지식베이스 텍스트만)
+    _io = []
+
+    def _stage(name, system, user):
+        out = llm_fn(system, user)
+        _io.append({"stage": name, "system": system, "user": user, "output": out})
+        return out
+
+    def _dump_ai_input():
+        try:
+            import os
+            _outdir = os.path.join('RUN', 'AI')   # AI 인풋파일 보관 폴더(사이클 종료 후에도 유지)
+            os.makedirs(_outdir, exist_ok=True)
+            _safe = str(target_lot_id).replace('/', '_').replace('\\', '_') or 'lot'
+            _base = os.path.join(_outdir, f"ai_input_{_safe}")
+            with open(_base + '.json', 'w', encoding='utf-8') as _jf:
+                json.dump({"target_lot_id": target_lot_id,
+                           "findings": [_slim(f) for f in findings],
+                           "stages": _io}, _jf, ensure_ascii=False, indent=2, default=str)
+            _lines = [f"# AI 입력/출력 덤프 — lot {target_lot_id}", "",
+                      "> `anomaly_engine.interpret_with_ai`가 LLM에 실제로 보낸 system/user 프롬프트와 응답.",
+                      "> 측정 raw 데이터/reformatter는 전달하지 않고, 코드 findings 요약 + ANOMALY_KNOWLEDGE.md 텍스트만 넣는다.",
+                      "", "## 입력 findings (JSON)", "", "```json", fjson, "```", ""]
+            for _i, _s in enumerate(_io, 1):
+                _lines += [f"## [{_i}] {_s['stage']}", "", "### system (프롬프트 + 지식베이스)",
+                           "```", str(_s['system']), "```", "",
+                           "### user (직전 단계 산출/데이터)", "```", str(_s['user']), "```", "",
+                           "### output (LLM 응답)", "```", str(_s['output']), "```", ""]
+            with open(_base + '.md', 'w', encoding='utf-8') as _mf:
+                _mf.write("\n".join(_lines))
+            print(f"[anomaly] AI 입력 덤프 저장: {_base}.md / .json ({len(_io)} stage)")
+        except Exception as _de:
+            print(f"[WARN] AI 입력 덤프 저장 실패: {_de}")
+
+    # ── 호출 모드: 'multi'(기본, Triage→Root-cause→Final 3회) / 'single'(Final 1회) ──
+    #   single은 비용/지연 1/3, 단계간 오류 전파 없음. 모델이 약해 그룹핑 품질이 떨어지면 multi.
+    _mode = (str(getattr(config, 'ai_stage_mode', 'multi') or 'multi').lower()
+             if config else 'multi')
+    try:
+        triage = rootcause = ''
+        if _mode != 'single':
+            # ── 1단계: Triage / 현상 그룹핑 ──
+            triage = _stage(
+                "① Triage",
+                "당신은 반도체 TEG 데이터 분석가입니다. 코드가 산출한 이상 finding 목록을 "
+                "현상(phenomenon) 단위로 묶고 중요도 순으로 3~6개로 정리하세요. "
+                "각 finding에는 item(원 이름)·display_name(후처리 표시명)·cat2(항목 카테고리)가 있습니다. "
+                "**그룹핑 기준: cat2가 같은 항목은 하나의 현상으로 묶고**, 현상 머리에 `[CAT2]`를 표기하세요 "
+                "(cat2가 없는 항목은 항목명 유사성으로 묶음). 항목명은 display_name(표시명)으로 적되 "
+                "원 이름이 다르면 괄호로 병기하세요. "
+                "PCHK(is_pchk=true, 측정 의심)가 있으면 최상단에 별도 표기하고, "
+                "meas_overlap_examples·spec_out_positions의 wafer·좌표·PGM(pt)를 근거로 "
+                "**어느 wafer/PGM(pt)에서 어떤 항목과 동일 shot으로 겹치는지** 명시하세요. "
+                "각 현상에는 wafer별 이상 pt 수(detail)와 함께 위치 요약(특이맵 패턴 spec_out_pattern, "
+                "spec_out_zone: Center/Middle/Edge 분포, PGM(pt) 목록)을 덧붙이고, "
+                "wafer간 반복 코멘트(spec_out_commonality — 동일 shot 반복/유사 위치 반복)가 있으면 "
+                "**그대로 인용**하세요(반복 위치는 systematic 가능성 신호). "
+                "[항목 통계]가 주어지면 target median의 모집단 내 백분위(median_pctile)·산포배수 등 "
+                "특기할 수치를 현상 서술에 활용하세요. 간결한 불릿으로. "
+                "**주어진 finding·[항목 통계]에 적힌 사실(항목·spec-out·이탈 수치·위치·패턴·PGM(pt))만 사용**하고, "
+                "원인·해석·반도체 공정 지식을 추가하지 마세요(요약/그룹핑만).",
+                f"대상 lot: {target_lot_id}\n[findings]\n{fjson}{_stats_block}")
+
+            # ── 2단계: Root-cause (지식베이스 참고) ──
+            rootcause = _stage(
+                "② Root-cause",
+                "당신은 수율/공정 엔지니어입니다. 아래 [지식베이스]에 **명시적으로 적힌 내용만** "
+                "근거로 각 현상을 연결하세요. **[지식베이스]에 적혀있지 않은 원인·반도체 공정 지식"
+                "(예: '산화막 두께', '식각 균일성' 등)은 절대 추측하거나 지어내지 마세요.** "
+                "[지식베이스]에 해당 근거가 없으면 그 현상은 반드시 '지식베이스 미기재 — 추가 분석 필요'"
+                "라고만 적고, 임의의 원인을 붙이지 마세요. 데이터(finding)에서 관찰된 사실과 "
+                "지식베이스에 적힌 문장 외에는 기술하지 마세요.\n"
+                f"[지식베이스]\n{knowledge_text or '(지식베이스 없음)'}",
+                f"[현상 정리]\n{triage}")
+
+        # ── 최종 판단 + 불량 모드 판정 — 구조화 JSON 출력 → 코드 검증·HTML 조립 ──
+        #   spec-out Index 조합을 [지식베이스]의 '불량 모드 판정표'와 대조하여 판정.
+        #   여러 모드가 동시 매칭되면 표에서 더 위(번호 작은) 모드를 택한다.
+        #   LINK/COMMENT는 LLM이 아니라 코드가 판정표에서 첨부(할루시네이션 차단, LINK는 선택).
+        _final_sys = (
+            "당신은 책임 엔지니어입니다. 아래 현상/근거를 종합해 최종 판단을 내리되, "
+            "**[지식베이스]와 관찰된 데이터(finding·항목 통계)에 있는 내용만** 사용하세요. "
+            "**[지식베이스]에 적혀있지 않은 반도체 공정 지식·원인·조치(예: '산화막 두께', "
+            "'식각 균일성' 등 md에 없는 도메인 지식)를 임의로 판단하거나 추가하지 마세요.** "
+            "[지식베이스]의 '판정 규칙'(ANOMALY_RULES 마커 사이의 [RULE] 블록들)을 이용해 "
+            "spec-out Index 조합으로부터 불량 모드를 판정하세요(각 [RULE] **분기의 note 문구가 곧 불량 모드명**). "
+            "**[RULE]에 정의된 note 문구 외의 불량 모드명을 새로 만들지 마세요 — 매칭되는 규칙이 없으면 "
+            "defect_mode는 반드시 null**로 출력합니다(임의 모드명 생성 금지). "
+            "Index명은 원 이름과 표시명 어느 쪽으로 적혀 있어도 같은 항목으로 인식하고, [RULE]의 "
+            "CAT2 조건은 finding의 cat2와 대조합니다. 규칙은 위에서부터 우선순위가 높고 여러 모드가 동시 매칭되면 "
+            "**가장 위(먼저 정의된)** 모드 하나로 판정합니다(한 [RULE] 안에서는 먼저 만족한 분기 하나). "
+            "측정 의심(PCHK 동일 shot 겹침)이 있으면 [지식베이스]의 '측정이상 추정 규칙'을 적용해 "
+            "겹친 wafer·좌표·PGM(pt)를 명시하고 불량 단정 전 재측정 권고를 우선하며, "
+            "해당 site를 제외한 나머지 spec-out만으로 불량 모드를 판정하세요. "
+            "항목명은 표시명(display_name) 기준으로 서술합니다. "
+            "**출력은 아래 형식의 JSON 객체 하나만**(코드펜스·설명문·HTML 금지): "
+            '{"defect_mode": "<매칭된 [RULE] 분기의 note 문구(=불량 모드) 그대로. 매칭 없으면 null>", '
+            '"basis_items": ["<근거가 된 Index 표시명>", ...], '
+            '"summary": "<종합 판단 1~2문장 — finding·지식베이스에 근거한 판단만>", '
+            '"phenomenon": "<핵심 현상 — 관찰된 사실만. 어느 Index가 어느 wafer/특이맵 패턴·PGM(pt)에서 어떻게 spec-out/이탈했는지. 원인 추측 금지>", '
+            '"actions": "<권고 조치 — 지식베이스·RULE의 NOTE에 명시된 것만. 없으면 \'지식베이스 미기재\'>", '
+            '"meas_suspect": "<측정이상 추정 서술(겹친 wafer·좌표·PGM(pt) 명시) 또는 null>"} '
+            "URL/링크는 출력하지 마세요 — 코드가 매칭 RULE의 LINK를 자동 첨부합니다(LINK 없는 모드도 있음)."
+            f"{_examples_block}\n"
+            f"[지식베이스]\n{knowledge_text or '(지식베이스 없음)'}")
+        _spec_line = f"[spec-out Index 조합]\n{', '.join(spec_items) if spec_items else '(없음)'}"
+        if _mode == 'single':
+            _final_sys += ("\n(단일 호출 모드: [현상]/[근거] 대신 [findings] JSON이 직접 주어집니다. "
+                           "cat2가 같은 finding을 스스로 현상 단위로 묶어 판단하고, PCHK(is_pchk)가 "
+                           "있으면 meas_overlap_*로 측정이상 추정을 먼저 검토하세요.)")
+            _final_user = (f"대상 lot: {target_lot_id}\n[findings]\n{fjson}\n\n"
+                           f"{_spec_line}{_stats_block}")
+            final = _stage("① Final(단일 호출)", _final_sys, _final_user)
+        else:
+            _final_user = f"{_spec_line}\n\n[현상]\n{triage}\n\n[근거]\n{rootcause}{_stats_block}"
+            final = _stage("③ Final", _final_sys, _final_user)
+
+        # 응답이 JSON 객체가 아니면 같은 입력으로 1회 재시도(형식 지시 강화) — 그래도
+        # 실패하면 _assemble_final_html이 텍스트/HTML 폴백으로 처리(하위호환).
+        if _extract_json_obj(final) is None:
+            final = _stage(
+                "Final(JSON 재시도)",
+                "직전 응답이 JSON 객체 형식이 아니었습니다. 다른 텍스트/코드펜스 없이 "
+                "반드시 JSON 객체 하나만 출력하세요.\n" + _final_sys, _final_user)
+
+        body = _assemble_final_html(final, _parse_defect_modes(knowledge_text))
+        note = ('<div style="font-size:11px; color:#9aa0a6; font-style:italic; margin:2px 0 4px;">'
+                '※ 아래 내용은 AI가 자동 생성한 참고용 요약입니다. 보조 자료로만 활용하세요.</div>')
+        # 본문은 검정 글씨 + 글머리 점 제거(list-style:none)
+        return note + (
+            '<div class="ai-interp" style="color:#1a1a1a; font-size:13px;">'
+            '<style>.ai-interp ul{list-style:none; padding-left:0; margin:4px 0;} '
+            '.ai-interp li{margin-bottom:4px;}</style>'
+            f'{body}</div>')
+    except Exception as e:
+        print(f"[anomaly] AI 다단계 해석 실패(코드 분석으로 대체): {e}")
+        return None
+    finally:
+        # 성공/실패와 무관하게 지금까지 조립된 AI 입력/출력을 남긴다.
+        _dump_ai_input()
