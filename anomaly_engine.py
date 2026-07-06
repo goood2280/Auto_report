@@ -912,8 +912,8 @@ def _cond_valid(expr):
     import re
     if not (expr or '').strip():
         return True
-    for _grp in re.split(r'\s+OR\s+', expr):
-        for _a in re.split(r'\s+AND\s+', _grp):
+    for _grp in re.split(r'(?i)\s+OR\s+', expr):
+        for _a in re.split(r'(?i)\s+AND\s+', _grp):
             if _a.strip() and not _atom_valid(_a):
                 return False
     return True
@@ -2166,8 +2166,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 return False
 
             def _eval_when(expr):
-                for _grp in re.split(r'\s+OR\s+', expr):
-                    _atoms = [a for a in re.split(r'\s+AND\s+', _grp) if a.strip()]
+                for _grp in re.split(r'(?i)\s+OR\s+', expr):
+                    _atoms = [a for a in re.split(r'(?i)\s+AND\s+', _grp) if a.strip()]
                     if _atoms and all(_eval_atom(a) for a in _atoms):
                         return True
                 return False
@@ -2253,8 +2253,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             def _eval_chain_cond(expr, tctx):
                 if not expr:
                     return True
-                for _grp in re.split(r'\s+OR\s+', expr):
-                    _atoms = [a for a in re.split(r'\s+AND\s+', _grp) if a.strip()]
+                for _grp in re.split(r'(?i)\s+OR\s+', expr):
+                    _atoms = [a for a in re.split(r'(?i)\s+AND\s+', _grp) if a.strip()]
                     if _atoms and all(_eval_chain_atom(a, tctx) for a in _atoms):
                         return True
                 return False

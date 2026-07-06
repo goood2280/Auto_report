@@ -211,7 +211,12 @@
 >   (spec-out=이상은 유지. `when` 없으면 항상 억제). 분기 없이 이 키만 있어도 완결된 규칙.
 > - `compare_disp: A,B | D,E` — 게이트 참일 때 두 그룹 산포를 비교해 **어느 쪽이 더 큰지** finding 출력.
 
-### `[RULE]` 포맷 — 조건 함수/원자 (when·whenN 공용, ` AND ` / ` OR ` 연결)
+### `[RULE]` 포맷 — 조건 함수/원자 (when·whenN 공용, ` and ` / ` or ` 로 결합)
+
+> **하나의 `when`(또는 `when2`/`when3`…) 안에서 여러 조건을 `and`/`or`로 결합**할 수 있습니다
+> (대소문자 무관 — `and`=`AND`, `or`=`OR`). `and`는 모두 참일 때, `or`는 하나라도 참일 때 성립.
+> 예: `when: sev >= 1 and stddev < 0.5` (이상이면서 산포 작음). 순차 체이닝(`when`→`when2`→`when3`)과
+> 함께 쓸 수 있어 `when: A and B` → `when2: C` 같은 조합도 가능합니다.
 
 > - `spec_out <연산자> n` — trigger 항목의 spec-out pt 수 비교 (연산자 `>= <= == < >`)
 > - **측정순서 함수** (측정 순서 = WF MAP 좌상단 기준 chip_x 먼저 증가 → chip_y 증가;
@@ -297,6 +302,15 @@ when3: median > spec_high * 0.9
 note2: "(예시) spec 근접하나 산포 안정, 모니터링 권고"
 when3_else:
 note3: "(예시) 산포 확대 동반 — 공정 변동 점검 필요"
+
+[RULE]
+name: (예시) 한 when 안에서 and 결합
+trigger: ITEM_A
+sev: warning
+when: sev >= 1 and stddev < 0.5
+note: "(예시) 이상이지만 산포 안정 — 단일 shift 추정"
+when2: median > spec_high * 0.9 and sev >= 2
+note2: "(예시) spec 근접·산포 안정·심각 이상 — 즉시 확인"
 <!-- ANOMALY_RULES:end -->
 
 > - 1번 예시: 게이트(`spec_out>=3`) 통과 후 `when2→when3→else` 순으로 분기 — 먼저 매칭된 분기의
