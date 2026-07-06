@@ -1536,14 +1536,17 @@ def _nl_json_keyword_parse(line):
     return {'items': item_list, 'condition': cond, 'comment': comment}
 
 
-def evaluate_json_rules(json_rules, item_ctx, disp_fn=None):
+def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
     """JSON 규칙 배열을 _item_ctx와 대조하여 findings + rule_trace 반환.
 
     Parameters
     ----------
     json_rules : list[dict]  — convert_nl_to_json 결과
     item_ctx   : dict        — {item_key: {level, disp, rep_median, rep_std, spec_out_pt, ...}}
+                               item_key = merged_df 컬럼(=원 alias명).
     disp_fn    : callable|None — 표시명 변환 함수 (없으면 원본)
+    name_forms_fn : callable|None — 항목명 → {원명, 표시명} 인식 형태 집합(_name_forms).
+                    []안에 alias/표시명 아무거나 적어도 매칭되게 함(없으면 {원명}만).
 
     Returns
     -------
@@ -1552,6 +1555,7 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None):
     import re
 
     _disp = disp_fn or (lambda x: x)
+    _forms = name_forms_fn or (lambda x: {x})
     _grade_map = {'abnormal': 2, 'caution': 1, 'info': 0}
     findings = []
     rule_trace = []
@@ -1593,15 +1597,31 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None):
         except (TypeError, ValueError):
             return False
 
+    def _forms_ci(nm):
+        return {str(f).lower() for f in _forms(nm)}
+
     def _resolve_item(name, ctx):
-        """항목명 → _item_ctx 키 매칭(정확 → 대소문자무시 → 부분매칭)."""
-        if name in ctx:
+        """규칙의 항목명([] 안의 이름) → _item_ctx 키(=merged_df 컬럼=원 alias) 매칭.
+
+        엔지니어가 `[]` 안에 **원 alias명** 또는 **전처리된 표시명** 아무거나 적어도(대소문자
+        달라도) 인식하도록 매칭한다. 우선순위: (1) 정확 alias → (2) 대소문자무시 정확 →
+        (3) 인식 형태(_forms={원명,표시명}) 교집합 → (4) form 대소문자무시.
+        정확 alias를 우선해 'A의 표시명 == B의 alias' 같은 충돌 시 정확한 쪽을 택한다.
+        (구 부분문자열 매칭은 replace_map 변환명 미인식·오매칭(VTH_N↔VTH_N_AVG) 문제로 폐기.)
+        """
+        if name in ctx:                             # 1) 정확 alias
             return name
-        for k in ctx:
-            if k.lower() == name.lower():
+        _nl = str(name).lower()
+        for k in ctx:                               # 2) 대소문자무시 정확
+            if str(k).lower() == _nl:
                 return k
+        _nf = _forms(name)
+        for k in ctx:                               # 3) form 정확 교집합(원 alias↔표시명)
+            if _forms(k) & _nf:
+                return k
+        _nfl = _forms_ci(name)                      # 4) 대소문자무시 form 교집합
         for k in ctx:
-            if name.lower() in k.lower() or k.lower() in name.lower():
+            if _forms_ci(k) & _nfl:
                 return k
         return None
 
@@ -3095,7 +3115,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         #   ⚠️ 반드시 `if _chain:` 밖에 두어야 함(체인 규칙 없이 [RULE](NL→JSON)만 있어도 판정되도록).
         if json_rules:
             try:
-                _jr_findings, _jr_trace = evaluate_json_rules(json_rules, _item_ctx, disp_fn=_disp)
+                _jr_findings, _jr_trace = evaluate_json_rules(json_rules, _item_ctx,
+                                                              disp_fn=_disp, name_forms_fn=_name_forms)
                 findings.extend(_jr_findings)
                 _rule_trace.extend(_jr_trace)
                 if _jr_findings:
