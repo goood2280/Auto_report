@@ -1021,6 +1021,34 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
                 if det:
                     r2 = p.add_run(); r2.text = "  —  " + det
                     r2.font.size = Pt(9); r2.font.color.rgb = RGBColor(0x55, 0x55, 0x55); r2.font.name = FONT
+                # ── wafer별 median/σ (이상·주의 항목) — 요청: PPT 상세에 wafer 통계 표시 ──
+                _ws = f.get('wafer_stats') or {}
+                if _ws:
+                    _items_ws = sorted(_ws.items(), key=lambda z: (z[0] is None, z[0]))
+                    _cap = 8
+                    _cells = []
+                    for _w, _v in _items_ws[:_cap]:
+                        try:
+                            _cells.append(f"#{_w} med={float(_v['median']):.3g}/σ={float(_v['std']):.3g}")
+                        except Exception:
+                            continue
+                    _more = f" 외 {len(_items_ws) - _cap}매" if len(_items_ws) > _cap else ""
+                    _hdr = "wafer median/σ"
+                    _rm = f.get('rep_median'); _rs = f.get('rep_stddev')
+                    _rep = []
+                    if _rm is not None:
+                        try: _rep.append(f"med={float(_rm):.3g}")
+                        except Exception: pass
+                    if _rs is not None:
+                        try: _rep.append(f"σ={float(_rs):.3g}")
+                        except Exception: pass
+                    if _rep:
+                        _hdr += f" (대표 {', '.join(_rep)})"
+                    if _cells:
+                        _wp = tf.add_paragraph(); _wp.space_before = Pt(1)
+                        _wr = _wp.add_run(); _wr.text = f"     {_hdr}: " + ", ".join(_cells) + _more
+                        _wr.font.size = Pt(8); _wr.font.italic = True
+                        _wr.font.color.rgb = RGBColor(0x6B, 0x72, 0x80); _wr.font.name = FONT
 
     # 생성한 페이지(들)를 순서 유지하며 after_index 위치로 이동 (Score Board 바로 뒤)
     try:

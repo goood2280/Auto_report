@@ -234,6 +234,14 @@
 >   - `disp(ITEM) >= x` / `disp_cat2(CAT2) >= x` — worst wafer 산포배수(항목/CAT2 최대)
 >   - `median_dev_sigma(ITEM) >= x` — worst wafer median 이탈 σ(제품 wafer 기준)
 >   - `count_sev(critical) >= n` — 해당 등급 이상(critical|warning)인 **항목 개수**(전 항목 대상)
+> - **trigger 기준 median/stddev 원자** (trigger 항목의 wafer별 통계로 판정 — decision tree 세분화용):
+>   - `sev <연산자> N` — trigger 등급 숫자 비교(**0=참고, 1=주의, 2=이상**). 예: `sev >= 1`(주의 이상)
+>   - `stddev <연산자> <숫자|spec_high[*계수]|spec_low[*계수]>` — trigger의 **대표 산포**
+>     (wafer별 stddev의 중앙값) 비교. 예: `stddev < 0.5`
+>   - `median <연산자> <숫자|spec_high[*계수]|spec_low[*계수]>` — trigger의 **대표 median**
+>     (wafer별 median의 중앙값) 비교. 예: `median > spec_high * 0.9` (spec 상한의 90% 초과 = spec 근접)
+>   - ※ 우변에 `spec_high`/`spec_low`(선택 `*계수`)를 쓰면 그 항목 spec 경계 기준으로 비교됨.
+>     (`median_low/median_high/median_pctile(...)`은 `(`/`_`가 붙어 위 `median` 원자와 구분됨)
 > - **위치/패턴/겹침 원자**:
 >   - `pattern(ITEM, Edge ring)` — 특이맵 라벨 부분일치(Edge ring/줄성/Center 집중 등 —
 >     **특이맵 판정(`anomaly_pattern_rules`)이 켜져 있을 때만** 라벨이 생성됨)
@@ -276,6 +284,19 @@ note: "(예시) C 타겟 저하 — 실제 확인 포인트로 교체"
 name: (예시) PCHK 정상 시 산포 언급 억제
 when: sev(PCHK_TYPE1)<주의
 suppress_disp: ITEM_C
+
+[RULE]
+name: (예시) median/stddev 조건부 코멘트(decision tree)
+trigger: ITEM_A
+sev: warning
+when: sev >= 1
+when2: stddev < 0.5
+note: "(예시) 산포가 작아 공정 안정 상태에서의 shift로 추정"
+when2_else:
+when3: median > spec_high * 0.9
+note2: "(예시) spec 근접하나 산포 안정, 모니터링 권고"
+when3_else:
+note3: "(예시) 산포 확대 동반 — 공정 변동 점검 필요"
 <!-- ANOMALY_RULES:end -->
 
 > - 1번 예시: 게이트(`spec_out>=3`) 통과 후 `when2→when3→else` 순으로 분기 — 먼저 매칭된 분기의

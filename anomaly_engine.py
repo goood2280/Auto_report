@@ -891,6 +891,10 @@ _ATOM_VALID_PATTERNS = [
     r'repeat_(shot|similar)\([^()]+\)$',
     r'measured\([^()]+\)$',
     r'count_sev\((critical|warning|이상|주의)\)\s*(>=|<=|==|<|>)\s*[\d.]+$',
+    # ── trigger 기준 median/stddev 원자 (우변: 숫자 또는 spec_high/spec_low[*계수]) ──
+    r'sev\s*(>=|<=|==|<|>)\s*[\d.]+$',
+    r'(stddev|std)\s*(>=|<=|==|<|>)\s*([\d.]+|spec_(high|low)(\s*\*\s*[\d.]+)?)$',
+    r'median\s*(>=|<=|==|<|>)\s*([\d.]+|spec_(high|low)(\s*\*\s*[\d.]+)?)$',
 ]
 
 
@@ -1697,11 +1701,16 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         dev_txt, disp_txt = '', ''
         worst_med_dev, worst_med_w, worst_med_val = 0.0, None, None
         worst_disp_ratio, worst_disp_w = 0.0, None
+        _wstats = {}    # wafer별 {median, std, n} — 이상/주의 항목의 wafer 통계(요청: findings·AI·룰에 포함)
         if tgt_it is not None:
             for w, g in tgt_it.groupby(col_waf):
                 _s = pd.to_numeric(g[it], errors='coerce').dropna()
                 if len(_s) == 0:
                     continue
+                _wi = _waf_int(w); _wkey = _wi if _wi is not None else w
+                _wstats[_wkey] = {'median': float(_s.median()),
+                                  'std': float(_s.std()) if len(_s) > 1 else 0.0,
+                                  'n': int(len(_s))}
                 wm, ws = _robust(_s)
                 if wm is not None and w_center is not None and w_scatter:
                     d = abs(wm - w_center) / w_scatter
@@ -1797,11 +1806,21 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                     _tmed_pct = float((_pv < _tmed).mean() * 100.0)
             except Exception:
                 _tmed_pct = None
+        # ── wafer별 median/std 대표값(룰 median/stddev 조건·AI·PPT용) ──
+        #   rep_std = wafer별 std의 중앙값(대표 산포), rep_median = wafer별 median의 중앙값(대표 중심).
+        _rep_std = (float(pd.Series([v['std'] for v in _wstats.values()]).median())
+                    if _wstats else None)
+        _rep_med = (float(pd.Series([v['median'] for v in _wstats.values()]).median())
+                    if _wstats else _tmed)
         _item_ctx[it] = {
             'level': 2 if _sev == 'CRITICAL' else (1 if _sev == 'WARNING' else 0),
             'disp': float(worst_disp_ratio) if worst_disp_ratio else 0.0,
             'tmed': _tmed, 'pmed': pop_med, 'pspread': pop_spread,
             'tmed_pctile': _tmed_pct,
+            # median/stddev 룰 조건용 — rep_median/rep_std, spec 경계(median > spec_high*0.9 등)
+            'rep_std': _rep_std, 'rep_median': _rep_med,
+            'spec_low': lo, 'spec_high': hi,
+            'wafer_stats': _wstats,
             'spec_out_pt': int(n_out),           # spec_out(n)/spec_out_pt(ITEM) 규칙 함수용
             'seq': _seq_metrics(it, lo, hi),     # seq_out/seq_front_heavy/seq_mostly_dead 규칙 함수용
             # ── 확장 조건 원자용(전부 이 루프에서 이미 계산된 값 — 추가 비용 없음) ──
@@ -1833,6 +1852,11 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'worst_wafer_median_sigma': round(worst_med_dev, 1) if worst_med_dev else 0.0,
             'worst_wafer_dispersion_ratio': round(worst_disp_ratio, 1) if worst_disp_ratio else 0.0,
             'pattern': so_pattern,
+            # wafer별 median/std (AI 해석 입력 — 더 정확한 판단). rep_*는 룰/요약 대표값.
+            'rep_stddev': _sig4(_rep_std),
+            'rep_median': _sig4(_rep_med),
+            'wafer_median_std': {str(k): {'median': _sig4(v['median']), 'std': _sig4(v['std']), 'n': v['n']}
+                                 for k, v in sorted(_wstats.items(), key=lambda z: (z[0] is None, z[0]))},
         }
 
         # ── 근거 데이터 축적 (전 Index 통합 스키마) ──
@@ -1883,6 +1907,9 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 'spec_out_pattern': so_pattern,
                 'spec_out_commonality': so_commonality,
                 'spec_out_positions': so_positions,
+                # 이상 항목의 wafer별 median/std (PPT 상세·AI 입력)
+                'wafer_stats': dict(_wstats),
+                'rep_stddev': _rep_std, 'rep_median': _rep_med,
             }
             if is_pchk:
                 _extra.update({
@@ -1918,7 +1945,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             findings.append(_finding(
                 "WARNING", "DISPERSION", it,
                 f"산포 확대 : {_disp(it)} - #{worst_disp_w} 산포 {worst_disp_ratio:.1f}배", "",
-                display_name=_disp(it), cat2=cat2_map.get(it, '')))
+                display_name=_disp(it), cat2=cat2_map.get(it, ''),
+                wafer_stats=dict(_wstats), rep_stddev=_rep_std, rep_median=_rep_med))
 
     # ── 판단 근거 중간 데이터를 RUN/TEMP에 저장 (csv + json) ──
     try:
@@ -2180,6 +2208,45 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 if m:
                     cc = _find_ctx(m.group(1).strip())
                     return bool(cc) and cc.get('level', 0) >= _LVL_KW[m.group(2).lower()]
+
+                # ── wafer별 median/stddev 조건 (trigger 항목 기준) ──
+                def _ccmp(v, op, t):
+                    try:
+                        v = float(v); t = float(t)
+                    except (TypeError, ValueError):
+                        return False
+                    return {'>=': v >= t, '<=': v <= t, '==': v == t, '<': v < t, '>': v > t}[op]
+
+                def _rhs(expr):
+                    """비교 우변 → 숫자. spec_high/spec_low[*계수] 지원(예: spec_high*0.9)."""
+                    expr = expr.strip()
+                    mm = re.match(r'(spec_high|spec_low)\s*(?:\*\s*([\d.]+))?$', expr)
+                    if mm:
+                        base = (tctx or {}).get(mm.group(1))
+                        if base is None:
+                            return None
+                        return float(base) * (float(mm.group(2)) if mm.group(2) else 1.0)
+                    try:
+                        return float(expr)
+                    except (TypeError, ValueError):
+                        return None
+
+                # sev <op> N : trigger 항목 등급(0참고/1주의/2이상) 숫자 비교 (예: sev >= 1)
+                m = re.match(r'sev\s*(>=|<=|==|<|>)\s*([\d.]+)$', atom)
+                if m:
+                    return _ccmp((tctx or {}).get('level', 0), m.group(1), m.group(2))
+                # stddev(=std) <op> RHS : trigger 대표 산포(wafer std 중앙값) 비교 (예: stddev < 0.5)
+                m = re.match(r'(?:stddev|std)\s*(>=|<=|==|<|>)\s*(.+)$', atom)
+                if m:
+                    v = (tctx or {}).get('rep_std'); t = _rhs(m.group(2))
+                    return v is not None and t is not None and _ccmp(v, m.group(1), t)
+                # median <op> RHS : trigger 대표 중심(wafer median 중앙값) 비교 (예: median > spec_high*0.9)
+                #   (median_low/high/pctile(...)은 뒤에 '(' 또는 '_'가 붙어 여기 매칭 안 됨 → 기존 원자로 감)
+                m = re.match(r'median\s*(>=|<=|==|<|>)\s*(.+)$', atom)
+                if m:
+                    v = (tctx or {}).get('rep_median'); t = _rhs(m.group(2))
+                    return v is not None and t is not None and _ccmp(v, m.group(1), t)
+
                 # 그 외는 기존 원자 평가로 폴백 (sev()연산자·disp_desc/asc·median_*·*_cat2 등)
                 return _eval_atom(atom)
 
@@ -2267,17 +2334,29 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                                 display_name=_disp(_tname) if _tname else ''))
                             _hit_note = _note; _hit_idx = _bi + 1; _hit_link = _br.get('link') or ''
                             break   # 최초 매칭 분기 1개만
+                    # trigger의 median/std 실측값 — rule check 이력에 남겨 판정 근거를 투명하게
+                    def _statnote(_c):
+                        if not _c:
+                            return ''
+                        _rm = _c.get('rep_median'); _rs = _c.get('rep_std')
+                        _p = []
+                        if _rm is not None:
+                            _p.append(f"median={float(_rm):.4g}")
+                        if _rs is not None:
+                            _p.append(f"stddev={float(_rs):.4g}")
+                        return ('[' + ', '.join(_p) + ']') if _p else ''
+                    _sn = _statnote(_tctx)
                     if _hit_note:
                         _bcond = _cr.get('branches', [])[_hit_idx - 1].get('cond')
                         _rule_trace.append({'kind': 'RULE(체이닝)', 'name': _rname,
                                             'cond': (f"when:{_gate} → " + (f"분기{_hit_idx}({_bcond})" if _bcond else '기본(else)')),
                                             'matched': True,
                                             'result': f"매칭 → 분기{_hit_idx}: [불량 모드] {_hit_note}",
-                                            'note': (f"참고: {_hit_link}" if _hit_link else '')})
+                                            'note': (_sn + (' ' if _sn else '') + (f"참고: {_hit_link}" if _hit_link else '')).strip()})
                     else:
                         _rule_trace.append({'kind': 'RULE(체이닝)', 'name': _rname,
                                             'cond': f"when:{_gate} (게이트 통과)", 'matched': False,
-                                            'result': '게이트 통과·분기 무매칭', 'note': ''})
+                                            'result': '게이트 통과·분기 무매칭', 'note': _sn})
                 except Exception:
                     continue
             # 억제 적용: 지정 항목의 DISPERSION(주의) finding 제거 (spec-out=이상은 유지)
