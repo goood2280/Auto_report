@@ -2371,16 +2371,21 @@ def _render_item_charts(task):
                     for i, (sub_name, sub_grp) in enumerate(sub_groups)
                     for c in range(FIXED_N_WAF)}
 
-        render_cell = 0.55                             # 셀(=wafer 1칸) 크기(인치) — 25칸 고정
+        render_cell = 0.55                             # 셀(=wafer 1칸) axes 한 변 크기(인치) — 25칸 고정
         # shot: 인접 센터 간격(pitch) 크기 사각형으로 그려 gap 없이(측정 pt 수와 무관하게 동일 크기)
         _shot_px = _wfmap_shot_pitch(item_df[map_x]); _shot_py = _wfmap_shot_pitch(item_df[map_y])
-        fig_disp_w = grid_cols * render_cell           # 서브플롯 영역 폭(항상 25*cell)
-        fig_h = grid_rows * render_cell + 0.15         # 하단 wafer 번호 라벨 여백
+        # ── 셀(axes) 한 칸을 '정사각형'으로 만들어 wafer 정원이 셀을 꽉 채우게(HTML 단일맵과 동일 비율) ──
+        # figsize를 margin·wspace/hspace 반영해 역산 → 각 axes가 render_cell×render_cell 정사각형이 됨.
+        # (직사각형 셀이면 set_aspect(...,'box')가 짧은 변에 맞춰 원을 축소시켜 '작게' 보였음)
+        _WSP, _HSP = 0.06, 0.18
+        _ML, _MR, _MT, _MB = 0.02, 0.99, 0.97, 0.06
+        fig_disp_w = render_cell * (grid_cols + (grid_cols - 1) * _WSP) / (_MR - _ML)
+        fig_h = render_cell * (grid_rows + (grid_rows - 1) * _HSP) / (_MT - _MB)
 
         # 컬러바는 별도 이미지로 분리(슬라이드에서 항상 같은 크기로 우측에 길게 배치) → 맵은 grid만
         fig_map, axes_map = plt.subplots(grid_rows, grid_cols,
                                          figsize=(fig_disp_w, fig_h), squeeze=False,
-                                         gridspec_kw={'wspace': 0.06, 'hspace': 0.18})
+                                         gridspec_kw={'wspace': _WSP, 'hspace': _HSP})
         sc = None
         for r in range(grid_rows):
             for c in range(grid_cols):
@@ -2415,7 +2420,7 @@ def _render_item_charts(task):
                 ax.set_xlim(_px_lo, _px_hi)
                 ax.set_ylim(_py_hi, _py_lo)
 
-        fig_map.subplots_adjust(left=0.02, right=0.99, top=0.97, bottom=0.06)
+        fig_map.subplots_adjust(left=_ML, right=_MR, top=_MT, bottom=_MB)
         # 칩 격자가 선명하도록 해상도 상향
         fig_map.savefig(tmp_map, format='jpg', dpi=max(int(dpi), 200), bbox_inches="tight",
                         facecolor='white', pil_kwargs={'quality': map_q})

@@ -28,7 +28,7 @@ import requests
 #    출력이 매번 발생하던 문제 방지 — 실제 쿼리는 My_Function 내부에서 지연 import한다.)
 from My_Function import *
 from My_config import GLOBAL_CONFIG
-from anomaly_engine import run_anomaly_pipeline, analyze_commonality, render_findings_html, interpret_with_ai, item_excluded, compile_nl_to_json
+from anomaly_engine import run_anomaly_pipeline, analyze_commonality, render_findings_html, render_findings_count_html, interpret_with_ai, item_excluded, compile_nl_to_json
 
 # ==================================================================================================================================
 # GPT OSS 120B API 연결 설정
@@ -1410,23 +1410,14 @@ def main():
                         # use_gpt_summary가 켜져 있고 LLM이 가능하면, 그 Finding을 입력으로 AI 다단계 해석을 곁들임.
                         _top_n = getattr(GLOBAL_CONFIG, 'anomaly_trend_chart_top_n', 6)
 
-                        # 1) 코드 통계 분석 결과(위 1-3b에서 계산) → HTML 요약(상위 5건 + PPT 상세 참조)
-                        #    AI on: 지식판정(RULE) 매칭 항목만 Anomaly Summary에 표시,
-                        #           매칭 안 된 일반 이상/주의는 요약에서 빼고 PPT 상세로 안내.
-                        #    AI off: 기존과 동일(전체 이상/주의 요약).
+                        # 1) 코드 통계 분석 결과(위 1-3b에서 계산) → HTML 요약
+                        #    AI on: 지식판정(RULE) 내용은 상단 AI 해석 블록(_ai_block)에만 표시하고,
+                        #           그 아래에는 '이상 N건 · 주의 N건' 간단 요약만(지식판정 상세 목록/‘몇 pt’ 제거).
+                        #    AI off: 기존과 동일(전체 이상/주의 목록 요약).
                         code_summary_html = ""
                         try:
                             if _ai_on:
-                                _matched_f = [f for f in (code_findings or []) if f.get('type') == 'DEFECT_MODE']
-                                _general_f = [f for f in (code_findings or []) if f.get('type') != 'DEFECT_MODE']
-                                _tail = ''
-                                if _general_f:
-                                    _tail = (f'<div style="font-size:12px; color:#555; margin:4px 0 0;">'
-                                             f'※ 지식판정에 걸리지 않은 일반 이상/주의 {len(_general_f)}건은 '
-                                             f'<b>PPT의 Anomaly 상세(통계)</b> 페이지를 참조하세요.</div>')
-                                code_summary_html = render_findings_html(
-                                    _matched_f, kind='knowledge', tail_note=_tail,
-                                    empty_msg='지식판정(RULE)에 매칭된 항목이 없습니다.')
+                                code_summary_html = render_findings_count_html(code_findings)
                             else:
                                 code_summary_html = render_findings_html(code_findings)
                         except Exception as ce:
