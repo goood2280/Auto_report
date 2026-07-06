@@ -972,6 +972,10 @@ def main():
                         link_scoreboard_items(_sb_item_cells, item_slide_map)
 
                         # 1-3b. 코드 통계 분석(findings) — HTML [0]와 PPT 상세 페이지에 공용 사용
+                        #   ⚠️ 지식판정(RULE) 기능은 AI 연결 시에만 동작 — AI 미연결이면 기존 이상/주의 판정만.
+                        _ai_on = bool(GLOBAL_CONFIG.use_gpt_summary
+                                      and getattr(GLOBAL_CONFIG, 'use_gpt_multistep', True)
+                                      and _LLM_FN is not None)
                         code_findings = []
                         anomaly_item_stats = {}   # 항목별 통계 요약 — AI 해석 [항목 통계] 입력
                         anomaly_rule_trace = []   # 전체 anomaly rule 체크 결과(매칭/해당없음) — RUN/AI 저장·PPT 반영
@@ -982,7 +986,7 @@ def main():
                                 knowledge_text=_ANOMALY_KNOWLEDGE_TEXT,
                                 item_stats_out=anomaly_item_stats,
                                 rule_trace_out=anomaly_rule_trace,
-                                json_rules=_json_rules)
+                                json_rules=(_json_rules if _ai_on else None))
                             print(f"[INFO] commonality 분석: {len(code_findings)}건 finding")
                         except Exception as ce:
                             print(f"[WARN] commonality 분석 스킵 (오류): {ce}")
@@ -1407,9 +1411,24 @@ def main():
                         _top_n = getattr(GLOBAL_CONFIG, 'anomaly_trend_chart_top_n', 6)
 
                         # 1) 코드 통계 분석 결과(위 1-3b에서 계산) → HTML 요약(상위 5건 + PPT 상세 참조)
+                        #    AI on: 지식판정(RULE) 매칭 항목만 Anomaly Summary에 표시,
+                        #           매칭 안 된 일반 이상/주의는 요약에서 빼고 PPT 상세로 안내.
+                        #    AI off: 기존과 동일(전체 이상/주의 요약).
                         code_summary_html = ""
                         try:
-                            code_summary_html = render_findings_html(code_findings)
+                            if _ai_on:
+                                _matched_f = [f for f in (code_findings or []) if f.get('type') == 'DEFECT_MODE']
+                                _general_f = [f for f in (code_findings or []) if f.get('type') != 'DEFECT_MODE']
+                                _tail = ''
+                                if _general_f:
+                                    _tail = (f'<div style="font-size:12px; color:#555; margin:4px 0 0;">'
+                                             f'※ 지식판정에 걸리지 않은 일반 이상/주의 {len(_general_f)}건은 '
+                                             f'<b>PPT의 Anomaly 상세(통계)</b> 페이지를 참조하세요.</div>')
+                                code_summary_html = render_findings_html(
+                                    _matched_f, kind='knowledge', tail_note=_tail,
+                                    empty_msg='지식판정(RULE)에 매칭된 항목이 없습니다.')
+                            else:
+                                code_summary_html = render_findings_html(code_findings)
                         except Exception as ce:
                             print(f"[WARN] findings 렌더 스킵 (오류): {ce}")
 
@@ -1427,13 +1446,29 @@ def main():
                                         if str(_k).strip()]
                         top_item_names = []
                         _seen = set()
+
+                        def _try_add(_it):
+                            _it = str(_it).strip()
+                            if (not _it) or (_it in _seen) or (_it not in merged_df.columns) or (not _has_png(_it)) \
+                                    or item_excluded(_it, _excl_items):
+                                return
+                            top_item_names.append(_it); _seen.add(_it)
+
+                        # (AI on) 지식판정(RULE) 매칭 항목을 MD 규칙 순서대로 '먼저' 배치 →
+                        #         위에 적힌(강한) 규칙 항목이 앞, 일반 이상 항목보다 우선.
+                        if _ai_on:
+                            for _f in (code_findings or []):
+                                if _f.get('type') != 'DEFECT_MODE':
+                                    continue
+                                for _k in (_f.get('rule_matched_keys') or [_f.get('item', '')]):
+                                    _try_add(_k)
+                                    if len(top_item_names) >= _top_n: break
+                                if len(top_item_names) >= _top_n: break
+
+                        # 그다음 일반 이상 항목(SPEC_OUT 등)으로 채움(이미 담긴 매칭 항목은 _seen으로 스킵)
                         for _f in (code_findings or []):
                             for _it in str(_f.get('item', '')).split(','):
-                                _it = _it.strip()
-                                if (not _it) or (_it in _seen) or (_it not in merged_df.columns) or (not _has_png(_it)) \
-                                        or item_excluded(_it, _excl_items):
-                                    continue
-                                top_item_names.append(_it); _seen.add(_it)
+                                _try_add(_it)
                                 if len(top_item_names) >= _top_n: break
                             if len(top_item_names) >= _top_n: break
                         if len(top_item_names) < _top_n and metrics_dict:
@@ -1623,10 +1658,17 @@ def main():
                         if (GLOBAL_CONFIG.use_gpt_summary and getattr(GLOBAL_CONFIG, 'use_gpt_multistep', True)
                                 and code_findings and _LLM_FN is not None):
                             try:
+                                # 검증용 유효 불량모드 = [RULE](NL→JSON)의 comment(불량 모드명) 목록.
+                                #   AI Final이 고른 모드를 이 목록과 대조해 표기(할루시네이션 차단).
+                                _defect_modes = [
+                                    {'num': str(_i + 1), 'mode': (_r.get('comment') or '').strip(),
+                                     'when': '', 'comment': '', 'link': ''}
+                                    for _i, _r in enumerate(_json_rules or [])
+                                    if (_r.get('comment') or '').strip()]
                                 ai_html = interpret_with_ai(
                                     code_findings, metrics_dict, _ANOMALY_KNOWLEDGE_TEXT,
                                     _LLM_FN, config=GLOBAL_CONFIG, target_lot_id=target_lot_id,
-                                    item_stats=anomaly_item_stats)
+                                    item_stats=anomaly_item_stats, defect_modes=_defect_modes)
                                 print("[INFO] AI 다단계 해석 적용" if ai_html else "[INFO] AI 다단계 해석 결과 없음")
                             except Exception as ae:
                                 print(f"[WARN] AI 다단계 해석 스킵 (오류): {ae}")

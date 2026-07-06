@@ -1675,6 +1675,7 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None):
                 matched = any(ok for _, _, ok in results)
 
             matched_items = [name for name, _, ok in results if ok]
+            matched_keys = [rk for _, rk, ok in results if ok]   # merged_df 컬럼 키(차트/우선배치용)
             detail_parts = []
             for name, rk, ok in results:
                 c = item_ctx.get(rk, {})
@@ -1691,12 +1692,17 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None):
             _rname = f"JSON#{ri+1} {comment}" if comment else f"JSON#{ri+1}"
             if matched:
                 _note = comment or ', '.join(matched_items)
-                findings.append(_finding(
-                    'CRITICAL', 'DEFECT_MODE',
-                    matched_items[0] if matched_items else (items_raw[0] if items_raw else ''),
+                _item0 = matched_keys[0] if matched_keys else (items_raw[0] if items_raw else '')
+                _fd = _finding(
+                    'CRITICAL', 'DEFECT_MODE', _item0,
                     f"[불량 모드] {_note}",
                     ' | '.join(detail_parts),
-                    display_name=_disp(matched_items[0]) if matched_items else ''))
+                    display_name=_disp(_item0) if _item0 else '')
+                # MD 규칙 순서(=우선순위)와 매칭 항목 키를 finding에 부착
+                #   → analyze_commonality 정렬 tie-break·차트 우선배치·요약 필터에 사용
+                _fd['rule_rank'] = ri
+                _fd['rule_matched_keys'] = matched_keys
+                findings.append(_fd)
 
             rule_trace.append({
                 'kind': 'JSON_RULE', 'name': _rname,
@@ -3085,16 +3091,17 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 findings[:] = [f for f in findings
                                if not (f.get('type') == 'DISPERSION' and f.get('item') in _suppress_disp_items)]
 
-            # ── JSON 규칙 평가 (NL→JSON 경로) ──
-            if json_rules:
-                try:
-                    _jr_findings, _jr_trace = evaluate_json_rules(json_rules, _item_ctx, disp_fn=_disp)
-                    findings.extend(_jr_findings)
-                    _rule_trace.extend(_jr_trace)
-                    if _jr_findings:
-                        print(f"[JSON RULE] {len(_jr_findings)}개 불량 모드 매칭")
-                except Exception as _je:
-                    print(f"[WARN] JSON 규칙 평가 실패: {_je}")
+        # ── JSON 규칙 평가 (NL→JSON 경로) — 체인 규칙(ANOMALY_RULES) 유무와 무관하게 항상 평가 ──
+        #   ⚠️ 반드시 `if _chain:` 밖에 두어야 함(체인 규칙 없이 [RULE](NL→JSON)만 있어도 판정되도록).
+        if json_rules:
+            try:
+                _jr_findings, _jr_trace = evaluate_json_rules(json_rules, _item_ctx, disp_fn=_disp)
+                findings.extend(_jr_findings)
+                _rule_trace.extend(_jr_trace)
+                if _jr_findings:
+                    print(f"[JSON RULE] {len(_jr_findings)}개 불량 모드 매칭")
+            except Exception as _je:
+                print(f"[WARN] JSON 규칙 평가 실패: {_je}")
     except Exception as _ke:
         print(f"[WARN] 지식 규칙/불량모드 평가 실패: {_ke}")
 
@@ -3139,30 +3146,49 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     for _f in findings:
         _f['priority'] = round(_priority(_f), 3)   # 투명성 위해 finding에 priority 값 부착
 
-    findings.sort(key=lambda f: (-_priority(f),
-                                 _rankinfo.get(f.get('item', ''), {}).get('report_order', 1e9)))
+    #   동순위 tie-break: DEFECT_MODE(지식판정)는 **MD 규칙 순서(rule_rank)** 로 정렬해
+    #   위에 적힌(=강한 판정) 규칙이 먼저 오게 하고, 그 외 finding은 REPORT ORDER로 정렬한다.
+    def _tiebreak(f):
+        if f.get('type') == 'DEFECT_MODE':
+            return f.get('rule_rank', 1e9)
+        return _rankinfo.get(f.get('item', ''), {}).get('report_order', 1e9)
+
+    findings.sort(key=lambda f: (-_priority(f), _tiebreak(f)))
     # 항목별 통계 요약을 호출자(→ interpret_with_ai의 [항목 통계])로 반환
     if isinstance(item_stats_out, dict):
         item_stats_out.update(_item_stats)
     return findings
 
 
-def render_findings_html(findings, top_n=5, detail_ref="PPT의 Score Board 다음 'Anomaly 상세(통계)' 페이지"):
+def render_findings_html(findings, top_n=5, detail_ref="PPT의 Score Board 다음 'Anomaly 상세(통계)' 페이지",
+                         kind='stat', tail_note='', empty_msg=None):
     """Finding 리스트를 HTML로 렌더링 (상위 top_n건만, 나머지는 PPT 상세 참조 안내).
 
-    findings는 analyze_commonality에서 severity 순으로 정렬되어 들어온다.
+    findings는 analyze_commonality에서 severity(우선순위) 순으로 정렬되어 들어온다.
+    kind='stat'      : 통계 자동 분석(이상/주의 건수 head).
+    kind='knowledge' : 지식판정(RULE) 매칭 결과(매칭 N건 head) — AI 연결 시 Anomaly Summary용.
+    tail_note        : 목록 아래에 덧붙일 안내(예: 일반 이상 N건은 PPT 상세 참조).
+    empty_msg        : findings 없을 때 문구 override.
     """
     if not findings:
-        return ('<ul style="font-size:14px; color:#333; margin:5px 0 15px; padding-left:20px;">'
-                '<li><strong>[요약]</strong> 통계 자동 분석 결과 유의미한 이상/commonality 신호 없음.</li></ul>')
-    n_crit = sum(1 for f in findings if f["severity"] == "CRITICAL")
-    n_warn = sum(1 for f in findings if f["severity"] == "WARNING")
-    # head: 신호등 범례 겸 건수 (● 이상 N | ● 주의 X). 측정이상 추정은 코드 미판정(AI 전용).
-    _div = ' <span style="color:#bbb;">|</span> '
-    head = (f'<div style="font-size:13px; color:#333; margin:4px 0;">'
-            f'<b>통계 기반 자동 분석</b>: '
-            f'{_sev_dot("CRITICAL")} {_SEV_HEAD["CRITICAL"]} {n_crit}건{_div}'
-            f'{_sev_dot("WARNING")} {_SEV_HEAD["WARNING"]} {n_warn}건</div>')
+        if empty_msg is None:
+            empty_msg = '통계 자동 분석 결과 유의미한 이상/commonality 신호 없음.'
+        base = ('<ul style="font-size:14px; color:#333; margin:5px 0 8px; padding-left:20px;">'
+                f'<li><strong>[요약]</strong> {empty_msg}</li></ul>')
+        return base + (tail_note or '')
+    if kind == 'knowledge':
+        head = (f'<div style="font-size:13px; color:#333; margin:4px 0;">'
+                f'<b>지식판정(RULE) 매칭</b>: '
+                f'{_sev_dot("CRITICAL")} {len(findings)}건</div>')
+    else:
+        n_crit = sum(1 for f in findings if f["severity"] == "CRITICAL")
+        n_warn = sum(1 for f in findings if f["severity"] == "WARNING")
+        # head: 신호등 범례 겸 건수 (● 이상 N | ● 주의 X). 측정이상 추정은 코드 미판정(AI 전용).
+        _div = ' <span style="color:#bbb;">|</span> '
+        head = (f'<div style="font-size:13px; color:#333; margin:4px 0;">'
+                f'<b>통계 기반 자동 분석</b>: '
+                f'{_sev_dot("CRITICAL")} {_SEV_HEAD["CRITICAL"]} {n_crit}건{_div}'
+                f'{_sev_dot("WARNING")} {_SEV_HEAD["WARNING"]} {n_warn}건</div>')
     shown = findings[:top_n]
     lis = []
     for f in shown:
@@ -3178,11 +3204,11 @@ def render_findings_html(findings, top_n=5, detail_ref="PPT의 Score Board 다�
                 f'… 우선순위 상위 {top_n}건만 표시. 전체 {len(findings)}건의 상세는 '
                 f'<b>{detail_ref}</b>를 참조하세요.</div>')
     return head + ('<ul style="font-size:13px; color:#333; margin:5px 0 8px; padding-left:4px; list-style:none;">'
-                   + "".join(lis) + '</ul>') + more
+                   + "".join(lis) + '</ul>') + more + (tail_note or '')
 
 
 def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
-                      config=None, target_lot_id="", item_stats=None):
+                      config=None, target_lot_id="", item_stats=None, defect_modes=None):
     """AI 다단계 해석: 각 단계의 판단을 다음 단계 입력으로 넘겨 최종 판단 생성.
 
     단계
@@ -3403,7 +3429,10 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
                 "직전 응답이 JSON 객체 형식이 아니었습니다. 다른 텍스트/코드펜스 없이 "
                 "반드시 JSON 객체 하나만 출력하세요.\n" + _final_sys, _final_user)
 
-        body = _assemble_final_html(final, _parse_defect_modes(knowledge_text))
+        # 검증용 유효 불량모드 = [RULE](NL→JSON)에서 온 defect_modes + (하위호환) ANOMALY_RULES 파싱분.
+        #   현재 규칙은 NL_RULES/[RULE]→JSON이므로 defect_modes(호출자 제공)가 주 소스.
+        _valid_modes = (defect_modes or []) + _parse_defect_modes(knowledge_text)
+        body = _assemble_final_html(final, _valid_modes)
         note = ('<div style="font-size:11px; color:#9aa0a6; font-style:italic; margin:2px 0 4px;">'
                 '※ 아래 내용은 AI가 자동 생성한 참고용 요약입니다. 보조 자료로만 활용하세요.</div>')
         # 본문은 검정 글씨 + 글머리 점 제거(list-style:none)
