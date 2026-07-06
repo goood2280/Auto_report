@@ -966,17 +966,29 @@ def _keep_valid_rule_blocks(rules_text):
 
 
 def _extract_nl_rules(text):
-    """ANOMALY_KNOWLEDGE.md의 NL_RULES 마커 사이 자연어 규칙 원문을 추출(마커 라인 제외)."""
+    """ANOMALY_KNOWLEDGE.md의 NL_RULES 마커 사이 규칙 원문을 추출(마커/주석 라인 제외).
+
+    각 규칙 줄은 `[RULE] ...` 형식으로 적으며, 선행 `[RULE]` 태그(대소문자 무관)와
+    마크다운 목록 기호(-, *)는 제거해 파서에 전달한다. 태그 없는 순수 자연어 줄도
+    하위호환으로 그대로 인식한다.
+    """
+    import re as _re
     if not text:
         return ''
     _s = text.find('NL_RULES:start')
     _e = text.find('NL_RULES:end')
     if _s == -1 or _e == -1 or _e <= _s:
         return ''
-    lines = [l for l in text[_s:_e].splitlines()
-             if 'NL_RULES' not in l and l.strip() not in ('', '<!--', '-->')
-             and not l.strip().startswith('<!--')]   # 변환완료 주석(<!-- ... -->)은 제외 → 재변환 방지
-    return '\n'.join(lines).strip()
+    _out = []
+    for l in text[_s:_e].splitlines():
+        s = l.strip()
+        if not s or 'NL_RULES' in s or s.startswith('<!--'):
+            continue
+        s = _re.sub(r'^[-*]\s+', '', s)             # 마크다운 목록 기호 제거
+        s = _re.sub(r'^\[\s*RULE\s*\]\s*', '', s, flags=_re.I)  # 선행 [RULE] 태그 제거
+        if s:
+            _out.append(s)
+    return '\n'.join(_out).strip()
 
 
 def _nl_ai_compile(nl, llm_fn):
@@ -1324,24 +1336,35 @@ def _nl_json_cache_path(cache_dir='RUN/AI'):
     return os.path.join(cache_dir, 'nl_rules_json.json')
 
 
-def _load_nl_json_cache(cache_dir='RUN/AI'):
+def _nl_text_hash(nl_text):
+    import hashlib
+    return hashlib.sha256((nl_text or '').encode('utf-8')).hexdigest()
+
+
+def _load_nl_json_cache(cache_dir='RUN/AI', nl_text=None):
+    """캐시 로드. nl_text 지정 시 해시가 일치할 때만 사용(규칙 편집 시 자동 무효화)."""
     import json
     try:
         with open(_nl_json_cache_path(cache_dir), encoding='utf-8') as f:
             d = json.load(f)
-        if isinstance(d, list):
-            return d
+        # 신 포맷: {'nl_sha':..., 'rules':[...]} — 입력 규칙이 바뀌면 무효화
+        if isinstance(d, dict) and isinstance(d.get('rules'), list):
+            if nl_text is None or d.get('nl_sha') == _nl_text_hash(nl_text):
+                return d['rules']
+            return []
+        # 구 포맷(list): 해시 미보유 → 재변환 유도(무효화)
     except Exception:
         pass
     return []
 
 
-def _save_nl_json_cache(rules, cache_dir='RUN/AI'):
+def _save_nl_json_cache(rules, cache_dir='RUN/AI', nl_text=None):
     import json, os
     try:
         os.makedirs(cache_dir, exist_ok=True)
         with open(_nl_json_cache_path(cache_dir), 'w', encoding='utf-8') as f:
-            json.dump(rules, f, ensure_ascii=False, indent=2)
+            json.dump({'nl_sha': _nl_text_hash(nl_text), 'rules': rules},
+                      f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[NL-JSON] 캐시 저장 실패: {e}")
 
@@ -1358,9 +1381,9 @@ def convert_nl_to_json(nl_text, llm_fn=None, cache_dir='RUN/AI', use_cache=True)
     if not (nl_text or '').strip():
         return []
 
-    # ── 캐시 확인 ──
+    # ── 캐시 확인 (규칙 텍스트 해시 일치 시에만 재사용 → 규칙 편집 시 자동 무효화) ──
     if use_cache:
-        cached = _load_nl_json_cache(cache_dir)
+        cached = _load_nl_json_cache(cache_dir, nl_text)
         if cached:
             return cached
 
@@ -1373,7 +1396,7 @@ def convert_nl_to_json(nl_text, llm_fn=None, cache_dir='RUN/AI', use_cache=True)
         try:
             rules = _nl_json_ai(lines, llm_fn)
             if rules:
-                _save_nl_json_cache(rules, cache_dir)
+                _save_nl_json_cache(rules, cache_dir, nl_text)
                 return rules
         except Exception as e:
             print(f"[NL-JSON] AI 변환 실패, 키워드 fallback: {e}")
@@ -1385,7 +1408,7 @@ def convert_nl_to_json(nl_text, llm_fn=None, cache_dir='RUN/AI', use_cache=True)
         if r:
             rules.append(r)
     if rules:
-        _save_nl_json_cache(rules, cache_dir)
+        _save_nl_json_cache(rules, cache_dir, nl_text)
     return rules
 
 
@@ -1413,6 +1436,8 @@ def _nl_json_ai(lines, llm_fn):
         '- condition.grade: ">=abnormal"(이상 수준 이상), ">=caution"(주의 수준 이상), ">=info"(참고 이상)\n'
         '- condition.logic: "all"(모두 만족), "any"(하나만, 기본값)\n'
         '- condition.median, stddev, disp_ratio, spec_out: 비교 연산자+숫자\n'
+        '- condition.median/stddev 우변은 숫자 대신 "spec_high"/"spec_low"(선택 "*계수") 가능.\n'
+        '    예: "median이 스펙 상한의 90% 넘으면" → "median": ">spec_high*0.9"\n'
         '- comment: 자연어에서 ""로 감싼 코멘트, 없으면 규칙 요약\n'
         "- 조건에 해당하지 않는 필드는 생략\n"
     )
@@ -1440,10 +1465,16 @@ def _nl_json_keyword_parse(line):
     cm = re.findall(r'"([^"]+)"', line)
     comment = cm[0] if cm else ''
 
+    # 조건 판정용 텍스트 — 항목([...])·코멘트("...")는 제거해 키워드 오검출 방지
+    #   (예: 코멘트 "Trend 대비 이상"의 '이상'이 grade를 오판하지 않도록)
+    cond_text = re.sub(r'"[^"]*"', ' ', line)
+    cond_text = re.sub(r'\[[^\]]*\]', ' ', cond_text)
+    line = cond_text   # 이하 숫자/키워드 파싱은 조건 텍스트 기준
+
     cond = {}
     low = line.lower().replace(' ', '')
 
-    # grade
+    # grade (이상 > 주의 우선)
     if '이상수준' in low or '이상' in line:
         cond['grade'] = '>=abnormal'
     elif '주의수준' in low or '주의' in line:
@@ -1455,14 +1486,26 @@ def _nl_json_keyword_parse(line):
     else:
         cond['logic'] = 'any'
 
-    # median
-    m = re.search(r'[Mm]edian\s*(?:이|가)?\s*([\d.]+)\s*이하', line)
+    # median vs spec 상한/하한 (스펙 상한/하한의 N% — spec_high/spec_low 우변)
+    m = re.search(r'(?:스펙?\s*상한|spec[_ ]?high)\D*?([\d.]+)\s*%', line, re.I)
     if m:
-        cond['median'] = f'<={m.group(1)}'
+        op = '>' if ('넘' in line or '초과' in line or '이상' in line) else '<'
+        cond['median'] = f'{op}spec_high*{float(m.group(1)) / 100:.4g}'
     else:
-        m = re.search(r'[Mm]edian\s*(?:이|가)?\s*([\d.]+)\s*이상', line)
+        m = re.search(r'(?:스펙?\s*하한|spec[_ ]?low)\D*?([\d.]+)\s*%', line, re.I)
         if m:
-            cond['median'] = f'>={m.group(1)}'
+            op = '<' if ('미만' in line or '이하' in line or '아래' in line) else '>'
+            cond['median'] = f'{op}spec_low*{float(m.group(1)) / 100:.4g}'
+
+    # median (숫자 직접 비교)
+    if 'median' not in cond:
+        m = re.search(r'[Mm]edian\s*(?:이|가)?\s*([\d.]+)\s*이하', line)
+        if m:
+            cond['median'] = f'<={m.group(1)}'
+        else:
+            m = re.search(r'[Mm]edian\s*(?:이|가)?\s*([\d.]+)\s*이상', line)
+            if m:
+                cond['median'] = f'>={m.group(1)}'
 
     # stddev
     m = re.search(r'[Ss]tddev\s*(?:가|이)?\s*([\d.]+)\s*이하', line)
@@ -1513,18 +1556,42 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None):
     findings = []
     rule_trace = []
 
-    def _parse_cmp(expr):
-        """비교 표현식 '>=2.0' → (op_fn, value)."""
-        if not expr:
+    def _resolve_rhs(rhs, c):
+        """조건 우변 → 숫자. 숫자 또는 spec_high/spec_low(선택 `*계수`/`/계수`) 지원."""
+        rhs = str(rhs).strip()
+        m = re.match(r'(spec_high|spec_low)\s*(?:([*/])\s*([\d.]+))?$', rhs, re.I)
+        if m:
+            base = c.get(m.group(1).lower())
+            try:
+                base = float(base)
+            except (TypeError, ValueError):
+                return None
+            if m.group(2) == '*':
+                base *= float(m.group(3))
+            elif m.group(2) == '/':
+                base /= float(m.group(3))
+            return base
+        try:
+            return float(rhs)
+        except ValueError:
             return None
-        m = re.match(r'(>=|<=|>|<|==)\s*([\d.]+)', str(expr))
+
+    def _num_ok(expr, val, c):
+        """수치 조건 'op RHS' 를 val과 대조. RHS는 숫자 또는 spec_high/spec_low."""
+        m = re.match(r'(>=|<=|>|<|==)\s*(.+)$', str(expr).strip())
         if not m:
-            return None
-        op_str, val = m.group(1), float(m.group(2))
-        ops = {'>=': lambda x: x >= val, '<=': lambda x: x <= val,
-               '>': lambda x: x > val, '<': lambda x: x < val,
-               '==': lambda x: x == val}
-        return ops.get(op_str)
+            return None  # 인식 불가 → 조건 무시(스킵)
+        thr = _resolve_rhs(m.group(2), c)
+        if thr is None or val is None:
+            return False
+        op_str = m.group(1)
+        ops = {'>=': lambda x: x >= thr, '<=': lambda x: x <= thr,
+               '>': lambda x: x > thr, '<': lambda x: x < thr,
+               '==': lambda x: x == thr}
+        try:
+            return ops[op_str](float(val))
+        except (TypeError, ValueError):
+            return False
 
     def _resolve_item(name, ctx):
         """항목명 → _item_ctx 키 매칭(정확 → 대소문자무시 → 부분매칭)."""
@@ -1571,16 +1638,10 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None):
             expr = cond.get(cond_key)
             if not expr:
                 continue
-            fn = _parse_cmp(expr)
-            if not fn:
+            ok = _num_ok(expr, c.get(ctx_key), c)
+            if ok is None:      # 인식 불가한 조건식 → 그 조건은 스킵
                 continue
-            val = c.get(ctx_key)
-            if val is None:
-                return False
-            try:
-                if not fn(float(val)):
-                    return False
-            except (TypeError, ValueError):
+            if not ok:
                 return False
 
         return True

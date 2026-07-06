@@ -456,22 +456,12 @@ def main():
     except Exception as _ke:
         print(f"[WARN] 이상 지식베이스 로드 실패: {_ke}")
 
-    # ── 자연어 규칙(NL_RULES) → [RULE] 발행 시 '바로 적용' (문구별 캐시로 일관 변환) ──
-    #   NL_RULES 마커의 자연어를 문구별 캐시(RUN/AI/nl_rules_map.json)로 변환해 in-memory 적용한다:
-    #   같은 문구는 항상 같은 when 코드(캐시), 새 문구만 AI(연결 시)/키워드 fallback으로 변환.
-    #   엔지니어는 발행 결과를 보고 자연어(또는 캐시의 when)를 고쳐 다시 발행하며 조정한다.
-    #   (config.anomaly_nl_autocompile=False로 두면 발행 시 자동 적용을 끌 수 있음 — 기본 True.)
-    try:
-        if getattr(GLOBAL_CONFIG, 'anomaly_nl_autocompile', True):
-            from anomaly_engine import compile_nl_rules, inject_compiled_rules
-            _nl_compiled = compile_nl_rules(_ANOMALY_KNOWLEDGE_TEXT, _LLM_FN,
-                                            cache_dir=os.path.join('RUN', 'AI'))
-            if _nl_compiled:
-                _ANOMALY_KNOWLEDGE_TEXT = inject_compiled_rules(_ANOMALY_KNOWLEDGE_TEXT, _nl_compiled)
-    except Exception as _ne:
-        print(f"[WARN] 자연어 규칙 처리 실패(수기 [RULE]만 사용): {_ne}")
+    # ── [RULE] 규칙은 아래 NL→JSON 단일 엔진으로만 판정한다 ──
+    #   NL_RULES 마커의 `[RULE]` 한 줄들을 JSON 조건으로 변환해 evaluate_json_rules로 판정한다.
+    #   판정 방식: '모든 [RULE]을 전부 점검 → 조건 만족하는 규칙마다 각각 코멘트' (다중 매칭 전부 표기).
+    #   (구 verbose [RULE] 체이닝(먼저 만족한 분기 1개만) 컴파일 경로는 중복 판정 방지를 위해 비활성화.)
 
-    # ── 자연어 규칙 → JSON 변환 (새 판정 엔진용) ──
+    # ── 자연어 규칙 → JSON 변환 (판정 엔진용) ──
     _json_rules = None
     if getattr(GLOBAL_CONFIG, 'anomaly_nl_autocompile', True):
         try:
