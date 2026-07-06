@@ -829,6 +829,10 @@ RULE_FUNCTION_SPEC = """\
   meas_overlap(PCHK명) >= n : 그 PCHK와 동일 shot에서 다른 항목이 함께 spec-out인 겹침 수 비교
   measured(ITEM)           : 항목이 target lot에서 측정됨(미측정 항목 가드용)
   count_sev(critical) >= n : 해당 등급 이상(critical|warning)인 항목의 '개수' 비교(전 항목 대상)
+  sev >= 1                 : trigger 항목 등급 숫자 비교(0=참고/1=주의/2=이상). 예 sev>=1(주의 이상)
+  disp_ratio > 2.0         : trigger의 worst wafer 산포배수(보통 wafer 대비) 비교
+  stddev < 0.5             : trigger 대표 산포(wafer별 std 중앙값) 비교(우변: 숫자 또는 spec_high/spec_low[*계수])
+  median > spec_high * 0.9 : trigger 대표 median(wafer별 median 중앙값) 비교(우변 동일)
 등급 의미: 이상(critical)=spec 이탈 pt 존재 / 주의(warning)=wafer 산포가 보통 wafer 대비 임계배수 초과.
 항목명/CAT2명은 원 이름(ALIAS)·표시명 둘 다 인식된다(자연어에 적힌 표기 그대로 사용)."""
 
@@ -863,6 +867,10 @@ NL_PATTERN_HINTS = """\
   "PCHK와 동일 shot 겹침이 n개 이상"   → meas_overlap(PCHK명) >= n
   "A가 측정된 경우에만"                → measured(A) AND ...
   "이상 항목이 n개 이상이면"           → count_sev(critical) >= n
+  "(trigger가) 주의 이상이면"          → sev >= 1   ("이상이면"=sev >= 2)
+  "산포가 x배 넘으면"(trigger)         → disp_ratio > x
+  "stddev/표준편차가 x 이하면"         → stddev < x
+  "median이 spec 상한의 N% 넘으면"     → median > spec_high * (N/100)  (하한이면 spec_low)
   "(주의)" 표기가 있으면               → sev: warning (없으면 critical)
   "링크: URL"                          → link: "URL" (해당 분기의 link)
 판정명("큰따옴표 문구")은 note:에 그대로 넣는다. 따옴표가 없으면 문맥에서 짧은 판정 문구를 만들어 note에 넣는다."""
@@ -895,6 +903,7 @@ _ATOM_VALID_PATTERNS = [
     r'sev\s*(>=|<=|==|<|>)\s*[\d.]+$',
     r'(stddev|std)\s*(>=|<=|==|<|>)\s*([\d.]+|spec_(high|low)(\s*\*\s*[\d.]+)?)$',
     r'median\s*(>=|<=|==|<|>)\s*([\d.]+|spec_(high|low)(\s*\*\s*[\d.]+)?)$',
+    r'disp_ratio\s*(>=|<=|==|<|>)\s*[\d.]+$',
 ]
 
 
@@ -965,8 +974,34 @@ def _extract_nl_rules(text):
     if _s == -1 or _e == -1 or _e <= _s:
         return ''
     lines = [l for l in text[_s:_e].splitlines()
-             if 'NL_RULES' not in l and l.strip() not in ('', '<!--', '-->')]
+             if 'NL_RULES' not in l and l.strip() not in ('', '<!--', '-->')
+             and not l.strip().startswith('<!--')]   # 변환완료 주석(<!-- ... -->)은 제외 → 재변환 방지
     return '\n'.join(lines).strip()
+
+
+def _nl_ai_compile(nl, llm_fn):
+    """자연어(nl) → [RULE] 텍스트 1회 AI 컴파일 (+검증 실패 시 오류 피드백 재시도 1회).
+
+    반환 (compiled_text, n_valid, errors). LLM 호출/검증만 담당(캐시·적용은 호출부).
+    """
+    _system = (
+        "당신은 규칙 DSL 컴파일러입니다. 아래 '자연어 규칙' 각각을 [RULE] 블록 하나로 변환하세요.\n"
+        "출력은 [RULE] 블록들만(설명문/코드펜스/번호 금지). 자연어 규칙의 순서를 유지하세요.\n"
+        "- name: 에는 자연어 규칙을 요약한 짧은 이름을, note: 에는 판정 시 표기할 불량 모드 문구를 적으세요\n"
+        "  (자연어에 판정명/코멘트가 있으면 그대로 사용).\n"
+        "- 항목명/CAT2명은 자연어에 적힌 표기 그대로 사용하세요(임의 변경 금지).\n"
+        "- 아래 카탈로그에 있는 키·조건 원자만 사용하세요. 카탈로그로 표현할 수 없는 규칙은\n"
+        "  블록을 만들지 말고 '# 변환불가: <이유>' 주석 한 줄만 남기세요.\n\n"
+        + RULE_FUNCTION_SPEC + "\n\n" + NL_PATTERN_HINTS)
+    _user = f"[자연어 규칙]\n{nl}"
+    compiled = _strip_code_fences(llm_fn(_system, _user))
+    n, errs = _validate_rules_text(compiled)
+    if errs:
+        _retry_sys = (_system + "\n\n직전 변환에 아래 오류가 있었습니다. 오류를 수정해 "
+                      "전체 [RULE] 블록을 처음부터 다시 출력하세요:\n- " + "\n- ".join(errs))
+        compiled = _strip_code_fences(llm_fn(_retry_sys, _user))
+        n, errs = _validate_rules_text(compiled)
+    return compiled, n, errs
 
 
 def _strip_code_fences(text):
@@ -1011,27 +1046,10 @@ def compile_nl_rules(knowledge_text, llm_fn, cache_dir='RUN/AI'):
         print("[WARN] NL RULES: 자연어 규칙이 있으나 LLM 미연결·캐시 없음 → 이번 실행 미적용(수기 [RULE]만 동작)")
         return ''
 
-    _system = (
-        "당신은 규칙 DSL 컴파일러입니다. 아래 '자연어 규칙' 각각을 [RULE] 블록 하나로 변환하세요.\n"
-        "출력은 [RULE] 블록들만(설명문/코드펜스/번호 금지). 자연어 규칙의 순서를 유지하세요.\n"
-        "- name: 에는 자연어 규칙을 요약한 짧은 이름을, note: 에는 판정 시 표기할 불량 모드 문구를 적으세요\n"
-        "  (자연어에 판정명/코멘트가 있으면 그대로 사용).\n"
-        "- 항목명/CAT2명은 자연어에 적힌 표기 그대로 사용하세요(임의 변경 금지).\n"
-        "- 아래 카탈로그에 있는 키·조건 원자만 사용하세요. 카탈로그로 표현할 수 없는 규칙은\n"
-        "  블록을 만들지 말고 '# 변환불가: <이유>' 주석 한 줄만 남기세요.\n\n"
-        + RULE_FUNCTION_SPEC + "\n\n" + NL_PATTERN_HINTS)
-    _user = f"[자연어 규칙]\n{nl}"
-
-    compiled = _strip_code_fences(llm_fn(_system, _user))
-    n, errs = _validate_rules_text(compiled)
+    compiled, n, errs = _nl_ai_compile(nl, llm_fn)
     if errs:
-        # 검증 오류를 그대로 피드백해 1회 재시도(자가 수정)
-        _retry_sys = (_system + "\n\n직전 변환에 아래 오류가 있었습니다. 오류를 수정해 "
-                      "전체 [RULE] 블록을 처음부터 다시 출력하세요:\n- " + "\n- ".join(errs))
-        compiled = _strip_code_fences(llm_fn(_retry_sys, _user))
-        n, errs = _validate_rules_text(compiled)
-    if errs:
-        compiled, n, _dropped = _keep_valid_rule_blocks(compiled)
+        _c2, _n2, _dropped = _keep_valid_rule_blocks(compiled)
+        compiled, n = _c2, _n2
         print(f"[WARN] NL RULES: 일부 규칙 변환 실패 → 유효 {n}개만 적용, {_dropped}개 제외 ({'; '.join(errs[:3])})")
     if n == 0 or not compiled.strip():
         print("[WARN] NL RULES: 유효한 [RULE] 변환 결과 없음 → 미적용")
@@ -1067,6 +1085,194 @@ def inject_compiled_rules(knowledge_text, compiled_text):
     j = knowledge_text.rfind('<!--', 0, i)
     ins = j if j != -1 else i
     return knowledge_text[:ins] + _hdr + compiled_text.strip() + "\n\n" + knowledge_text[ins:]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 자연어 규칙 — 키워드 fallback(AI 없이) + 변환·확인·MD 적용 도구
+#   요구사항: (2) AI 불가 시 키워드 패턴 매칭 fallback, (3) 변환 결과 확인 후 적용(자동 X),
+#            (4) 변환된 코드 문법을 MD에 주석으로 남겨 추적.
+# ──────────────────────────────────────────────────────────────────────
+def _nl_fallback_compile(nl_text):
+    """LLM 없이 키워드 패턴 매칭으로 자연어 → [RULE] 변환(best-effort fallback).
+
+    간단·명시적 표현만 변환하고, 애매하면 '# 변환불가(키워드)' 주석으로 남긴다(자동 확정 금지).
+    반환 (compiled_text, mappings) — mappings=[{nl, block, ok, reason}].
+    """
+    import re
+    lines = [l.strip() for l in (nl_text or '').splitlines() if l.strip()]
+    blocks, maps = [], []
+    for raw in lines:
+        s = re.sub(r'^[-*]\s+', '', raw).strip()
+        _mn = re.search(r'"([^"]+)"', s)
+        note = _mn.group(1) if _mn else ''
+        _ml = re.search(r'(?:링크|link)\s*[:：]\s*(\S+)', s, re.I)
+        link = _ml.group(1) if _ml else ''
+        # '(주의)'는 finding 등급 태그 → 조건 판정용 low에서는 제거(조건으로 오인 방지)
+        sev = 'warning' if re.search(r'\(\s*주의\s*\)', s) else 'critical'
+        low = re.sub(r'\(\s*주의\s*\)', ' ', s)
+        # 리포트 표기 항목 토큰(대문자 시작, _로 연결) — 한글 조사(과/가/이…)가 붙어도 인식되게
+        #   trailing \b 미사용(한글은 word char라 경계가 안 생김) + 앞은 영숫자/밑줄이 아닐 때만.
+        items = [it for it in re.findall(r'(?<![A-Za-z0-9_])([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)*)', low)
+                 if it not in ('EDGE', 'MIDDLE', 'CENTER', 'URL', 'PCHK')]
+        trigger = items[0] if items else ''
+        conds = []
+        # ── 등급(이상/주의) — '숫자+개/매/배 이상'(개수)와 등급 '이상' 구분 ──
+        if re.search(r'주의\s*이상', low):
+            conds.append('sev >= 1')
+        elif re.search(r'(둘\s*다|모두).*이상', low) and len(items) >= 2:
+            conds.append(f"all_sev({', '.join(items[:3])}, critical)")
+        elif re.search(r'이상', low) and not re.search(r'\d+\s*(개|매|배|시그마|%|퍼센트)\s*이상', low) \
+                and 'spec' not in low.lower():
+            conds.append('sev >= 2')
+        elif '주의' in low:
+            conds.append('sev >= 1')
+        # ── 산포 N배 → disp_ratio ──
+        m = re.search(r'산포가?\s*([\d.]+)\s*배', low)
+        if m:
+            conds.append(f"disp_ratio > {m.group(1)}")
+        # ── stddev/표준편차/산포 N 이하 → stddev ──
+        m = re.search(r'(?:stddev|표준편차)\s*(?:가|이)?\s*([\d.]+)\s*(?:이하|이내|미만)', low)
+        if m:
+            conds.append(f"stddev < {m.group(1)}")
+        # ── median vs spec 상한/하한(계수 %) → median ──
+        m = re.search(r'median.*?spec\s*상한.*?([\d.]+)\s*%', low)
+        if m:
+            conds.append(f"median > spec_high * {float(m.group(1)) / 100:.3g}")
+        else:
+            m = re.search(r'median.*?spec\s*하한.*?([\d.]+)\s*%', low)
+            if m:
+                conds.append(f"median < spec_low * {float(m.group(1)) / 100:.3g}")
+        # ── 측정 앞부분 집중 → seq_front_heavy ──
+        if re.search(r'(앞부분|전면|앞쪽|앞).{0,6}(집중|몰려|많)', low):
+            conds.append('seq_front_heavy')
+        # ── 측정순서 연속 N 이탈 → seq_out(N) ──
+        m = re.search(r'연속\s*([\d]+)\s*(?:개|점)?\s*(?:이상)?\s*이탈', low)
+        if m:
+            conds.append(f"seq_out({m.group(1)})")
+        # ── spec 이탈 N개 이상 → spec_out >= N (trigger 기준) ──
+        m = re.search(r'이탈이?\s*([\d]+)\s*개\s*이상', low)
+        if m and trigger:
+            conds.append(f"spec_out >= {m.group(1)}")
+        # ── zone(엣지/중앙/가장자리) N% → zone_share ──
+        m = re.search(r'(엣지|edge|가장자리|중앙|center|middle).{0,8}?([\d.]+)\s*%', low, re.I)
+        if m and trigger:
+            _z = m.group(1).lower()
+            zone = {'엣지': 'Edge', '가장자리': 'Edge', 'edge': 'Edge',
+                    '중앙': 'Center', 'center': 'Center', 'middle': 'Middle'}.get(_z, 'Edge')
+            conds.append(f"zone_share({trigger}, {zone}) >= {float(m.group(2)) / 100:.3g}")
+        # 중복 제거(순서 유지)
+        _seen = set(); conds = [c for c in conds if not (c in _seen or _seen.add(c))]
+        if not conds:
+            _blk = f"# 변환불가(키워드): {raw}"
+            blocks.append(_blk)
+            maps.append({'nl': raw, 'block': _blk, 'ok': False, 'reason': '키워드 매칭 실패(수기 [RULE] 권장)'})
+            continue
+        name = note or ((trigger + ' 판정') if trigger else '자연어 규칙')
+        _out = ['[RULE]', f'name: {name}']
+        if trigger:
+            _out.append(f'trigger: {trigger}')
+        _out += [f'sev: {sev}', f'when: {" and ".join(conds)}', f'note: "{note or name}"']
+        if link:
+            _out.append(f'link: "{link}"')
+        _blk = '\n'.join(_out)
+        _n, _errs = _validate_rules_text(_blk)
+        ok = (_n == 1 and not _errs)
+        blocks.append(_blk if ok else f"# 변환실패(검증): {raw}\n#   생성됨: when: {' and '.join(conds)}")
+        maps.append({'nl': raw, 'block': _blk, 'ok': ok, 'reason': ('' if ok else '; '.join(_errs))})
+    return '\n\n'.join(blocks), maps
+
+
+def convert_nl_rules(nl_text, llm_fn=None):
+    """자연어 규칙 → [RULE] 변환. AI(llm_fn) 우선, 실패/미연결 시 키워드 fallback.
+
+    반환 {'compiled', 'method'('AI'|'키워드'|'none'), 'mappings':[{nl,block,ok,reason}], 'n_ok'}.
+    적용/캐시는 하지 않는다(호출부에서 확인 후 적용).
+    """
+    nl = (nl_text or '').strip()
+    if not nl:
+        return {'compiled': '', 'method': 'none', 'mappings': [], 'n_ok': 0}
+    if llm_fn is not None:
+        try:
+            compiled, n, errs = _nl_ai_compile(nl, llm_fn)
+            if errs:
+                compiled, n, _ = _keep_valid_rule_blocks(compiled)
+            if n > 0 and compiled.strip():
+                # AI는 블록 단위 매핑을 못 주므로 [RULE] 블록별로 나눠 표시
+                import re
+                _blks = ['[RULE]\n' + b.strip() for b in re.split(r'(?im)^\s*\[RULE\]\s*$', compiled)[1:] if b.strip()]
+                maps = [{'nl': '(AI 변환 — 자연어 원문 전체)', 'block': b, 'ok': True, 'reason': ''} for b in _blks]
+                return {'compiled': compiled, 'method': 'AI', 'mappings': maps, 'n_ok': n}
+            print("[NL] AI 변환 결과가 유효하지 않음 → 키워드 fallback 사용")
+        except Exception as _e:
+            print(f"[NL] AI 변환 실패 → 키워드 fallback: {_e}")
+    compiled, maps = _nl_fallback_compile(nl)
+    return {'compiled': compiled, 'method': '키워드', 'mappings': maps,
+            'n_ok': sum(1 for m in maps if m['ok'])}
+
+
+def _mark_nl_converted(md, mappings):
+    """NL_RULES 마커 안에서 변환 완료된 자연어 원문을 '<!-- (변환완료) … -->' 주석으로 치환(추적성·재변환 방지)."""
+    s = md.find('NL_RULES:start'); e = md.find('NL_RULES:end')
+    if s == -1 or e == -1 or e <= s:
+        return md
+    seg = md[s:e]
+    for m in mappings:
+        if m.get('ok') and m.get('nl') and not m['nl'].startswith('(AI') and m['nl'] in seg:
+            seg = seg.replace(m['nl'], f"<!-- (변환완료→ANOMALY_RULES) {m['nl']} -->")
+    return md[:s] + seg + md[e:]
+
+
+def apply_nl_rules_to_md(md_path, llm_fn=None, assume_yes=False):
+    """자연어 규칙을 변환·표시하고 '확인 후' MD에 [RULE]로 적용(자동 적용 아님).
+
+    - NL_RULES 마커의 자연어를 변환(AI 우선, 없으면 키워드 fallback)해 원문→[RULE] 매핑을 출력.
+    - 확인(y/N; assume_yes=True면 자동 승인) 후에만 ANOMALY_RULES 마커 안에 [RULE] 주입.
+      각 [RULE] 위에 '# NL: <원문>  (변환: AI|키워드)' 주석을 남겨 추적 가능하게 한다.
+    - 적용한 자연어 원문은 NL_RULES에서 '<!-- (변환완료) -->' 주석으로 바꿔 재변환을 막는다.
+    반환 True(적용)/False(미적용).
+    """
+    try:
+        with open(md_path, encoding='utf-8') as f:
+            md = f.read()
+    except Exception as e:
+        print(f"[NL] MD 읽기 실패: {e}")
+        return False
+    nl = _extract_nl_rules(md)
+    if not nl:
+        print("[NL] NL_RULES 마커에 변환할 자연어 규칙이 없습니다.")
+        return False
+    res = convert_nl_rules(nl, llm_fn)
+    print(f"\n===== 자연어 규칙 → [RULE] 변환 결과 (방식: {res['method']}) =====")
+    for m in res['mappings']:
+        print(f"[{'OK ' if m.get('ok') else '실패'}] 자연어: {m['nl']}")
+        for _bl in m['block'].splitlines():
+            print(f"        {_bl}")
+        if not m.get('ok') and m.get('reason'):
+            print(f"        (사유: {m['reason']})")
+    print(f"===== 유효 {res['n_ok']}개 / 전체 {len(res['mappings'])}개 =====")
+    if res['n_ok'] == 0 or not res['compiled'].strip():
+        print("[NL] 유효한 [RULE] 변환 결과가 없어 적용하지 않습니다.")
+        return False
+    if not assume_yes:
+        try:
+            ans = input("이대로 ANOMALY_RULES에 적용할까요? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = 'n'
+        if ans not in ('y', 'yes'):
+            print("[NL] 취소 — 적용하지 않았습니다.")
+            return False
+    _ann = [f"# NL: {m['nl']}  (변환: {res['method']})\n{m['block'].strip()}"
+            for m in res['mappings'] if m.get('ok') and m['block'].strip().startswith('[RULE]')]
+    new_md = inject_compiled_rules(md, "\n\n".join(_ann))
+    new_md = _mark_nl_converted(new_md, res['mappings'])
+    try:
+        with open(md_path, 'w', encoding='utf-8') as f:
+            f.write(new_md)
+    except Exception as e:
+        print(f"[NL] MD 쓰기 실패: {e}")
+        return False
+    print(f"[NL] {len(_ann)}개 규칙을 ANOMALY_RULES에 적용했습니다(추적 주석 포함) → {md_path}")
+    return True
 
 
 def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
@@ -2246,6 +2452,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 if m:
                     v = (tctx or {}).get('rep_median'); t = _rhs(m.group(2))
                     return v is not None and t is not None and _ccmp(v, m.group(1), t)
+                # disp_ratio <op> x : trigger의 worst wafer 산포배수(보통 wafer 대비) 비교 (예: disp_ratio > 2.0)
+                m = re.match(r'disp_ratio\s*(>=|<=|==|<|>)\s*([\d.]+)$', atom)
+                if m:
+                    return _ccmp((tctx or {}).get('disp', 0.0), m.group(1), m.group(2))
 
                 # 그 외는 기존 원자 평가로 폴백 (sev()연산자·disp_desc/asc·median_*·*_cat2 등)
                 return _eval_atom(atom)

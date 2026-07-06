@@ -573,6 +573,12 @@ class Config:
         #   각 측정(tkout_time=wafer 측정)별로 site 값을 1점으로 집계해 Trend에 찍는다.
         self.trend_tkout_agg = {'MAWIN': 'P10'}
 
+        # ── 자연어 규칙(NL_RULES) 자동 컴파일 여부 ──
+        #   False(기본): 발행 시 자동 적용하지 않음 → `python Main.py --convert-nl-rules`로
+        #                변환 결과 확인·승인 후 MD에 [RULE]로 적용(추적 주석 포함).
+        #   True: (하위호환) 예전처럼 발행 시작 시 1회 AI 자동 컴파일·주입.
+        self.anomaly_nl_autocompile = False
+
         # 불량 모드(Defect Mode) 판정/조합 해석은 코드가 하지 않는다.
         #   - 코드는 각 Index의 단일 이상(spec-out / median·std 이탈)만 산출.
         #   - 불량 모드 우선순위 판정표는 ANOMALY_KNOWLEDGE.md('불량 모드 판정표')에서 관리하며,

@@ -289,6 +289,29 @@ def main():
     raw_arg = sys.argv[1]
     trigger_flag = False
 
+    # ── CLI: 자연어 규칙 변환·확인·적용 도구 (리포트 생성과 별개) ──
+    #   python Main.py --convert-nl-rules      : 변환 결과(자연어→[RULE]) 표시 후 y/N 확인하고 MD에 적용
+    #   python Main.py --convert-nl-rules-yes  : 확인 없이 적용(자동 승인 — 배치용)
+    #   AI(GPT OSS 120B) 연결 시 AI 변환, 미연결 시 키워드 fallback으로 변환한다.
+    if raw_arg in ('--convert-nl-rules', '--convert-nl-rules-yes'):
+        from anomaly_engine import apply_nl_rules_to_md
+
+        def _cli_llm(system, user):
+            r = gpt_client.chat.completions.create(
+                model="gpt-oss-120b",
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": user}],
+                temperature=0.3)
+            return r.choices[0].message.content
+        _llm = _cli_llm if (GPT_CONNECT and gpt_client is not None) else None
+        print("[NL] 변환 방식:", "AI(gpt-oss-120b)" if _llm else "키워드 fallback(AI 미연결)")
+        _kp = GLOBAL_CONFIG.get("anomaly_knowledge_path")
+        if not (_kp and os.path.exists(_kp)):
+            print(f"[NL] anomaly_knowledge_path를 찾을 수 없습니다: {_kp}")
+            sys.exit(1)
+        _ok = apply_nl_rules_to_md(_kp, llm_fn=_llm, assume_yes=raw_arg.endswith('-yes'))
+        sys.exit(0 if _ok else 2)
+
     # (TRIGGER) 제거
     if raw_arg.startswith("_TRIGGER_"):
         raw_arg = raw_arg.replace("_TRIGGER_", "", 1)
@@ -429,19 +452,23 @@ def main():
     except Exception as _ke:
         print(f"[WARN] 이상 지식베이스 로드 실패: {_ke}")
 
-    # ── 자연어 규칙(NL_RULES) → [RULE] 자동 컴파일 (시작 시 1회) ──
-    #   md의 NL_RULES 마커에 자연어 규칙이 있으면 LLM 1회 호출로 [RULE]로 컴파일해
-    #   ANOMALY_RULES에 주입(코드 검증 + 오류 피드백 재시도 1회, 유효 블록만).
-    #   결과는 RUN/AI/nl_rules_compiled.json에 캐시 — 자연어 원문이 같으면 LLM 재호출 없음.
-    #   LLM 미연결·캐시 없음이면 미적용(수기 [RULE]만 동작 — AI-optional).
+    # ── 자연어 규칙(NL_RULES) — 확인 후 적용 원칙(발행 시 자동 적용 X) ──
+    #   기본: 발행 시 자동 컴파일·적용하지 않는다. 엔지니어가 `python Main.py --convert-nl-rules`로
+    #   변환 결과(자연어→[RULE])를 확인·승인해 MD에 [RULE]로 남긴 뒤(추적 주석 포함) 사용한다.
+    #   (하위호환) config.anomaly_nl_autocompile=True면 예전처럼 시작 시 1회 자동 컴파일·주입.
     try:
-        from anomaly_engine import compile_nl_rules, inject_compiled_rules
-        _nl_compiled = compile_nl_rules(_ANOMALY_KNOWLEDGE_TEXT, _LLM_FN,
-                                        cache_dir=os.path.join('RUN', 'AI'))
-        if _nl_compiled:
-            _ANOMALY_KNOWLEDGE_TEXT = inject_compiled_rules(_ANOMALY_KNOWLEDGE_TEXT, _nl_compiled)
+        from anomaly_engine import _extract_nl_rules, compile_nl_rules, inject_compiled_rules
+        _pending_nl = _extract_nl_rules(_ANOMALY_KNOWLEDGE_TEXT)
+        if getattr(GLOBAL_CONFIG, 'anomaly_nl_autocompile', False):
+            _nl_compiled = compile_nl_rules(_ANOMALY_KNOWLEDGE_TEXT, _LLM_FN,
+                                            cache_dir=os.path.join('RUN', 'AI'))
+            if _nl_compiled:
+                _ANOMALY_KNOWLEDGE_TEXT = inject_compiled_rules(_ANOMALY_KNOWLEDGE_TEXT, _nl_compiled)
+        elif _pending_nl:
+            print("[NL] NL_RULES에 미적용 자연어 규칙이 있습니다 → `python Main.py --convert-nl-rules`로 "
+                  "변환·확인 후 적용하세요(발행 시 자동 적용 안 함).")
     except Exception as _ne:
-        print(f"[WARN] 자연어 규칙 컴파일 실패(수기 [RULE]만 사용): {_ne}")
+        print(f"[WARN] 자연어 규칙 처리 실패(수기 [RULE]만 사용): {_ne}")
 
     reformatter = pd.read_csv(f'reformatter/{vehicle}_reformatter.csv')
 
