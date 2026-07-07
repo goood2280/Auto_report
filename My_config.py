@@ -528,6 +528,7 @@ class Config:
         self.use_gpt_summary = True        # GPT 리포트 요약(요약문) 사용 여부 (텍스트 요약에만 영향)
         self.use_gpt_multistep = True      # AI 다단계 해석(triage→root-cause→final) 사용 (use_gpt_summary=True일 때)
         self.use_email_send = False        # 사내 메일 API로 PPT+HTML 발송 on/off (True면 리포트 발행 후 메일 전송)
+        self.mail_attach_limit = 10        # 메일 API 첨부 최대 개수(본문 인라인 이미지 + 첨부파일 합계). 초과분은 발송 시 안내 문구로 대체
         self.use_s3_upload = True          # 생성 PPT의 S3(DX) 업로드 on/off
         self.use_description_page = True   # PPT CAT2 간지(Description) 페이지 삽입 on/off
         # 이상 Trend chart([0] 섹션) 표시 여부.

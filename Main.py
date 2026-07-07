@@ -1277,18 +1277,66 @@ def main():
                                         # 연속 색상(PPT와 동일), ITEM별 스케일 override 지원
                                         bg_color, color = GLOBAL_CONFIG.score_color(val, item)
                                         sb_html += f'      <td class="sb-val" style="{_SB_WAF} background-color:{bg_color}; color:{color}; font-weight:bold;">{val:.1f}</td>\n'
-                            else:  # 'wfmap' 행 — wafer 열에 각 wafer의 WF MAP 정렬
+                            else:  # 'wfmap' 행 — wafer 열의 WF MAP을 PIL 합성해 단일 이미지로 (메일 첨부 10개 제한 대응)
+                                # 사내 메일 API는 본문 인라인 이미지도 첨부로 계산하므로, wafer당 <img> 1개씩
+                                # 넣던 방식을 행 전체 스트립 1장(colspan)으로 병합한다. 셀 pitch/구분선을
+                                # 기존 테이블과 동일하게 그려 열 정렬을 유지한다.
                                 maps = payload
                                 sb_html += (f'      <td class="sb-item row_heading" style="{_SB_ITEM} font-size:9px; color:#666; '
                                             'background-color:#ebf4ff;">WF MAP</td>\n')
-                                for col in _wcols:
-                                    _b = maps.get(f"{col[0]}|{col[1]}")
-                                    if _b:
-                                        sb_html += (f'      <td class="sb-val" style="{_SB_WAF} background-color:#ffffff; padding:0;">'
-                                                    f'<img src="data:image/png;base64,{_b}" '
-                                                    f'style="width:{_wf_w - 2}px; height:{_wf_w - 2}px; display:block; margin:auto;"/></td>\n')
-                                    else:
-                                        sb_html += f'      <td class="sb-val" style="{_SB_WAF} background-color:#f4f4f4;"></td>\n'
+                                try:
+                                    from PIL import Image as _PILImg, ImageDraw as _PILDraw, ImageFont as _PILFont
+                                    import base64 as _b64_sb
+                                    import io as _io_sb
+                                    # 셀 pitch = _wf_w (템플릿 CSS box-sizing:border-box 기준, 브라우저에서 열과 정확히 일치).
+                                    # 메일 클라이언트가 <style>을 무시해 pitch가 달라져도 wafer 번호를 스트립 안에
+                                    # 직접 그려 어느 wafer의 맵인지 식별 가능하게 한다.
+                                    _slot = _wf_w
+                                    _map_px = _wf_w - 2        # 기존 셀 내 맵 표시 크기와 동일
+                                    _lab_h = 12                # 맵 아래 wafer 번호 라벨 영역
+                                    _strip_w = _slot * len(_wcols) - 1
+                                    _strip_h = _map_px + 4 + _lab_h
+                                    _strip = _PILImg.new('RGB', (_strip_w, _strip_h), (255, 255, 255))
+                                    _sdraw = _PILDraw.Draw(_strip)
+                                    try:
+                                        _sfont = _PILFont.truetype("arial.ttf", 9)
+                                    except Exception:
+                                        _sfont = _PILFont.load_default()
+                                    for _ci, col in enumerate(_wcols):
+                                        _x0 = _ci * _slot
+                                        _b = maps.get(f"{col[0]}|{col[1]}")
+                                        if _b:
+                                            _mimg = (_PILImg.open(_io_sb.BytesIO(_b64_sb.b64decode(_b)))
+                                                     .convert('RGB').resize((_map_px, _map_px)))
+                                            _strip.paste(_mimg, (_x0 + (_slot - 1 - _map_px) // 2, 2))
+                                        else:   # 측정 없음 셀 — 기존 #f4f4f4 배경과 동일
+                                            _sdraw.rectangle([_x0, 0, _x0 + _slot - 2, _map_px + 3], fill=(244, 244, 244))
+                                        # wafer 번호 라벨(#N) — 슬롯 중앙 정렬
+                                        _lab = f"#{col[1]}"
+                                        try:
+                                            _lw = _sdraw.textlength(_lab, font=_sfont)
+                                        except Exception:
+                                            _lw = len(_lab) * 5
+                                        _sdraw.text((_x0 + max(0, (_slot - _lw) // 2), _map_px + 4),
+                                                    _lab, fill=(85, 85, 85), font=_sfont)
+                                        if _ci < len(_wcols) - 1:   # 셀 구분선(기존 border 색 #2c2c2c)
+                                            _sdraw.line([(_x0 + _slot - 1, 0), (_x0 + _slot - 1, _strip_h - 1)], fill=(44, 44, 44))
+                                    _sbuf = _io_sb.BytesIO()
+                                    _strip.save(_sbuf, format='PNG', optimize=True)
+                                    _strip_b64 = _b64_sb.b64encode(_sbuf.getvalue()).decode('utf-8')
+                                    sb_html += (f'      <td class="sb-val" colspan="{len(_wcols)}" style="{_SB_BD} padding:0; background-color:#ffffff;">'
+                                                f'<img src="data:image/png;base64,{_strip_b64}" width="{_strip_w}" height="{_strip_h}" '
+                                                f'style="width:{_strip_w}px; height:{_strip_h}px; display:block;"/></td>\n')
+                                except Exception as _sb_comp_err:
+                                    print(f"[WARN] Score Board WF MAP 합성 실패, 개별 이미지 유지: {_sb_comp_err}")
+                                    for col in _wcols:
+                                        _b = maps.get(f"{col[0]}|{col[1]}")
+                                        if _b:
+                                            sb_html += (f'      <td class="sb-val" style="{_SB_WAF} background-color:#ffffff; padding:0;">'
+                                                        f'<img src="data:image/png;base64,{_b}" '
+                                                        f'style="width:{_wf_w - 2}px; height:{_wf_w - 2}px; display:block; margin:auto;"/></td>\n')
+                                        else:
+                                            sb_html += f'      <td class="sb-val" style="{_SB_WAF} background-color:#f4f4f4;"></td>\n'
                             sb_html += '    </tr>\n'
                         sb_html += '  </tbody>\n</table>\n'
                         score_board_html = sb_html
@@ -1771,15 +1819,29 @@ def main():
                             try:
                                 html_code_final = html_content   # 생성된 HTML 코드 문자열
 
-                                # ── 메일 본문 인라인 이미지 수 확인 (참고 로그) ──
-                                # WF MAP 합성(PIL 병합)으로 이미지 수를 줄였으므로, 10개 미만을 기대.
-                                # 만약 여전히 초과하면 경고만 출력(WF MAP은 절대 제거하지 않음).
+                                # ── 메일 첨부 개수 최종 가드 ──
+                                # 사내 메일 API는 본문 인라인(data:image) 이미지 + 첨부파일 합계가
+                                # 제한(기본 10)을 넘으면 "Attach file count is over 10"으로 발송을 거부한다.
+                                # WF MAP 합성(PIL 병합)으로 대부분 제한 이내지만, 그래도 초과하면
+                                # 본문 뒤쪽 이미지부터 안내 문구로 대체해 발송 실패를 방지한다.
+                                # (전체 이미지는 첨부 PPT에 모두 포함되어 있음. 저장된 HTML 파일은 영향 없음)
                                 import re as _re_mail
                                 _img_pattern = r'<img\s[^>]*src="data:image/[^"]*"[^>]*/?\s*>'
-                                _n_inline = len(_re_mail.findall(_img_pattern, html_code_final, _re_mail.DOTALL))
+                                _attach_limit = int(getattr(GLOBAL_CONFIG, 'mail_attach_limit', 10))
+                                _imgs = _re_mail.findall(_img_pattern, html_code_final, _re_mail.DOTALL)
+                                _n_inline = len(_imgs)
                                 _n_total = _n_inline + 1   # +1 = PPT 첨부
-                                if _n_total >= 10:
-                                    print(f"[WARN] 메일 첨부 합계 {_n_total}개 (본문 이미지 {_n_inline} + PPT 1) — 10개 제한 초과 가능")
+                                if _n_total > _attach_limit:
+                                    _n_drop = _n_total - _attach_limit
+                                    _note = ('<div style="font-size:11px; color:#888; border:1px dashed #bbb; '
+                                             'padding:6px 10px; margin:4px 0;">이미지 생략 — 상세는 첨부 PPT를 참조해 주세요.</div>')
+                                    for _im in reversed(_imgs[-_n_drop:]):   # 뒤쪽 이미지부터 대체(중복 태그 안전하게 rfind)
+                                        _pos = html_code_final.rfind(_im)
+                                        if _pos >= 0:
+                                            html_code_final = (html_code_final[:_pos] + _note
+                                                               + html_code_final[_pos + len(_im):])
+                                    print(f"[WARN] 메일 첨부 합계 {_n_total}개 (본문 이미지 {_n_inline} + PPT 1) > 제한 {_attach_limit}개 "
+                                          f"— 본문 뒤쪽 이미지 {_n_drop}개를 안내 문구로 대체 후 발송")
                                 else:
                                     print(f"[INFO] 메일 첨부 합계 {_n_total}개 (본문 이미지 {_n_inline} + PPT 1) — 제한 이내")
 
