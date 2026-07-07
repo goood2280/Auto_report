@@ -1083,6 +1083,61 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
     return prs
 
 
+_CHIP_LAYOUT = None   # Data Extractor 좌표파일(Zone_Define)의 전체 chip layout — set_chip_layout()으로 주입
+
+
+def set_chip_layout(df):
+    """좌표파일(Zone_Define 시트) 전체를 등록 — WF MAP geometry(150mm 원 fit·shot pitch)를
+    '측정 데이터'가 아니라 'MASK(vehicle)별 전체 chip layout(CHIP_X_ADJ/CHIP_Y_ADJ/Chip_Radius)'
+    로 계산하기 위한 기준. 측정 pt가 적은 wafer(예 13pt)도 full 측정과 동일한 geometry가 된다.
+    Main.py가 zone_define 로드 직후 1회 호출. (병렬 워커에는 cfg/common payload로 전달됨)"""
+    global _CHIP_LAYOUT
+    _CHIP_LAYOUT = df
+
+
+def _vehicle_chip_layout(main_vehicle=None):
+    """등록된 chip layout에서 MASK==main_vehicle 행만 표준 컬럼명
+    (CHIP_X_ADJ/CHIP_Y_ADJ[/Chip_Radius])으로 반환. 없거나 무효면 None."""
+    try:
+        lay = _CHIP_LAYOUT
+        if lay is None or len(lay) == 0:
+            return None
+        if main_vehicle is None:
+            try:
+                main_vehicle = GLOBAL_CONFIG.get('vehicle')
+            except Exception:
+                main_vehicle = None
+        cols = {str(c).upper(): c for c in lay.columns}
+        xc = cols.get('CHIP_X_ADJ'); yc = cols.get('CHIP_Y_ADJ')
+        if not (xc and yc):
+            return None
+        mc = cols.get('MASK')
+        if mc:
+            if main_vehicle is None:   # vehicle 미상이면 다른 vehicle 좌표 혼입 위험 — 미사용
+                return None
+            sub = lay[lay[mc] == main_vehicle]
+        else:                          # 이미 vehicle 필터된 표준형(워커 hydration)
+            sub = lay
+        if len(sub) == 0:
+            return None
+        rc = cols.get('CHIP_RADIUS')
+        out = sub[[c for c in [xc, yc, rc] if c]].rename(
+            columns={xc: 'CHIP_X_ADJ', yc: 'CHIP_Y_ADJ', **({rc: 'Chip_Radius'} if rc else {})})
+        out = out.drop_duplicates(subset=['CHIP_X_ADJ', 'CHIP_Y_ADJ'])
+        return out if len(out) > 0 else None
+    except Exception:
+        return None
+
+
+def _wfmap_shot_pitch_xy(d, cx, cy, main_vehicle=None):
+    """shot pitch (x, y) — 좌표파일 전체 layout이 있으면 그것으로 계산(측정 pt 수와 무관),
+    없으면 종전처럼 측정 좌표로. layout은 ADJ 좌표계이므로 플롯 좌표가 ADJ일 때만 사용."""
+    _lay = _vehicle_chip_layout(main_vehicle) if 'ADJ' in str(cx).upper() else None
+    if _lay is not None and len(_lay) >= 2:
+        return _wfmap_shot_pitch(_lay['CHIP_X_ADJ']), _wfmap_shot_pitch(_lay['CHIP_Y_ADJ'])
+    return _wfmap_shot_pitch(d[cx]), _wfmap_shot_pitch(d[cy])
+
+
 def _wafer_circle_params(df, x_col, y_col, rad_col=None, mask_col=None,
                          main_vehicle=None, wafer_radius_mm=150.0):
     """실제 150mm wafer 원 (cx, cy, semi_x, semi_y, aspect)을 '플롯 좌표계(격자)' 단위로 산출.
@@ -1108,6 +1163,22 @@ def _wafer_circle_params(df, x_col, y_col, rad_col=None, mask_col=None,
     """
     try:
         import numpy as _np
+        # ── 좌표파일(Zone_Define) 전체 layout 우선 ──
+        #   측정 pt가 적으면(예 13pt) 측정 좌표만으로는 fit(중심·shot 크기)이 불안정해
+        #   WF MAP이 깨진다. set_chip_layout()으로 등록된 MASK(vehicle)별 전체
+        #   chip layout(CHIP_X_ADJ/CHIP_Y_ADJ/Chip_Radius)이 있으면 그것으로 계산해
+        #   측정 pt 수와 무관하게 항상 동일한 geometry를 쓴다.
+        #   (layout은 ADJ 좌표계 — 플롯 좌표가 ADJ일 때만 사용. Chip_Radius가 없는
+        #    layout은 측정 df에 radius가 있으면 fit을 잃지 않도록 쓰지 않는다.)
+        if 'ADJ' in str(x_col).upper():
+            _lay = _vehicle_chip_layout(main_vehicle)
+            if _lay is not None and len(_lay) >= 6 and (
+                    'Chip_Radius' in _lay.columns
+                    or not (rad_col and rad_col in df.columns)):
+                df = _lay
+                x_col, y_col = 'CHIP_X_ADJ', 'CHIP_Y_ADJ'
+                rad_col = 'Chip_Radius' if 'Chip_Radius' in _lay.columns else None
+                mask_col = None   # 이미 vehicle 필터된 layout
         if x_col not in df.columns or y_col not in df.columns:
             return None
         # ── MASK(vehicle) 매칭: 같은 vehicle shot만 사용 ──
@@ -1343,7 +1414,7 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
     _ypad = _yr / max(int(d[cy].nunique()) - 1, 1) * 0.7 if d[cy].nunique() > 1 else _yr * 0.1
     # 축 표시범위(원 포함) — 모든 wafer 공통. shot은 인접 센터 간격(pitch) 크기 사각형으로 그림(gap 제거)
     _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(_gx0, _gx1, _gy0, _gy1, _xpad, _ypad, _circ)
-    _pit_x = _wfmap_shot_pitch(d[cx]); _pit_y = _wfmap_shot_pitch(d[cy])
+    _pit_x, _pit_y = _wfmap_shot_pitch_xy(d, cx, cy)   # 좌표파일 layout 있으면 그 기준(측정 pt수 무관)
 
     out = {}
     # by_lot: (lot, wafer)별로 그려 형제 lot을 분리. 아니면 wafer별(lot은 첫 측정 선택).
@@ -1499,7 +1570,7 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
     ypad = yr / max(int(d[cy].nunique()) - 1, 1) * 0.7 if d[cy].nunique() > 1 else yr * 0.1
     # 축 표시범위(원 포함) — 모든 맵 공통. shot은 인접 센터 간격(pitch) 크기 사각형으로 그림(gap 제거)
     _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(gx0, gx1, gy0, gy1, xpad, ypad, _circ)
-    _pit_x = _wfmap_shot_pitch(d[cx]); _pit_y = _wfmap_shot_pitch(d[cy])
+    _pit_x, _pit_y = _wfmap_shot_pitch_xy(d, cx, cy)   # 좌표파일 layout 있으면 그 기준(측정 pt수 무관)
 
     res = []
     for gd, g in ordered:
@@ -1646,7 +1717,7 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
     _ypad = _yr / max(int(d[cy].nunique()) - 1, 1) * 0.7 if d[cy].nunique() > 1 else _yr * 0.1
     # 축 표시범위(원 포함) — shot은 인접 센터 간격(pitch) 크기 사각형으로 그림(gap 제거)
     _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(_gx0, _gx1, _gy0, _gy1, _xpad, _ypad, _circ)
-    _pit_x = _wfmap_shot_pitch(d[cx]); _pit_y = _wfmap_shot_pitch(d[cy])
+    _pit_x, _pit_y = _wfmap_shot_pitch_xy(d, cx, cy)   # 좌표파일 layout 있으면 그 기준(측정 pt수 무관)
     import matplotlib.colors as _mcolors
     _norm_idx = _mcolors.Normalize(vmin=vmin, vmax=vmax)
 
@@ -2062,6 +2133,12 @@ def _render_item_charts(task):
     import matplotlib.dates as mdates
 
     cfg = task['cfg']
+    # 좌표파일 chip layout 주입 — spawn된 워커는 Main의 set_chip_layout() 상태가 없다
+    if cfg.get('chip_layout') is not None and _CHIP_LAYOUT is None:
+        try:
+            set_chip_layout(pd.DataFrame(cfg['chip_layout']))
+        except Exception:
+            pass
     item_name = task['item_name']
     spec_name = task['spec_name']
     target_lot_id = task['target_lot_id']
@@ -2384,8 +2461,10 @@ def _render_item_charts(task):
                     for i, (sub_name, sub_grp) in enumerate(sub_groups)
                     for c in range(FIXED_N_WAF)}
         # shot 크기(mm) = 인접 shot 센터 간 pitch(격자)×mm 스케일 — 측정 pt 수와 무관·gap 없음
-        _shot_px = _wfmap_shot_pitch(item_df[map_x]) * _mm_x
-        _shot_py = _wfmap_shot_pitch(item_df[map_y]) * _mm_y
+        #   (좌표파일 layout 등록 시 pitch도 전체 layout 기준 — sparse 측정에서도 동일)
+        _pit_gx, _pit_gy = _wfmap_shot_pitch_xy(item_df, map_x, map_y, main_vehicle)
+        _shot_px = _pit_gx * _mm_x
+        _shot_py = _pit_gy * _mm_y
         # 셀 공통 축범위(±_wf_L mm, 정사각): 150mm 원 + 모든 shot(반 pitch 여백 포함)을 포함
         _xs_mm = (pd.to_numeric(item_df[map_x], errors='coerce') - _wf_cx) * _mm_x
         _ys_mm = (pd.to_numeric(item_df[map_y], errors='coerce') - _wf_cy) * _mm_y
@@ -2516,7 +2595,7 @@ def _render_item_charts(task):
         has_lot = 'fab_lot_id' in tdf.columns
 
         # ---- 특정 항목: site별 모든 값 대신 tkout_time 기준 집계점으로 Trend 표시 ----
-        #   config.trend_tkout_agg = {ALIAS: 'P10'/'P90'/'MEDIAN'/'MEAN'}. base ALIAS 키('MAWIN')로
+        #   config.trend_tkout_agg = {ALIAS: 'PXX'(임의 백분위수, 예 P05/P95)/'MEDIAN'/'MEAN'}. base ALIAS 키('MAWIN')로
         #   파생 컬럼(MAWIN_*)까지 매칭 — 이상/주의 판정(anomaly_engine)과 '동일한' 규칙(trend_agg_spec).
         from anomaly_engine import trend_agg_spec as _trend_agg_spec
         _agg_map = cfg.get('trend_tkout_agg') or {}
@@ -2884,6 +2963,12 @@ def _wfmap_batch_task(payload):
     """
     df = payload['df']
     common = payload['common']
+    # 좌표파일 chip layout 주입 — spawn된 워커는 Main의 set_chip_layout() 상태가 없다
+    if common.get('chip_layout') is not None and _CHIP_LAYOUT is None:
+        try:
+            set_chip_layout(pd.DataFrame(common['chip_layout']))
+        except Exception:
+            pass
     out = {}
     for it in payload['items']:
         try:
@@ -2913,7 +2998,10 @@ def render_wafer_wfmaps_batch(df, item_specs, min_pts=50, lot_prefix=None,
     if workers is None:
         workers = get_parallel_workers()
 
-    common = {'min_pts': min_pts, 'lot_prefix': lot_prefix, 'dpi': dpi, 'by_lot': by_lot}
+    # chip layout(main vehicle 필터 적용 표준형) — 워커는 GLOBAL_CONFIG(vehicle)를 모른다
+    _lay_batch = _vehicle_chip_layout()
+    common = {'min_pts': min_pts, 'lot_prefix': lot_prefix, 'dpi': dpi, 'by_lot': by_lot,
+              'chip_layout': (_lay_batch.to_dict('records') if _lay_batch is not None else None)}
 
     def _serial():
         out = {}
@@ -3135,6 +3223,10 @@ def insert_plots(merged_df, prs, description_image_info_dict,
         'trend_tkout_agg': getattr(GLOBAL_CONFIG, 'trend_tkout_agg', {}) or {},
         'html_chart_dpi': getattr(GLOBAL_CONFIG, 'html_chart_dpi', 100),
         'run_temp_dir': os.path.abspath(os.path.join('RUN', 'TEMP')),
+        # 좌표파일(Zone_Define) chip layout(main vehicle 필터 적용) — 워커의 WF MAP geometry 기준.
+        # 워커는 GLOBAL_CONFIG(vehicle)를 모르므로 메인에서 MASK 필터를 마친 표준형(records)을 넘긴다.
+        'chip_layout': (lambda _l: _l.to_dict('records') if _l is not None else None)(
+            _vehicle_chip_layout(main_vehicle)),
     }
     w_col_src = _pick('wafer_id', 'WAFER_ID') or 'wafer_id'
     cols_task = {'col_x': col_x, 'col_y': col_y, 'col_rad': col_rad, 'col_sub': col_sub,

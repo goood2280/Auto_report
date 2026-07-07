@@ -632,7 +632,7 @@ self.anomaly_exclude_items = [
 | `use_gpt_summary` / `use_gpt_multistep` | `True` | AI 사용 / 다단계 해석 토글 |
 | `ppt_chart_dpi` / `ppt_chart_jpg_quality` / `ppt_map_jpg_quality` | 150 / 70 / 60 | PPT 차트 해상도·품질 (10MB 한도 가드) |
 | `img_quality_low` / `img_quality_high` | 12 / 95 | 메일용 / 아카이브용 이미지 품질 |
-| `trend_tkout_agg` | `{'MAWIN':'P10'}` | 특정 항목은 site 전체 대신 tkout별 집계점(P10/P90/MEDIAN/MEAN)으로 Trend 표시 |
+| `trend_tkout_agg` | `{'MAWIN':'P10'}` | 특정 항목은 site 전체 대신 tkout별 집계점으로 Trend 표시·이상/주의 판정. 집계 스펙: `'PXX'` 임의 백분위수(예 `P05`/`P95`/`P99.5`), `'MEDIAN'`(=P50), `'MEAN'` |
 | `vramp_lookback_days` | 365 | VRAMP MAX 조회 기간(일) |
 
 ### 병렬 렌더링 (발행 속도)
@@ -669,6 +669,7 @@ self.anomaly_exclude_items = [
 `insert_plots()`가 항목별 PPT 페이지(Box / Trend / WF MAP / Radius / CDF)를 그립니다.
 
 - **WF MAP**: wafer당 최대 **13×13 칩 격자**, 격자에 맞춰 마커 자동 축소. **같은 PGM(pt)/subitem은 한 줄**(행=PGM, 열=wafer 전체)에서 폭을 꽉 채워 최대 크기. sparse wafer는 측정 칩만 표시.
+- **WF MAP geometry(150mm 원 fit·shot pitch)는 좌표파일 기준**: 좌표 xlsx(Zone_Define)의 **MASK(vehicle)별 전체 chip layout(CHIP_X_ADJ/CHIP_Y_ADJ/Chip_Radius)**으로 계산(`set_chip_layout`) — 측정 point가 적은(예 13pt) wafer/항목도 full 측정과 동일한 원·칩 크기로 그려짐. 좌표파일이 없으면 종전처럼 측정 좌표로 폴백.
   - **색 = `REPORT DIRECTION`**(`_wfmap_cmap`): `LOWER`→낮은값 빨강/높은값 파랑(`coolwarm_r`), `UPPER`·`BOTH`→낮은값 파랑/높은값 빨강(`coolwarm`).
   - 단일 컬러바를 풀높이로 공유, 스케일 = 모집단 1~99% + lot 범위. 좌표는 zone_define(coordinate xlsx)과 inner-merge.
 - **임시 차트 파일 없음**: 모든 PPT 차트는 디스크가 아니라 **메모리(BytesIO)**로 처리(루트에 `tmp_*.jpg` 미생성). HTML이 재참조하는 Trend PNG만 `RUN/TEMP/<alias>.png`로 저장.

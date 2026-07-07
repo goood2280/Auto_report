@@ -570,8 +570,12 @@ class Config:
         self.anomaly_wfmap_max_count = 42        # 총 표시 상한(target spec wafer는 항상 전부 표시)
 
         # ── PPT Trend chart: 특정 항목은 site(모든 값) 대신 tkout_time 기준 집계점으로 표시 ──
-        #   {항목명(ALIAS): 'P10'} 형식. 'P10'=10퍼센타일, 'P90', 'MEDIAN'(=P50), 'MEAN' 지원.
-        #   각 측정(tkout_time=wafer 측정)별로 site 값을 1점으로 집계해 Trend에 찍는다.
+        #   {항목명(ALIAS): 'P10'} 형식. 집계 스펙:
+        #     · 'PXX' — 임의 백분위수 (예 'P05'=5%, 'P10', 'P90', 'P95', 'P99.5' — 소수점 허용)
+        #     · 'MEDIAN'(='P50'), 'MEAN'(='AVG')
+        #   각 측정(tkout_time=wafer 측정)별로 site 값을 1점으로 집계해 Trend에 찍고,
+        #   이상/주의 판정(anomaly_engine)도 동일한 집계값 기준으로 이뤄진다.
+        #   예: {'MAWIN': 'P10', 'VTH_N': 'P95', 'IDSAT_P': 'P05'}
         self.trend_tkout_agg = {'MAWIN': 'P10'}
 
         # ── 자연어 규칙(NL_RULES) 발행 시 바로 적용 여부 ──

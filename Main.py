@@ -775,6 +775,10 @@ def main():
                 zone_define = coordinate_file['Zone_Define']
                 zone_define['MASK'] = zone_define['MASK'].replace('RHV_OS','RHV-OS') #RHV OS Vehicle 명 상이함. matching을 위한 변경
                 zone_define = zone_define.astype({'CHIP_X_POS': int, 'CHIP_Y_POS': int, 'CHIP_X_ADJ': int, 'CHIP_Y_ADJ': int, 'FLAT_ZONE_POS': int})
+                # WF MAP geometry(150mm 원 fit·shot pitch)를 측정 데이터가 아닌 좌표파일의
+                # MASK(vehicle)별 전체 chip layout(CHIP_X_ADJ/CHIP_Y_ADJ/Chip_Radius) 기준으로
+                # 계산하도록 등록 — 측정 pt가 적은(예 13pt) wafer도 WF MAP이 깨지지 않는다.
+                set_chip_layout(zone_define)
 
                 # =====================================================================================================
 
