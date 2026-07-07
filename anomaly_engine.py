@@ -569,8 +569,12 @@ def _extract_json_obj(text):
     return obj if isinstance(obj, dict) else None
 
 
-def _assemble_final_html(final_text, modes):
+def _assemble_final_html(final_text, modes, rule_modes=None):
     """AI Final 단계의 구조화(JSON) 출력을 검증하고 **서술형 문장(평문 + 핵심 볼드)** 으로 조립.
+
+    rule_modes(있으면): 코드가 [RULE]을 전부 평가해 매칭된 **모든 불량 모드**(deterministic).
+      → 판정 문장(①)을 AI의 단일 defect_mode 대신 이 목록으로 렌더(매칭된 규칙을 하나도 빠뜨리지
+        않고 전부 표기). AI 단일 모드는 rule_modes가 없을 때만 사용(하위호환).
 
     출력 형태(머리말 태그 없이 자연스러운 2~4문장):
       "**<불량 모드>**(으)로 추정됩니다(근거: **A, B**). <현상/원인 서술>.
@@ -614,16 +618,33 @@ def _assemble_final_html(final_text, modes):
     basis_txt = ', '.join(_esc(b) for b in basis if b)
 
     paras = []
-    # ① 판정 문장 — 매칭된 [RULE] 모드만 표기(미매칭이면 모드명 미표기 = 수동 검토 안내)
-    if entry:
+    # ① 판정 문장 — 매칭된 [RULE] 불량 모드를 표기.
+    #   rule_modes(코드가 전부 평가한 결과)가 있으면 매칭된 **모든** 모드를 각각 한 줄로 표기
+    #   (하나만 잡고 끝내지 않음 — 동시 매칭 모드 전부 노출, MD의 '전부 코멘트' 원칙).
+    if rule_modes:
+        for _rm in rule_modes:
+            _mode = _esc(_rm.get('mode', '')).strip()
+            if not _mode:
+                continue
+            _bi = ', '.join(_esc(x) for x in (_rm.get('items') or []) if x)
+            p = f'<b>{_mode}</b>(이)가 추정됩니다'
+            p += f' (근거: <b>{_bi}</b>).' if _bi else '.'
+            _lk = str(_rm.get('link') or '').strip()
+            if _lk:
+                p += f' <a href="{_html.escape(_lk, quote=True)}" target="_blank">관련 링크</a>'
+            paras.append(p)
+        if not paras:   # rule_modes가 모두 빈 모드명 → 안내로 폴백
+            paras.append('지식 규칙(ANOMALY_KNOWLEDGE.md)에 매칭되는 불량 모드가 없어 <b>수동 검토가 필요</b>합니다.')
+    elif entry:
         p = f'<b>{_esc(entry["mode"])}</b>(이)가 추정됩니다'
         p += f' (근거: <b>{basis_txt}</b>).' if basis_txt else '.'
         if entry.get('link'):
             p += f' <a href="{_html.escape(entry["link"], quote=True)}" target="_blank">관련 링크</a>'
+        paras.append(p)
     else:
         p = '지식 규칙(ANOMALY_KNOWLEDGE.md)에 매칭되는 불량 모드가 없어 <b>수동 검토가 필요</b>합니다'
         p += f' (이상 항목: <b>{basis_txt}</b>).' if basis_txt else '.'
-    paras.append(p)
+        paras.append(p)
 
     # ② 현상/원인 서술 — 관찰 사실(phenomenon) + 종합 판단(summary)을 이어서 평문으로
     _body = ' '.join(_sent(_esc(data.get(k))) for k in ('phenomenon', 'summary') if data.get(k))
@@ -1854,6 +1875,7 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
                 #   → analyze_commonality 정렬 tie-break·차트 우선배치·요약 필터에 사용
                 _fd['rule_rank'] = ri
                 _fd['rule_matched_keys'] = matched_keys
+                _fd['rule_matched_disp'] = [_disp(rk) for rk in matched_keys]   # 근거 표시명(AI블록 다중모드용)
                 findings.append(_fd)
 
             rule_trace.append({
@@ -3680,7 +3702,20 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
         # 검증용 유효 불량모드 = [RULE](NL→JSON)에서 온 defect_modes + (하위호환) ANOMALY_RULES 파싱분.
         #   현재 규칙은 NL_RULES/[RULE]→JSON이므로 defect_modes(호출자 제공)가 주 소스.
         _valid_modes = (defect_modes or []) + _parse_defect_modes(knowledge_text)
-        body = _assemble_final_html(final, _valid_modes)
+        # 코드가 [RULE]을 전부 평가해 매칭된 모든 불량 모드 — 판정 문장을 이 목록으로 표기
+        #   (AI 단일 defect_mode로 축약하지 않고 동시 매칭 규칙을 전부 노출). rule_rank 순 정렬.
+        import re as _re2
+        _rule_modes = []
+        for _f in sorted((f for f in findings if f.get('type') == 'DEFECT_MODE'),
+                         key=lambda z: z.get('rule_rank', 1e9)):
+            _mode = _re2.sub(r'^\s*\[불량 모드\]\s*', '', str(_f.get('title', ''))).strip()
+            _items = []
+            for _x in (_f.get('rule_matched_disp') or (
+                    [_f.get('display_name')] if _f.get('display_name') else [])):
+                if _x and _x not in _items:    # 중복 항목 제거(같은 항목 2회 참조 규칙 대응), 순서 유지
+                    _items.append(_x)
+            _rule_modes.append({'mode': _mode, 'link': _f.get('link', ''), 'items': _items})
+        body = _assemble_final_html(final, _valid_modes, rule_modes=_rule_modes)
         note = ('<div style="font-size:11px; color:#9aa0a6; font-style:italic; margin:2px 0 4px;">'
                 '※ 아래 내용은 AI가 자동 생성한 참고용 요약입니다. 보조 자료로만 활용하세요.</div>')
         # 본문은 검정 글씨 + 글머리 점 제거(list-style:none)

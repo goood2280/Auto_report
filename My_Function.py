@@ -2573,26 +2573,32 @@ def _render_item_charts(task):
                         ax.scatter(_wv_grp['tkout_time'], _wv_grp[item_name], s=10, alpha=0.5, color=C_WV, label=str(_wv_name), edgecolors='black', linewidths=0.3, zorder=3)
                 if len(tgt) > 0:
                     _report_lot = str(target_lot_id)
-                    # 리포트 root 그룹의 색·모양(형제 lot에 사용)
-                    _tgt_root = (str(target_root_lot_id) if target_root_lot_id
-                                 else (str(tgt[_root_col].iloc[0]) if (_root_col and len(tgt)) else None))
-                    _tc, _tm = root_style.get(str(_tgt_root), ('#1f77b4', 's'))
-                    if lot_col:
-                        _sib = tgt[tgt[lot_col].astype(str) != _report_lot]
-                        _rep = tgt[tgt[lot_col].astype(str) == _report_lot]
-                    else:
-                        _sib = tgt.iloc[0:0]; _rep = tgt
-                    # 형제 lot(같은 root) → 그룹 색·모양, 리포트 lot 바로 아래 zorder
-                    if len(_sib) > 0:
-                        ax.scatter(_sib['tkout_time'], _sib[item_name], s=28, alpha=1.0,
-                                   color=_tc, marker=_tm,
-                                   label=f"형제 lot ({_tgt_root})" if _tgt_root else "형제 lot",
-                                   edgecolors='black', linewidths=0.5, zorder=11)
-                    # 리포트 lot → 빨강 원, 최상단
-                    if len(_rep) > 0:
-                        ax.scatter(_rep['tkout_time'], _rep[item_name], s=34, alpha=1.0, color='red',
-                                   marker='o', label=f"{_report_lot}_{target_DC_step_id}",
-                                   edgecolors='black', linewidths=0.6, zorder=13)
+                    # ── 리포트 root의 lot_id별로 각각 범례 표기 ──
+                    #   · 라벨 = "{lot_id}_{step_id}" (리포트 lot과 동일 형식, 한글 없음 → 글자 깨짐 방지)
+                    #   · 같은 root에 여러 lot_id면 lot마다 '모양·색을 다르게' 부여
+                    #   · 모양: radius/cumulative plot과 동일한 lot_marker 사용
+                    #   · 색: 리포트 lot=빨강(고정). 형제 lot=빨강/초록/회색 제외 팔레트에서 lot마다 다른 색
+                    #     (원형·빨강은 리포트 lot 전용 → 형제는 회피)
+                    _step_sfx = f"_{target_DC_step_id}" if target_DC_step_id else ""
+                    _sib_colors = ['#1f77b4', '#9467bd', '#8c564b', '#17becf', '#e377c2',
+                                   '#ff7f0e', '#bcbd22', '#393b79', '#00868b', '#5254a3']
+                    _tgt_lots = (sorted(tgt[lot_col].astype(str).unique()) if lot_col else [_report_lot])
+                    _sib_ci = 0
+                    for _lt in _tgt_lots:
+                        _lg = tgt[tgt[lot_col].astype(str) == _lt] if lot_col else tgt
+                        if len(_lg) == 0:
+                            continue
+                        _lbl = f"{_lt}{_step_sfx}"
+                        if _lt == _report_lot:            # 리포트 lot → 빨강 원, 최상단
+                            ax.scatter(_lg['tkout_time'], _lg[item_name], s=34, alpha=1.0, color='red',
+                                       marker='o', label=_lbl, edgecolors='black', linewidths=0.6, zorder=13)
+                        else:                              # 형제 lot → 고유 색·모양(빨강·원형 회피)
+                            _mk = lot_marker.get(_lt, 's')
+                            if _mk == 'o':
+                                _mk = 's'
+                            _col = _sib_colors[_sib_ci % len(_sib_colors)]; _sib_ci += 1
+                            ax.scatter(_lg['tkout_time'], _lg[item_name], s=28, alpha=1.0, color=_col,
+                                       marker=_mk, label=_lbl, edgecolors='black', linewidths=0.5, zorder=11)
             else:
                 for w in measured_wafers:
                     grp = tdf[tdf[w_col] == w] if w_col in tdf.columns else tdf.iloc[0:0]
@@ -2731,6 +2737,22 @@ def _render_item_charts(task):
             else:
                 ax_rad.scatter(w_df[col_rad], w_df[item_name], s=12, alpha=0.85, color=p_color)
         # 피팅선: wafer별 '3차(cubic)' 근사선을 각각 그리고, 선 색은 해당 wafer 색과 동일하게 맞춘다.
+        # ── 3차 fit 안정화(1E-13 등 극단값 대응) ──
+        #   ① x를 중심화·정규화해 Vandermonde 조건수 개선(수치 불안정 발산 방지)
+        #   ② 피팅선 y를 '실제 데이터 y 범위(전 wafer)'로 클리핑 — cubic이 극단값에 끌려 차트 아래로
+        #      쑥 내려가면 y축이 그 값까지 autoscale돼 데이터가 얇게 눌리던 문제 제거.
+        _yall = pd.to_numeric(item_df[item_name], errors='coerce').values
+        _yall = _yall[np.isfinite(_yall)]
+        _yclip = None
+        if len(_yall):
+            _ylo, _yhi = float(np.min(_yall)), float(np.max(_yall))
+            _ypad = (_yhi - _ylo) * 0.05
+            if _ypad <= 0:
+                _ypad = (abs(_yhi) * 0.05) or 1.0
+            _lo_clip, _hi_clip = _ylo - _ypad, _yhi + _ypad
+            if log_scale and _lo_clip <= 0:      # log축은 양수만 — 하한을 데이터 최소 근처로
+                _lo_clip = _ylo * 0.9 if _ylo > 0 else _ylo
+            _yclip = (_lo_clip, _hi_clip)
         for w in measured_wafers:
             try:
                 _wf = item_df[item_df[w_col] == w].dropna(subset=[col_rad, item_name])
@@ -2742,10 +2764,14 @@ def _render_item_charts(task):
                 _rx, _ry = _rx[_m], _ry[_m]
                 if len(_rx) < 4 or _rx.min() >= _rx.max():
                     continue
-                _z = np.polyfit(_rx, _ry, 3)               # wafer별 3차 다항식(cubic)
+                _xm = float(_rx.mean()); _xsd = float(_rx.std()) or 1.0   # 중심화·정규화(조건수 개선)
+                _z = np.polyfit((_rx - _xm) / _xsd, _ry, 3)               # wafer별 3차 다항식(cubic)
                 _pp = np.poly1d(_z)
                 _xs = np.linspace(_rx.min(), _rx.max(), 100)
-                ax_rad.plot(_xs, _pp(_xs), color=w_colors.get(str(w), 'blue'),
+                _yf = _pp((_xs - _xm) / _xsd)
+                if _yclip is not None:                                    # 데이터 범위 밖 발산 클리핑
+                    _yf = np.clip(_yf, _yclip[0], _yclip[1])
+                ax_rad.plot(_xs, _yf, color=w_colors.get(str(w), 'blue'),
                             alpha=0.9, linewidth=1.3)
             except Exception:
                 continue
