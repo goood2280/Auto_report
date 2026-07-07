@@ -2395,81 +2395,118 @@ def _render_item_charts(task):
         gdim = max(nx, ny)
 
         # ---- WF MAP 배치: 행=PGM(pt), 열=wafer #1~25 고정 ----
+        # 각 wafer 셀을 '독립 단일 axes'(HTML spec-out WF MAP과 완전히 동일한 렌더 파이프라인)로
+        # 그린 뒤 PIL로 격자에 합성한다.
+        #   이전 방식(gridspec 25열 + set_aspect('box') + bbox_inches='tight')은 tight 재계산이
+        #   셀별 aspect 박스 조정과 충돌해 원을 찌그러뜨리고 shot을 원 밖으로 넘치게(이웃 셀과
+        #   겹침) 만들었다. 셀을 완전히 분리 렌더하면 이 상호작용이 원천적으로 사라져
+        #   배치가 HTML spec-out 맵과 동일해지고(=요청), color(diverging cmap/norm)만 달라진다.
         FIXED_N_WAF = 25
         grid_rows, grid_cols = n_pgm, FIXED_N_WAF
         _multi_pgm = n_pgm > 1
         cell_map = {(i, c): (sub_grp, str(c + 1), sub_name)
                     for i, (sub_name, sub_grp) in enumerate(sub_groups)
                     for c in range(FIXED_N_WAF)}
-
-        render_cell = 0.55                             # 셀(=wafer 1칸) axes 한 변 크기(인치) — 25칸 고정
         # shot: 인접 센터 간격(pitch) 크기 사각형으로 그려 gap 없이(측정 pt 수와 무관하게 동일 크기)
         _shot_px = _wfmap_shot_pitch(item_df[map_x]); _shot_py = _wfmap_shot_pitch(item_df[map_y])
-        # ── 셀(axes) 한 칸을 '정사각형'으로 만들어 wafer 정원이 셀을 꽉 채우게(HTML 단일맵과 동일 비율) ──
-        # figsize를 margin·wspace/hspace 반영해 역산 → 각 axes가 render_cell×render_cell 정사각형이 됨.
-        # (직사각형 셀이면 set_aspect(...,'box')가 짧은 변에 맞춰 원을 축소시켜 '작게' 보였음)
-        _WSP, _HSP = 0.06, 0.18
-        _ML, _MR, _MT, _MB = 0.02, 0.99, 0.97, 0.06
-        fig_disp_w = render_cell * (grid_cols + (grid_cols - 1) * _WSP) / (_MR - _ML)
-        fig_h = render_cell * (grid_rows + (grid_rows - 1) * _HSP) / (_MT - _MB)
+        _cmap_ppt = _wfmap_cmap(direction); _asp_ppt = _wfmap_aspect(_circ_ppt)
 
-        # 컬러바는 별도 이미지로 분리(슬라이드에서 항상 같은 크기로 우측에 길게 배치) → 맵은 grid만
-        fig_map, axes_map = plt.subplots(grid_rows, grid_cols,
-                                         figsize=(fig_disp_w, fig_h), squeeze=False,
-                                         gridspec_kw={'wspace': _WSP, 'hspace': _HSP})
-        sc = None
+        def _render_ppt_cell(w_grp):
+            """한 wafer를 독립 axes로 렌더 → 정사각 PNG bytes(HTML spec-out 단일맵과 동일).
+            축범위는 정사각(_px_*/_py_*)이고 aspect=ky/kx(box)라 tight 크롭 결과가 정사각이 되어
+            합성 시 (CELL×CELL) 리사이즈가 왜곡을 만들지 않는다. color만 diverging(values+cmap+norm)."""
+            _f, _a = plt.subplots(figsize=(0.62, 0.62))
+            _draw_wfmap_shots(_a, w_grp[map_x].astype(float).values,
+                              w_grp[map_y].astype(float).values, _shot_px, _shot_py,
+                              values=w_grp[item_name].astype(float).values,
+                              cmap=_cmap_ppt, norm=wfmap_norm)
+            _add_wafer_circle(_a, _circ_ppt, color='#000000', lw=1.0)   # 배경 wafer 원 (HTML과 동일)
+            _a.set_xticks([]); _a.set_yticks([]); _a.set_facecolor('white')
+            _a.set_aspect(_asp_ppt, adjustable='box')                    # aspect=ky/kx → 정원 유지
+            for _sp in _a.spines.values():
+                _sp.set_visible(False)
+            # 방향: 왼쪽=chip_x_adj 작은 쪽, 위쪽=chip_y_adj 작은 쪽(y축 반전). HTML과 동일. 경계 포함
+            _a.set_xlim(_px_lo, _px_hi); _a.set_ylim(_py_hi, _py_lo)
+            _f.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
+            _png = _wfmap_png_bytes(_f, max(int(dpi), 200), colors=256)   # HTML 단일맵과 동일 인코딩
+            plt.close(_f)
+            return _png
+
+        from PIL import Image as _PImg, ImageDraw as _PDraw, ImageFont as _PFont
+        from matplotlib.colors import to_rgb as _to_rgb
+        # 측정된 wafer 셀만 렌더(빈 칸은 흰 배경). {(r,c): png bytes}
+        _cells = {}
         for r in range(grid_rows):
             for c in range(grid_cols):
-                ax = axes_map[r, c]
                 sub_grp, w, sub_name = cell_map[(r, c)]
                 w_grp = sub_grp[sub_grp[w_col] == w]
-                if not w_grp.empty:   # 측정된 wafer만 die 산점, 없으면 빈 칸
-                    sc = _draw_wfmap_shots(ax, w_grp[map_x].astype(float).values,
-                                           w_grp[map_y].astype(float).values, _shot_px, _shot_py,
-                                           values=w_grp[item_name].astype(float).values,
-                                           cmap=_wfmap_cmap(direction), norm=wfmap_norm)
-                    _add_wafer_circle(ax, _circ_ppt, color='#000000', lw=1.0)   # 배경 wafer 원 (HTML과 동일)
-                ax.set_facecolor('white')
-                # 마지막(맨 아래) PGM 행에만 wafer 번호 표기
-                if r == grid_rows - 1:
-                    ax.set_xlabel(f"#{c + 1}", fontsize=5, labelpad=1, color=C_NEUTRAL)
-                # 다중 PGM이면 첫 열 좌측에 PGM(pt) 라벨(90도 회전, 작은 글씨)
-                # 표기 형식: step_seq(pt수)  예) DC_01(3)  — '_1.0' 같은 접미사·'pt' 문자는 제거
-                if c == 0 and _multi_pgm:
-                    _pl = str(sub_name)
-                    if 'PGM(pt)' in sub_grp.columns:
-                        _u = sub_grp['PGM(pt)'].dropna()
-                        if len(_u): _pl = str(_u.iloc[0])
-                    _pl = re.sub(r'_[0-9.]+$', '', _pl)   # Duplicate_Count 접미사(_1.0 등) 제거
-                    _pl = re.sub(r'(\d+)\s*pt\)', r'\1)', _pl)  # "(137pt)" → "(137)"
-                    ax.set_ylabel(_pl, fontsize=4, rotation=90, labelpad=4, color=C_NEUTRAL)
-                ax.set_xticks([]); ax.set_yticks([])
-                ax.set_aspect(_wfmap_aspect(_circ_ppt), adjustable='box')   # aspect=ky/kx → 정원 유지
-                for spine in ax.spines.values():
-                    spine.set_visible(False)
-                # 방향: 왼쪽=chip_x_adj 작은 쪽, 위쪽=chip_y_adj 작은 쪽(y축 반전). HTML과 동일. 경계 포함
-                ax.set_xlim(_px_lo, _px_hi)
-                ax.set_ylim(_py_hi, _py_lo)
+                if not w_grp.empty:
+                    _cells[(r, c)] = _render_ppt_cell(w_grp)
+        sc = bool(_cells)   # 컬러바 렌더 여부 플래그(아래 colorbar 블록에서 사용)
 
-        fig_map.subplots_adjust(left=_ML, right=_MR, top=_MT, bottom=_MB)
-        # WF MAP은 PNG(무손실, 팔레트 양자화)로 저장 — HTML 단일맵(_wfmap_png_bytes)과 동일 방식.
-        #   JPG는 경계가 번져 인접 shot이 겹쳐 보였음(격자감 저하) → PNG로 crisp하게(HTML과 동일).
-        #   bbox_inches='tight'·pad_inches=0.02도 HTML과 동일하게 _wfmap_png_bytes가 처리.
-        _map_png = _wfmap_png_bytes(fig_map, max(int(dpi), 200), colors=256)
-        plt.close(fig_map)
-        out['imgs']['map'] = _map_png
-        # 배치 비율은 실제 저장 이미지(tight 크롭 반영) 픽셀 h/w로 잡는다.
-        # (nominal fig_h/fig_disp_w로 잡으면 tight 크롭된 이미지가 배치 박스에 늘어나
-        #  WF MAP 원이 위아래로 찌그러져 보였음 — 실제 픽셀비로 맞춰 왜곡 제거.)
-        try:
-            from PIL import Image as _PILImg
-            _iw, _ih = _PILImg.open(_io.BytesIO(_map_png)).size
-            out['map_ratio'] = (_ih / _iw) if _iw else (fig_h / fig_disp_w)
-        except Exception:
-            out['map_ratio'] = fig_h / fig_disp_w
+        # 셀 픽셀 크기 확정(모든 셀 동일) — 합성 격자의 한 칸
+        if _cells:
+            CELL = _PImg.open(_io.BytesIO(next(iter(_cells.values())))).size[0]
+        else:
+            CELL = max(int(dpi), 200)
+        _gx = max(2, int(CELL * 0.05))                 # 열 간격
+        _gy = max(2, int(CELL * 0.06))                 # 행 간격
+        _lab_h = max(12, int(CELL * 0.22))             # 하단 wafer# 라벨 영역 높이
+        _lab_w = max(12, int(CELL * 0.16)) if _multi_pgm else 2   # 좌측 PGM(pt) 라벨 폭
+        _cw = _lab_w + grid_cols * CELL + (grid_cols - 1) * _gx
+        _ch = grid_rows * CELL + (grid_rows - 1) * _gy + _lab_h
+        _canvas = _PImg.new('RGB', (_cw, _ch), 'white')
+        _dr = _PDraw.Draw(_canvas)
+
+        def _pick_font(px):
+            for _fn in ('malgun.ttf', 'arial.ttf', 'DejaVuSans.ttf'):
+                try:
+                    return _PFont.truetype(_fn, px)
+                except Exception:
+                    continue
+            return _PFont.load_default()
+        _fw = _pick_font(max(9, int(CELL * 0.16)))     # wafer# 폰트
+        _fp = _pick_font(max(8, int(CELL * 0.13)))     # PGM(pt) 폰트
+        _lab_rgb = tuple(int(v * 255) for v in _to_rgb(C_NEUTRAL))
+
+        for r in range(grid_rows):
+            for c in range(grid_cols):
+                _x0 = _lab_w + c * (CELL + _gx)
+                _y0 = r * (CELL + _gy)
+                _cb = _cells.get((r, c))
+                if _cb is not None:
+                    _cim = _PImg.open(_io.BytesIO(_cb)).convert('RGB')
+                    if _cim.size != (CELL, CELL):
+                        _cim = _cim.resize((CELL, CELL))
+                    _canvas.paste(_cim, (_x0, _y0))
+                if r == grid_rows - 1:   # 맨 아래 행에만 wafer 번호(#1~25)
+                    _dr.text((_x0 + CELL / 2.0, _ch - _lab_h / 2.0), f"#{c + 1}",
+                             fill=_lab_rgb, font=_fw, anchor='mm')
+            # 다중 PGM이면 각 행 좌측에 PGM(pt) 라벨(세로). 형식: step_seq(pt수), '_1.0'·'pt' 제거
+            if _multi_pgm:
+                sub_grp0, _w0, sub_name0 = cell_map[(r, 0)]
+                _pl = str(sub_name0)
+                if 'PGM(pt)' in sub_grp0.columns:
+                    _u = sub_grp0['PGM(pt)'].dropna()
+                    if len(_u):
+                        _pl = str(_u.iloc[0])
+                _pl = re.sub(r'_[0-9.]+$', '', _pl)              # Duplicate_Count 접미사(_1.0 등) 제거
+                _pl = re.sub(r'(\d+)\s*pt\)', r'\1)', _pl)       # "(137pt)" → "(137)"
+                _ti = _PImg.new('RGBA', (CELL, _lab_w), (0, 0, 0, 0))
+                _PDraw.Draw(_ti).text((CELL / 2.0, _lab_w / 2.0), _pl,
+                                      fill=_lab_rgb + (255,), font=_fp, anchor='mm')
+                _ti = _ti.rotate(90, expand=True)
+                _yc = r * (CELL + _gy) + (CELL - _ti.size[1]) // 2
+                _canvas.paste(_ti, (0, max(0, _yc)), _ti)
+
+        _obio = _io.BytesIO()
+        _canvas.save(_obio, format='PNG', optimize=True)
+        out['imgs']['map'] = _obio.getvalue()
+        # 배치 비율(h/w) — 합성 캔버스 실제 픽셀비. 슬라이드에서 폭에 맞춰 배치된다.
+        out['map_ratio'] = (_ch / _cw) if _cw else 0.1
 
         # ---- WF MAP 컬러바(별도 이미지) : 슬라이드에서 항상 같은 크기로 우측에 세로로 길게 배치 ----
-        if sc is not None:
+        if sc:
             import matplotlib.cm as _cm
             tmp_cbar = _io.BytesIO()
             _sm = _cm.ScalarMappable(norm=wfmap_norm, cmap=_wfmap_cmap(direction))
