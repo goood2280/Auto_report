@@ -528,7 +528,12 @@ class Config:
         self.use_gpt_summary = True        # GPT 리포트 요약(요약문) 사용 여부 (텍스트 요약에만 영향)
         self.use_gpt_multistep = True      # AI 다단계 해석(triage→root-cause→final) 사용 (use_gpt_summary=True일 때)
         self.use_email_send = False        # 사내 메일 API로 PPT+HTML 발송 on/off (True면 리포트 발행 후 메일 전송)
-        self.mail_attach_limit = 10        # 메일 API 첨부 최대 개수(본문 인라인 이미지 + 첨부파일 합계). 첨부파일은 PPT 1개만 사용, 초과 시 본문 뒤쪽 이미지를 안내 문구로 대체(발송 항상 성공)
+        self.mail_attach_limit = 10        # 메일 API 첨부 최대 개수(본문 인라인 이미지 + 첨부파일 합계). 첨부파일은 PPT 1개만.
+                                           #   본문 이미지는 이 제한에 맞춰 구조화됨:
+                                           #   · [1] Score Board: 점수행 아래 WF MAP 스트립(1장/index, 상한 scoreboard_wfmap_strip_max)
+                                           #     — 미표시 index는 문구 안내(PPT 참고), 보드/칸 미생성(용량 절약)
+                                           #   · [0] SPEC OUT '이미지 예산제'(초과 item은 세로 스택 합성) + WARNING 그리드 1장
+                                           #   그래도 초과 시 안내 문구 대체(Score Board 스트립은 마지막 순위로 보호) → 발송 항상 성공
         self.use_s3_upload = True          # 생성 PPT의 S3(DX) 업로드 on/off
         self.use_description_page = True   # PPT CAT2 간지(Description) 페이지 삽입 on/off
         # 이상 Trend chart([0] 섹션) 표시 여부.
@@ -556,6 +561,11 @@ class Config:
             'MAWIN_minus_margin', 'MAWIN_plus_margin', 'MAWIN_ovl_index', 'MAWIN_new',
         ]
         self.scoreboard_wfmap_min_pts = 50       # Score Board(HTML)에 wafer별 WF MAP을 넣을 최소 측정 point 수
+        # Score Board WF MAP 스트립(점수행 아래 wafer별 맵 1행 이미지) 최대 개수.
+        #   대상 index가 이 수 이하면 전부 표시, 초과하면 CAT2(category)별 첫 index 1개씩
+        #   (그래도 초과 시 표 위쪽 순으로 이 수까지). 미표시 index는 표 아래 문구로 안내(PPT 참고).
+        #   메일 용량이 index 수에 비례해 커지는 것을 막는 상한 — HTML/메일 본문에만 적용.
+        self.scoreboard_wfmap_strip_max = 6
         # WF MAP 제외 키워드: item(ALIAS)명에 아래 키워드가 포함되면 측정 point 수와
         # 무관하게 Score Board WF MAP을 표시하지 않는다. (예: PCHK 측정 항목)
         # 새 키워드를 추가하려면 이 리스트에 문자열을 넣으면 된다.

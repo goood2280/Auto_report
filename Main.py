@@ -1222,183 +1222,36 @@ def main():
                         except Exception as _we:
                             print(f"[WARN] Score Board WF MAP 스킵: {_we}")
 
-                        # 렌더 시퀀스: index 점수행만. WF MAP은 행마다 <img>를 넣는 대신 표 아래
-                        # '단일 합성 보드 이미지 1장'으로 붙인다 — 사내 메일 API가 본문 인라인
-                        # 이미지도 첨부로 계산하므로, 첨부 수가 index 수에 비례하지 않게 상수화.
-                        render_seq = []   # (kind, cat, item, payload)
-                        for idx, row in sb_rows:
-                            cat, item = idx
-                            render_seq.append(('score', cat, item, row))
+                        # ── Score Board WF MAP 스트립 대상 선정 (규칙 기반) ──
+                        # 메일 '용량'이 index 수에 비례해 커지지 않도록 스트립 수를 상한으로 제한:
+                        #   · 대상 index ≤ 상한(기본 6): 전부 점수행 아래 스트립으로 표시
+                        #   · 초과: CAT2(category)별 첫(표 위쪽) index 1개씩 → 그래도 상한 초과면 표 위쪽 순 상한까지
+                        #   · 미표시 index는 표 아래 안내 문구로 명시(PPT 참고) — 별도 보드/칸은 만들지 않음
+                        # 여기(anomaly 섹션 이전)서 선정해 두어야 [0]섹션 SPEC OUT 예산이 스트립 수를 예약 가능.
+                        # (Score Board HTML 빌드 자체는 [0]섹션 이미지 수 확정 후 — HTML 조립 직전 — 실행)
+                        _sb_strip_max = int(getattr(GLOBAL_CONFIG, 'scoreboard_wfmap_strip_max', 6))
+                        _map_items_ord = []   # 표 순서의 (CAT2, item) — WF MAP 보유 index만
+                        for idx, _row0 in sb_rows:
+                            if idx[1] in wfmaps_by_item and all(idx[1] != _t[1] for _t in _map_items_ord):
+                                _map_items_ord.append((idx[0], idx[1]))
+                        if len(_map_items_ord) <= _sb_strip_max:
+                            _strip_list = [_t[1] for _t in _map_items_ord]
+                        else:
+                            _seen_cat2_sb = set()
+                            _strip_list = []
+                            for _c2, _it0 in _map_items_ord:
+                                if _c2 in _seen_cat2_sb:
+                                    continue
+                                _seen_cat2_sb.add(_c2)
+                                _strip_list.append(_it0)
+                                if len(_strip_list) >= _sb_strip_max:
+                                    break
+                        _strip_items = set(_strip_list)
+                        _sb_omitted = [_t[1] for _t in _map_items_ord if _t[1] not in _strip_items]
+                        print(f"[INFO] Score Board WF MAP 스트립 선정: {len(_strip_list)}개 표시"
+                              f"{' (CAT2별 1개, 상한 ' + str(_sb_strip_max) + ')' if _sb_omitted else ''}"
+                              f" / 미표시 {len(_sb_omitted)}개 → 안내 문구(PPT 참고)")
 
-                        # category 연속 묶음 rowspan
-                        seq_cats = [r[1] for r in render_seq]
-                        cat_span = {}
-                        _j = 0
-                        while _j < len(seq_cats):
-                            _k = _j
-                            while _k + 1 < len(seq_cats) and seq_cats[_k + 1] == seq_cats[_j]:
-                                _k += 1
-                            cat_span[_j] = _k - _j + 1
-                            _j = _k + 1
-
-                        # WF MAP이 있으면 wafer 열 폭을 약간만 넓혀 표시 (48→45px, ~5% 축소 → #25까지 표시)
-                        _has_wf = len(wfmaps_by_item) > 0
-                        _wf_w = 45
-                        # 메일 클라이언트는 <style> CSS를 무시하므로 각 셀에 inline style로 직접 지정
-                        # (padding/font-size/nowrap도 <style> 값과 동일하게 inline — 메일·포워딩 표시 통일)
-                        _SB_BD = 'border:1px solid #2c2c2c;'      # 셀 구분선(inline)
-                        _SB_PAD = 'padding:4px 6px; white-space:nowrap;'
-                        _sb_waf_w = _wf_w if _has_wf else 40      # wafer 셀 폭(숫자 잘림 방지) inline min-width
-                        _SB_WAF = (f'{_SB_BD} text-align:center; width:{_sb_waf_w}px; min-width:{_sb_waf_w}px; '
-                                   f'max-width:{_sb_waf_w}px; padding:2px 1px; font-size:10px; white-space:nowrap;')
-                        _SB_CAT = f'{_SB_BD} {_SB_PAD} text-align:center; min-width:77px;'      # category 고정열
-                        _SB_ITEM = f'{_SB_BD} {_SB_PAD} text-align:center; min-width:240px;'    # Item 고정열
-                        sb_html = ''
-                        if _has_wf:
-                            sb_html += (f'<style>.score-board td.sb-val, .score-board th.sb-waf'
-                                        f'{{width:{_wf_w}px !important; min-width:{_wf_w}px !important; '
-                                        f'max-width:{_wf_w}px !important;}}</style>\n')
-                        # lot 그룹(헤더 colspan용): _wcols 순서대로 같은 lot을 묶음
-                        _lot_groups = []   # [(lot, [col, ...]), ...]
-                        for _c in _wcols:
-                            if _lot_groups and _lot_groups[-1][0] == _c[0]:
-                                _lot_groups[-1][1].append(_c)
-                            else:
-                                _lot_groups.append((_c[0], [_c]))
-
-                        sb_html += '<table class="score-board" style="border-collapse:collapse; font-size:11px;">\n  <thead>\n'
-                        sb_html += '    <tr>\n'
-                        sb_html += f'      <th colspan="2" class="sb-frozen-lot" style="{_SB_BD} {_SB_PAD} text-align:center; background-color:#d9e1f2;">LOT_ID</th>\n'
-                        # root_lot_id가 같은 형제 lot을 각각 헤더로 분리 (target lot은 강조)
-                        for _lot, _cols in _lot_groups:
-                            _is_tgt = (str(_lot) == str(target_lot_id))
-                            _bg = '#dbe7c8' if _is_tgt else '#f0f0f0'
-                            _fw = 'bold' if _is_tgt else 'normal'
-                            sb_html += (f'      <th colspan="{len(_cols)}" style="{_SB_BD} {_SB_PAD} text-align:center; '
-                                        f'background-color:{_bg}; font-weight:{_fw};">{_lot}</th>\n')
-                        sb_html += '    </tr>\n'
-                        sb_html += '    <tr>\n'
-                        sb_html += f'      <th class="sb-cat" style="{_SB_CAT} background-color:#d9e1f2;">category</th>\n'
-                        sb_html += f'      <th class="sb-item" style="{_SB_ITEM} background-color:#d9e1f2;">Item</th>\n'
-                        for col in _wcols:
-                            sb_html += f'      <th class="sb-waf" style="{_SB_WAF} background-color:#f0f0f0;">#{col[1]}</th>\n'
-                        sb_html += '    </tr>\n  </thead>\n  <tbody>\n'
-
-                        for _i, (kind, cat, item, payload) in enumerate(render_seq):
-                            sb_html += '    <tr>\n'
-                            if _i in cat_span:
-                                sb_html += f'      <td class="sb-cat row_heading" rowspan="{cat_span[_i]}" style="{_SB_CAT} font-weight:bold; background-color:#ebf4ff; vertical-align:middle;">{cat}</td>\n'
-                            row = payload
-                            sb_html += (f'      <td class="sb-item row_heading" style="{_SB_ITEM} font-weight:bold; '
-                                        f'background-color:#ebf4ff;">{display_name(item)}</td>\n')
-                            for col in _wcols:
-                                val = row[col]
-                                if pd.isna(val) or val == "":
-                                    sb_html += f'      <td class="sb-val" style="{_SB_WAF} background-color:{GLOBAL_CONFIG.score_color_na};"></td>\n'
-                                else:
-                                    # 연속 색상(PPT와 동일), ITEM별 스케일 override 지원
-                                    bg_color, color = GLOBAL_CONFIG.score_color(val, item)
-                                    sb_html += f'      <td class="sb-val" style="{_SB_WAF} background-color:{bg_color}; color:{color}; font-weight:bold;">{val:.1f}</td>\n'
-                            sb_html += '    </tr>\n'
-                        sb_html += '  </tbody>\n</table>\n'
-
-                        # ── Score Board WF MAP 보드: 전체 index의 wafer 맵을 '이미지 1장'으로 합성 ──
-                        # 첨부 개수가 index 수·wafer 수와 무관하게 항상 1이 되도록, item 라벨 열과
-                        # wafer 번호 헤더(다중 lot이면 lot 구간 포함)를 이미지 안에 직접 그린다.
-                        # 합성 픽셀은 표시 크기의 html_img_scale배(supersample) — HTML 표시 px는 1x 유지
-                        # → 줌/고해상도 화면에서도 선명(합성으로 인한 화질 저하 방지).
-                        if wfmaps_by_item:
-                            try:
-                                from PIL import Image as _PILImg, ImageDraw as _PILDraw, ImageFont as _PILFont
-                                import base64 as _b64_sb
-                                import io as _io_sb
-                                _hs_sb = max(1, int(getattr(GLOBAL_CONFIG, 'html_img_scale', 2)))
-                                _slot = _wf_w * _hs_sb              # wafer 열 pitch(합성px = 표시px × 배율)
-                                _map_px = (_wf_w - 2) * _hs_sb
-                                _row_h = _map_px + 6 * _hs_sb
-                                _LBL_W = 190 * _hs_sb               # 좌측 item 라벨 열 폭
-                                _hdr_lot = 16 * _hs_sb if len(_lot_groups) > 1 else 0
-                                _hdr_h = _hdr_lot + 16 * _hs_sb     # wafer 번호 헤더
-                                _b_items = [it for _k, _c, it, _p in render_seq if it in wfmaps_by_item]
-                                _b_items = list(dict.fromkeys(_b_items))
-                                _board_w = _LBL_W + _slot * len(_wcols)
-                                _board_h = _hdr_h + _row_h * len(_b_items)
-                                _board = _PILImg.new('RGB', (_board_w, _board_h), (255, 255, 255))
-                                _bdraw = _PILDraw.Draw(_board)
-                                try:
-                                    _bfont = _PILFont.truetype("arial.ttf", 10 * _hs_sb)
-                                    _bfont_s = _PILFont.truetype("arial.ttf", 9 * _hs_sb)
-                                except Exception:
-                                    _bfont = _bfont_s = _PILFont.load_default()
-
-                                def _fit_text(txt, max_w, font):
-                                    try:
-                                        while txt and _bdraw.textlength(txt, font=font) > max_w:
-                                            txt = txt[:-1]
-                                    except Exception:
-                                        txt = txt[:28]
-                                    return txt
-
-                                def _txt_w(txt, font):
-                                    try:
-                                        return _bdraw.textlength(txt, font=font)
-                                    except Exception:
-                                        return len(txt) * 5
-
-                                # 헤더 (lot 구간 + wafer 번호)
-                                _bdraw.rectangle([0, 0, _board_w - 1, _hdr_h - 1], fill=(240, 240, 240))
-                                if _hdr_lot:
-                                    _cx = _LBL_W
-                                    for _lot, _cols in _lot_groups:
-                                        _seg_w = _slot * len(_cols)
-                                        _lt = _fit_text(str(_lot), _seg_w - 4 * _hs_sb, _bfont_s)
-                                        _bdraw.text((_cx + max(0, (_seg_w - _txt_w(_lt, _bfont_s)) // 2), 2 * _hs_sb),
-                                                    _lt, fill=(30, 30, 30), font=_bfont_s)
-                                        _bdraw.line([(_cx, 0), (_cx, _hdr_h - 1)], fill=(180, 180, 180))
-                                        _cx += _seg_w
-                                for _ci, col in enumerate(_wcols):
-                                    _lab = f"#{col[1]}"
-                                    _bdraw.text((_LBL_W + _ci * _slot + max(0, (_slot - _txt_w(_lab, _bfont_s)) // 2),
-                                                 _hdr_lot + 2 * _hs_sb), _lab, fill=(60, 60, 60), font=_bfont_s)
-                                # 행: item 라벨 + wafer별 맵
-                                for _ri, _bit in enumerate(_b_items):
-                                    _y0 = _hdr_h + _ri * _row_h
-                                    _bmaps = wfmaps_by_item[_bit]
-                                    _bdraw.rectangle([0, _y0, _LBL_W - 1, _y0 + _row_h - 1], fill=(235, 244, 255))
-                                    _bdraw.text((6 * _hs_sb, _y0 + (_row_h - 12 * _hs_sb) // 2),
-                                                _fit_text(str(display_name(_bit)), _LBL_W - 12 * _hs_sb, _bfont),
-                                                fill=(31, 78, 121), font=_bfont)
-                                    for _ci, col in enumerate(_wcols):
-                                        _x0 = _LBL_W + _ci * _slot
-                                        _b = _bmaps.get(f"{col[0]}|{col[1]}")
-                                        if _b:
-                                            try:
-                                                _mimg = (_PILImg.open(_io_sb.BytesIO(_b64_sb.b64decode(_b)))
-                                                         .convert('RGB').resize((_map_px, _map_px), _PILImg.LANCZOS))
-                                                _board.paste(_mimg, (_x0 + (_slot - _map_px) // 2, _y0 + 3 * _hs_sb))
-                                            except Exception:
-                                                pass
-                                        else:   # 측정 없음 셀
-                                            _bdraw.rectangle([_x0 + 1, _y0 + 1, _x0 + _slot - 1, _y0 + _row_h - 1],
-                                                             fill=(246, 246, 246))
-                                    _bdraw.line([(0, _y0), (_board_w - 1, _y0)], fill=(210, 210, 210))
-                                for _ci in range(len(_wcols)):
-                                    _x = _LBL_W + _ci * _slot
-                                    _bdraw.line([(_x, 0), (_x, _board_h - 1)], fill=(225, 225, 225))
-                                _bdraw.rectangle([0, 0, _board_w - 1, _board_h - 1], outline=(44, 44, 44))
-                                _sbuf = _io_sb.BytesIO()
-                                _board.save(_sbuf, format='PNG', optimize=True)
-                                _board_b64 = _b64_sb.b64encode(_sbuf.getvalue()).decode('utf-8')
-                                # 표시 크기는 1x(px) — 픽셀은 _hs_sb배로 담겨 선명하게 렌더링됨
-                                _board_dw, _board_dh = _board_w // _hs_sb, _board_h // _hs_sb
-                                sb_html += (
-                                    '<div style="margin:6px 0 2px 0; font-size:11px; color:#555;">'
-                                    f'WF MAP (측정 ≥{_wf_min}pt index)</div>'
-                                    f'<img src="data:image/png;base64,{_board_b64}" width="{_board_dw}" height="{_board_dh}" '
-                                    f'style="width:{_board_dw}px; height:{_board_dh}px; display:block;"/>')
-                            except Exception as _sb_comp_err:
-                                print(f"[WARN] Score Board WF MAP 보드 합성 실패 → WF MAP 생략(PPT 참조): {_sb_comp_err}")
-                        score_board_html = sb_html
 
                         # ==================== Inline Table HTML 렌더링 (Manual) ====================
                         inlinedata_filtered_pivot = inlinedata_filtered_pivot.reset_index()
@@ -1673,7 +1526,10 @@ def main():
                                         except Exception:
                                             return target_w, round(target_w * 0.44)
 
-                                    _spec_rows, _warn_blocks, _warn_imgs = [], [], []
+                                    # _spec_entries: ('pil', item, PIL이미지) — Trend+WF MAP 병합 성공 시
+                                    #                ('html', html문자열)     — 병합 실패 fallback(개별 <img> 다수)
+                                    # HTML 변환은 루프 뒤 '이미지 예산제'에서 일괄 수행(초과분은 스택 합성).
+                                    _spec_entries, _warn_blocks, _warn_imgs = [], [], []
                                     for item in top_item_names:
                                         safe_item = re.sub(r'[\\/:*?"<>|]', '_', str(item))
                                         img_path = f"RUN/TEMP/{safe_item}.png"
@@ -1760,10 +1616,6 @@ def main():
                                                 print(f"[WARN] spec-out WF MAP 스킵 ({item}): {_we}")
                                         # 이상 항목명(헤더) → 그 밑에 Trend+WF MAP을 '이미지 1장'으로 병합
                                         # (첨부 개수를 item당 1로 상수화. 병합 실패 시 기존 2-셀 레이아웃 fallback)
-                                        _item_hdr = (
-                                            '<div style="font-size:13px; font-weight:bold; color:#1f4e79; '
-                                            'margin:2px 0 3px 2px; border-left:4px solid #d32f2f; padding-left:7px;">'
-                                            f'{display_name(item)}</div>')
                                         _merged_done = False
                                         try:
                                             from PIL import Image as _PILImg
@@ -1779,21 +1631,137 @@ def main():
                                                 _mg.paste(_wf_comp, (_tw * _hs + 12 * _hs, 0))
                                             else:
                                                 _mg, _mw, _mh = _trend_im, _tw * _hs, _th * _hs
-                                            _buf = _io.BytesIO()
-                                            _mg.save(_buf, format='PNG', optimize=True)
-                                            _mg_b64 = base64.b64encode(_buf.getvalue()).decode('utf-8')
-                                            _spec_rows.append(
-                                                '<div style="margin-bottom:14px;">' + _item_hdr +
-                                                _trend_block(item, True, _mg_b64, _mw // _hs, _mh // _hs) + '</div>')
+                                            _spec_entries.append(('pil', item, _mg))
                                             _merged_done = True
                                         except Exception as _mge:
                                             print(f"[WARN] Trend+WF MAP 병합 실패({item}) — 개별 이미지 유지: {_mge}")
                                         if not _merged_done:
-                                            _spec_rows.append(
+                                            _item_hdr = (
+                                                '<div style="font-size:13px; font-weight:bold; color:#1f4e79; '
+                                                'margin:2px 0 3px 2px; border-left:4px solid #d32f2f; padding-left:7px;">'
+                                                f'{display_name(item)}</div>')
+                                            _spec_entries.append(('html',
                                                 '<div style="margin-bottom:14px;">' + _item_hdr +
                                                 '<table cellpadding="0" cellspacing="0" style="border-collapse:collapse; border:none;">'
                                                 f'<tr><td style="border:none; vertical-align:top; padding-right:12px;">{_trend_block(item, True, img_b64, _tw, _th)}</td>'
-                                                f'<td style="border:none; vertical-align:top;">{_wf_block}</td></tr></table></div>')
+                                                f'<td style="border:none; vertical-align:top;">{_wf_block}</td></tr></table></div>'))
+
+                                    # ── SPEC OUT 이미지 예산제: 본문 이미지 총수를 첨부 제한 이내로 구조적 보장 ──
+                                    # 고정 소비 = PPT(1) + Score Board 스트립 예약(선정 수) + WARNING 그리드(1).
+                                    # 남는 예산보다 SPEC OUT item이 많으면 item들을 예산 개수의 그룹으로
+                                    # 균등 분할, 2개 이상 그룹은 '세로 스택 이미지 1장'으로 다시 합성한다.
+                                    # (항목명 헤더·SPEC OUT 배지를 이미지 안에 직접 그림 — 차트/WF MAP 손실 없음.
+                                    #  균등 분할이라 스택 1장이 과도하게 길어지지 않음 → Outlook 세로 클리핑 회피)
+                                    _attach_lim0 = int(getattr(GLOBAL_CONFIG, 'mail_attach_limit', 10))
+                                    _n_sb_reserved = len(_strip_items) if '_strip_items' in dir() or '_strip_items' in locals() else 1
+                                    _fixed_imgs = 1 + _n_sb_reserved + (1 if _warn_imgs else 0)
+                                    _spec_budget = max(1, _attach_lim0 - _fixed_imgs)
+
+                                    def _item_hdr_html(_it2):
+                                        return ('<div style="font-size:13px; font-weight:bold; color:#1f4e79; '
+                                                'margin:2px 0 3px 2px; border-left:4px solid #d32f2f; padding-left:7px;">'
+                                                f'{display_name(_it2)}</div>')
+
+                                    def _render_spec_single(_it2, _mg2):
+                                        """개별 item 1개 → HTML 헤더 + SPEC OUT 스티커 오버레이 + <img> 1개."""
+                                        import io as _io
+                                        _buf = _io.BytesIO()
+                                        _mg2.save(_buf, format='PNG', optimize=True)
+                                        _b64_2 = base64.b64encode(_buf.getvalue()).decode('utf-8')
+                                        return ('<div style="margin-bottom:14px;">' + _item_hdr_html(_it2) +
+                                                _trend_block(_it2, True, _b64_2, _mg2.width // _hs, _mg2.height // _hs) + '</div>')
+
+                                    def _render_spec_stack(_grp):
+                                        """item 여러 개([(item, PIL), ...]) → 헤더/배지를 그려 넣은 세로 스택 <img> 1개."""
+                                        from PIL import Image as _PILImg, ImageDraw as _PILDraw, ImageFont as _PILFont
+                                        import io as _io
+                                        _HDR_H, _GAP = 26 * _hs, 12 * _hs
+                                        _stk_w = max(_im2.width for _it2, _im2 in _grp)
+                                        _stk_h = (sum(_HDR_H + _im2.height for _it2, _im2 in _grp)
+                                                  + _GAP * (len(_grp) - 1))
+                                        _stk = _PILImg.new('RGB', (_stk_w, _stk_h), (255, 255, 255))
+                                        _sdr = _PILDraw.Draw(_stk)
+                                        try:
+                                            _hfont = _PILFont.truetype("arialbd.ttf", 13 * _hs)
+                                            _bfont2 = _PILFont.truetype("arialbd.ttf", 10 * _hs)
+                                        except Exception:
+                                            _hfont = _bfont2 = _PILFont.load_default()
+
+                                        def _tlen(_t, _f, _fb):
+                                            try:
+                                                return int(_sdr.textlength(_t, font=_f))
+                                            except Exception:
+                                                return _fb
+                                        _sy = 0
+                                        for _it2, _im2 in _grp:
+                                            # 항목명 헤더(붉은 좌측 바 + 남색 볼드) — HTML 헤더와 동일한 시각 규칙
+                                            _sdr.rectangle([0, _sy + 4 * _hs, 4 * _hs, _sy + _HDR_H - 4 * _hs],
+                                                           fill=(211, 47, 47))
+                                            _nm = str(display_name(_it2))
+                                            _sdr.text((10 * _hs, _sy + 5 * _hs), _nm, fill=(31, 78, 121), font=_hfont)
+                                            # SPEC OUT 배지(개별 블록의 HTML 스티커 대체 — 이미지에 직접 그림)
+                                            _bx = 10 * _hs + _tlen(_nm, _hfont, len(_nm) * 7 * _hs) + 10 * _hs
+                                            _btw = _tlen('SPEC OUT', _bfont2, 50 * _hs)
+                                            _brect = [_bx, _sy + 5 * _hs, _bx + _btw + 12 * _hs, _sy + 20 * _hs]
+                                            try:
+                                                _sdr.rounded_rectangle(_brect, radius=3 * _hs, fill=(211, 47, 47))
+                                            except Exception:
+                                                _sdr.rectangle(_brect, fill=(211, 47, 47))
+                                            _sdr.text((_bx + 6 * _hs, _sy + 7 * _hs), 'SPEC OUT',
+                                                      fill=(255, 255, 255), font=_bfont2)
+                                            _sy += _HDR_H
+                                            _stk.paste(_im2, (0, _sy))
+                                            _sdr.rectangle([0, _sy, _im2.width - 1, _sy + _im2.height - 1],
+                                                           outline=(221, 221, 221))
+                                            _sy += _im2.height + _GAP
+                                        _buf = _io.BytesIO()
+                                        _stk.save(_buf, format='PNG', optimize=True)
+                                        _b64_2 = base64.b64encode(_buf.getvalue()).decode('utf-8')
+                                        _sw, _sh = _stk_w // _hs, _stk_h // _hs
+                                        return (f'<div style="margin-bottom:14px;">'
+                                                f'<img src="data:image/png;base64,{_b64_2}" width="{_sw}" height="{_sh}" '
+                                                f'style="display:block; width:{_sw}px; height:{_sh}px; border:none;"/></div>')
+
+                                    # 그룹 크기 계획: pil item n개를 예산 개수 그룹으로 균등 분할(앞 그룹부터 +1)
+                                    _n_pil = sum(1 for _e in _spec_entries if _e[0] == 'pil')
+                                    if _n_pil > _spec_budget:
+                                        _bsz, _rem = divmod(_n_pil, _spec_budget)
+                                        _grp_sizes = [_bsz + (1 if _i2 < _rem else 0) for _i2 in range(_spec_budget)]
+                                        print(f"[INFO] SPEC OUT {_n_pil}개 > 이미지 예산 {_spec_budget}개 "
+                                              f"(첨부 제한 {_attach_lim0} - 고정 {_fixed_imgs}) — {_grp_sizes} 그룹으로 스택 합성")
+                                    else:
+                                        _grp_sizes = [1] * _n_pil
+
+                                    _spec_rows, _cur_grp, _gi = [], [], 0
+
+                                    def _flush_grp():
+                                        """진행 중 그룹을 HTML로 확정(1개=개별 렌더, 2개 이상=스택 합성)."""
+                                        if not _cur_grp:
+                                            return
+                                        try:
+                                            if len(_cur_grp) == 1:
+                                                _spec_rows.append(_render_spec_single(*_cur_grp[0]))
+                                            else:
+                                                _spec_rows.append(_render_spec_stack(_cur_grp))
+                                        except Exception as _rse:
+                                            print(f"[WARN] SPEC OUT 그룹 렌더 실패 — 개별 렌더로 폴백: {_rse}")
+                                            for _it2, _im2 in _cur_grp:
+                                                try:
+                                                    _spec_rows.append(_render_spec_single(_it2, _im2))
+                                                except Exception:
+                                                    pass
+                                        _cur_grp.clear()
+
+                                    for _e in _spec_entries:
+                                        if _e[0] == 'html':   # 병합 실패 fallback — 순서 보존 위해 그룹 먼저 확정
+                                            if _cur_grp:
+                                                _flush_grp(); _gi += 1
+                                            _spec_rows.append(_e[1])
+                                            continue
+                                        _cur_grp.append((_e[1], _e[2]))
+                                        if len(_cur_grp) >= _grp_sizes[min(_gi, len(_grp_sizes) - 1)]:
+                                            _flush_grp(); _gi += 1
+                                    _flush_grp()
 
                                     # '이상'/'주의' 탭 라벨은 표시하지 않는다. 각 차트 좌상단의
                                     # SPEC OUT / WARNING 스티커가 상태 식별 역할을 대신한다.
@@ -1860,6 +1828,161 @@ def main():
                         elif not GLOBAL_CONFIG.use_gpt_summary:
                             print("[INFO] use_gpt_summary=False → AI 해석 스킵 (코드 분석만)")
 
+                        # ── Score Board WF MAP 스트립 최종 확정 ──
+                        # 선정(규칙: ≤상한 전부 / 초과 시 CAT2별 1개·상한)은 wfmaps 계산 직후 완료(_strip_list 등).
+                        # 여기서는 [0]섹션(anomaly/AI)이 실제 사용한 이미지 수를 세어, 잔여 예산을
+                        # 초과하는 극단 상황에서만 스트립을 표 위쪽 순으로 잘라 첨부 제한을 보장한다.
+                        import re as _re_sb
+                        _IMG_PAT_SB = r'<img\s[^>]*src="data:image/'
+                        _n_sec0_imgs = len(_re_sb.findall(
+                            _IMG_PAT_SB, (anomaly_html or '') + (code_summary_html or '') + (ai_html or '')))
+                        _sb_img_budget = max(0, int(getattr(GLOBAL_CONFIG, 'mail_attach_limit', 10)) - 1 - _n_sec0_imgs)
+                        if len(_strip_list) > _sb_img_budget:
+                            print(f"[WARN] Score Board 스트립 {len(_strip_list)}개 > 잔여 예산 {_sb_img_budget}개 "
+                                  f"([0]섹션 {_n_sec0_imgs}장 사용) — 표 위쪽 순으로 축소")
+                            _strip_list = _strip_list[:_sb_img_budget]
+                            _strip_items = set(_strip_list)
+                            _sb_omitted = [_t[1] for _t in _map_items_ord if _t[1] not in _strip_items]
+
+                        # 렌더 시퀀스: index 점수행 + (스트립 대상이면) 바로 아래 WF MAP 스트립 행
+                        render_seq = []   # (kind, cat, item, payload)
+                        for idx, row in sb_rows:
+                            cat, item = idx
+                            render_seq.append(('score', cat, item, row))
+                            if item in _strip_items:
+                                render_seq.append(('wfmap', cat, item, None))
+
+                        # category 연속 묶음 rowspan
+                        seq_cats = [r[1] for r in render_seq]
+                        cat_span = {}
+                        _j = 0
+                        while _j < len(seq_cats):
+                            _k = _j
+                            while _k + 1 < len(seq_cats) and seq_cats[_k + 1] == seq_cats[_j]:
+                                _k += 1
+                            cat_span[_j] = _k - _j + 1
+                            _j = _k + 1
+
+                        # WF MAP이 있으면 wafer 열 폭을 약간만 넓혀 표시 (48→45px, ~5% 축소 → #25까지 표시)
+                        _has_wf = len(wfmaps_by_item) > 0
+                        _wf_w = 45
+                        # 메일 클라이언트는 <style> CSS를 무시하므로 각 셀에 inline style로 직접 지정
+                        # (padding/font-size/nowrap도 <style> 값과 동일하게 inline — 메일·포워딩 표시 통일)
+                        _SB_BD = 'border:1px solid #2c2c2c;'      # 셀 구분선(inline)
+                        _SB_PAD = 'padding:4px 6px; white-space:nowrap;'
+                        _sb_waf_w = _wf_w if _has_wf else 40      # wafer 셀 폭(숫자 잘림 방지) inline min-width
+                        _SB_WAF = (f'{_SB_BD} text-align:center; width:{_sb_waf_w}px; min-width:{_sb_waf_w}px; '
+                                   f'max-width:{_sb_waf_w}px; padding:2px 1px; font-size:10px; white-space:nowrap;')
+                        _SB_CAT = f'{_SB_BD} {_SB_PAD} text-align:center; min-width:77px;'      # category 고정열
+                        _SB_ITEM = f'{_SB_BD} {_SB_PAD} text-align:center; min-width:240px;'    # Item 고정열
+                        _hs_sb = max(1, int(getattr(GLOBAL_CONFIG, 'html_img_scale', 2)))       # supersample 배율(스트립/보드 공용)
+
+                        def _strip_img_html(_it0):
+                            """index 1개의 wafer별 WF MAP을 '가로 스트립 이미지 1장'으로 합성해 <img> 반환.
+                            wafer 열 pitch(_wf_w)와 동일한 slot으로 그려 표의 wafer 열과 세로 정렬됨.
+                            합성 픽셀은 _hs_sb배(supersample), 표시 px는 1x. 실패 시 '' (스트립 행은 비어 보임)."""
+                            try:
+                                from PIL import Image as _PILImg, ImageDraw as _PILDraw
+                                import base64 as _b64s
+                                import io as _ios
+                                _slot = _wf_w * _hs_sb
+                                _map_px = (_wf_w - 2) * _hs_sb
+                                _row_h = _map_px + 6 * _hs_sb
+                                _sw = _slot * len(_wcols)
+                                _im = _PILImg.new('RGB', (_sw, _row_h), (255, 255, 255))
+                                _dr = _PILDraw.Draw(_im)
+                                _maps = wfmaps_by_item.get(_it0, {})
+                                for _ci, col in enumerate(_wcols):
+                                    _x0 = _ci * _slot
+                                    _b = _maps.get(f"{col[0]}|{col[1]}")
+                                    if _b:
+                                        try:
+                                            _mimg = (_PILImg.open(_ios.BytesIO(_b64s.b64decode(_b)))
+                                                     .convert('RGB').resize((_map_px, _map_px), _PILImg.LANCZOS))
+                                            _im.paste(_mimg, (_x0 + (_slot - _map_px) // 2, 3 * _hs_sb))
+                                        except Exception:
+                                            pass
+                                    else:   # 측정 없음 셀
+                                        _dr.rectangle([_x0 + 1, 1, _x0 + _slot - 1, _row_h - 1], fill=(246, 246, 246))
+                                _bufs = _ios.BytesIO()
+                                _im.save(_bufs, format='PNG', optimize=True)
+                                _sb64 = _b64s.b64encode(_bufs.getvalue()).decode('utf-8')
+                                _dw, _dh = _sw // _hs_sb, _row_h // _hs_sb
+                                # data-mail-keep: 첨부 개수 최종 가드에서 '마지막 순위'로 드롭되도록 보호
+                                return (f'<img data-mail-keep="1" src="data:image/png;base64,{_sb64}" width="{_dw}" height="{_dh}" '
+                                        f'style="width:{_dw}px; height:{_dh}px; display:block;"/>')
+                            except Exception as _se:
+                                print(f"[WARN] WF MAP 스트립 합성 실패({_it0}) — 해당 행 생략: {_se}")
+                                return ''
+
+                        sb_html = ''
+                        if _has_wf:
+                            sb_html += (f'<style>.score-board td.sb-val, .score-board th.sb-waf'
+                                        f'{{width:{_wf_w}px !important; min-width:{_wf_w}px !important; '
+                                        f'max-width:{_wf_w}px !important;}}</style>\n')
+                        # lot 그룹(헤더 colspan용): _wcols 순서대로 같은 lot을 묶음
+                        _lot_groups = []   # [(lot, [col, ...]), ...]
+                        for _c in _wcols:
+                            if _lot_groups and _lot_groups[-1][0] == _c[0]:
+                                _lot_groups[-1][1].append(_c)
+                            else:
+                                _lot_groups.append((_c[0], [_c]))
+
+                        sb_html += '<table class="score-board" style="border-collapse:collapse; font-size:11px;">\n  <thead>\n'
+                        sb_html += '    <tr>\n'
+                        sb_html += f'      <th colspan="2" class="sb-frozen-lot" style="{_SB_BD} {_SB_PAD} text-align:center; background-color:#d9e1f2;">LOT_ID</th>\n'
+                        # root_lot_id가 같은 형제 lot을 각각 헤더로 분리 (target lot은 강조)
+                        for _lot, _cols in _lot_groups:
+                            _is_tgt = (str(_lot) == str(target_lot_id))
+                            _bg = '#dbe7c8' if _is_tgt else '#f0f0f0'
+                            _fw = 'bold' if _is_tgt else 'normal'
+                            sb_html += (f'      <th colspan="{len(_cols)}" style="{_SB_BD} {_SB_PAD} text-align:center; '
+                                        f'background-color:{_bg}; font-weight:{_fw};">{_lot}</th>\n')
+                        sb_html += '    </tr>\n'
+                        sb_html += '    <tr>\n'
+                        sb_html += f'      <th class="sb-cat" style="{_SB_CAT} background-color:#d9e1f2;">category</th>\n'
+                        sb_html += f'      <th class="sb-item" style="{_SB_ITEM} background-color:#d9e1f2;">Item</th>\n'
+                        for col in _wcols:
+                            sb_html += f'      <th class="sb-waf" style="{_SB_WAF} background-color:#f0f0f0;">#{col[1]}</th>\n'
+                        sb_html += '    </tr>\n  </thead>\n  <tbody>\n'
+
+                        for _i, (kind, cat, item, payload) in enumerate(render_seq):
+                            sb_html += '    <tr>\n'
+                            if _i in cat_span:
+                                sb_html += f'      <td class="sb-cat row_heading" rowspan="{cat_span[_i]}" style="{_SB_CAT} font-weight:bold; background-color:#ebf4ff; vertical-align:middle;">{cat}</td>\n'
+                            if kind == 'wfmap':
+                                # 점수행 바로 아래 WF MAP 스트립 행 — wafer 열 전체를 colspan 1셀로 덮고
+                                # 열 pitch가 같은 스트립 이미지 1장을 padding 없이 배치(열과 세로 정렬)
+                                sb_html += (f'      <td class="sb-item" style="{_SB_BD} padding:2px 8px; text-align:right; '
+                                            f'font-size:10px; color:#888; background-color:#f7fafd;">↳ WF MAP</td>\n')
+                                sb_html += (f'      <td colspan="{len(_wcols)}" style="{_SB_BD} padding:0; '
+                                            f'background-color:#ffffff;">{_strip_img_html(item)}</td>\n')
+                                sb_html += '    </tr>\n'
+                                continue
+                            row = payload
+                            sb_html += (f'      <td class="sb-item row_heading" style="{_SB_ITEM} font-weight:bold; '
+                                        f'background-color:#ebf4ff;">{display_name(item)}</td>\n')
+                            for col in _wcols:
+                                val = row[col]
+                                if pd.isna(val) or val == "":
+                                    sb_html += f'      <td class="sb-val" style="{_SB_WAF} background-color:{GLOBAL_CONFIG.score_color_na};"></td>\n'
+                                else:
+                                    # 연속 색상(PPT와 동일), ITEM별 스케일 override 지원
+                                    bg_color, color = GLOBAL_CONFIG.score_color(val, item)
+                                    sb_html += f'      <td class="sb-val" style="{_SB_WAF} background-color:{bg_color}; color:{color}; font-weight:bold;">{val:.1f}</td>\n'
+                            sb_html += '    </tr>\n'
+                        sb_html += '  </tbody>\n</table>\n'
+
+                        # ── 미표시 index 안내: 보드/칸 없이 문구만 (메일 용량 절약, 상세는 PPT) ──
+                        if _sb_omitted:
+                            _om_names = ', '.join(str(display_name(_x)) for _x in _sb_omitted)
+                            sb_html += (
+                                '<div style="font-size:11px; color:#777; margin:6px 0 2px 0;">'
+                                f'※ {_om_names} 항목은 {_wf_min}pt 이상 측정되었으나 '
+                                '메일 용량 문제로 인하여 WF MAP에 추가되지 않음. PPT 참고.</div>')
+
+                        score_board_html = sb_html
+
                         # ==================== HTML 조립 ====================
                         sub_title = f'{target_lot_id} / {target_step_merged}'
                         html_content = html_code.replace('sub_title', sub_title)
@@ -1882,7 +2005,8 @@ def main():
                             '<div id="target1"></div>',
                             f'<div id="target1"><div class="section-title" style="{_SEC_T}">■ [1] Score Board</div>'
                             f'<div style="font-size:12px; color:#555; margin:2px 0 6px 2px;">'
-                            f'※ {_wf_min}pt 이상 측정된 이력이 있는 아이템은 각 wafer 아래에 WF MAP이 함께 표시됩니다.</div>'
+                            f'※ {_wf_min}pt 이상 측정 이력이 있는 아이템은 점수 행 아래에 WF MAP이 표시됩니다'
+                            f'(최대 {_sb_strip_max}개 — 초과 시 category별 대표 1개씩). 표는 텍스트라 그대로 복사 가능합니다.</div>'
                             # Score Board: 컨테이너 스크롤 없이 전체 항목을 한번에 펼침(max-height 없음, overflow visible).
                             # → thead(LOT_ID/wafer 헤더)가 페이지 스크롤 시 상단에 sticky 고정됨(score-board-open 클래스).
                             f'<div class="table-container score-board-open" style="{_TBL_C}">{score_board_html}</div></div>'
@@ -1941,9 +2065,11 @@ def main():
                                 # ── 메일 첨부 개수 최종 가드 (발송은 어떤 경우에도 성공해야 함) ──
                                 # 사내 메일 API는 본문 인라인(data:image) 이미지 + 첨부파일 합계가
                                 # 제한(기본 10)을 넘으면 "Attach file count is over 10"으로 발송을 거부한다.
-                                # 섹션별 PIL 합성(Score Board 보드 1장 / SPEC OUT item당 1장 / WARNING 그리드 1장)
-                                # 으로 본문 이미지 수는 상수화되어 평시엔 제한 이내. 그래도 초과하면
-                                # 본문 뒤쪽 이미지부터 안내 문구로 대체해 제한 이내로 조정 → 발송 보장.
+                                # 섹션별 PIL 합성(Score Board 보드 1장 / SPEC OUT 예산제 스택 / WARNING 그리드 1장)
+                                # 으로 본문 이미지 수는 제한 이내로 구조화되어 평시엔 이 가드가 동작하지 않음.
+                                # 그래도 초과하면 안내 문구로 대체해 제한 이내로 조정 → 발송 보장.
+                                # 드롭 우선순위: data-mail-keep 표식 없는 이미지 뒤쪽부터 → 그래도 초과 시
+                                # keep 이미지(Score Board WF MAP 스트립) 뒤쪽부터 — 스트립이 먼저 잘리지 않게.
                                 # (첨부는 PPT 1개 고정 — 저장된 HTML 파일은 영향 없음, 메일 body 사본만 조정)
                                 import re as _re_mail
                                 _img_pattern = r'<img\s[^>]*src="data:image/[^"]*"[^>]*/?\s*>'
@@ -1953,10 +2079,15 @@ def main():
                                 if _n_inline + 1 > _attach_limit:
                                     _budget = max(0, _attach_limit - 1)   # PPT(1) 제외한 본문 허용 수
                                     _n_drop = _n_inline - _budget
+                                    _plain = [_im for _im in _imgs if 'data-mail-keep' not in _im]
+                                    _keeps = [_im for _im in _imgs if 'data-mail-keep' in _im]
+                                    _drops = list(reversed(_plain))[:_n_drop]
+                                    if len(_drops) < _n_drop:
+                                        _drops += list(reversed(_keeps))[:_n_drop - len(_drops)]
                                     _note = ('<div style="font-size:11px; color:#888; border:1px dashed #bbb; '
                                              'padding:6px 10px; margin:4px 0;">이미지 생략 — 전체 이미지는 첨부된 '
                                              'PPT를 참조해 주세요.</div>')
-                                    for _im in reversed(_imgs[-_n_drop:]):   # 뒤쪽 이미지부터 대체(중복 태그 안전하게 rfind)
+                                    for _im in _drops:   # 우선순위 순 대체(중복 태그 안전하게 rfind)
                                         _pos = html_code_final.rfind(_im)
                                         if _pos >= 0:
                                             html_code_final = (html_code_final[:_pos] + _note
