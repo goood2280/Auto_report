@@ -619,8 +619,9 @@ def _assemble_final_html(final_text, modes, rule_modes=None):
 
     paras = []
     # ① 판정 문장 — 매칭된 [RULE] 불량 모드를 표기.
-    #   rule_modes(코드가 전부 평가한 결과)가 있으면 매칭된 **모든** 모드를 각각 한 줄로 표기
-    #   (하나만 잡고 끝내지 않음 — 동시 매칭 모드 전부 노출, MD의 '전부 코멘트' 원칙).
+    #   rule_modes(코드가 전부 평가한 결과)가 있으면 매칭된 **모든** 모드를 각각 한 줄로,
+    #   각 줄에 그 RULE의 확인/조치(link)를 '해당 모드·근거 ITEM에 맞게' 붙인다(요청 2 — 뭉치지 않음).
+    #   근거 ITEM은 표시명(real item name = _convert_name 변환값)으로 적는다(요청 3).
     if rule_modes:
         for _rm in rule_modes:
             _mode = _esc(_rm.get('mode', '')).strip()
@@ -628,10 +629,12 @@ def _assemble_final_html(final_text, modes, rule_modes=None):
                 continue
             _bi = ', '.join(_esc(x) for x in (_rm.get('items') or []) if x)
             p = f'<b>{_mode}</b>(이)가 추정됩니다'
-            p += f' (근거: <b>{_bi}</b>).' if _bi else '.'
+            p += f' (근거: <b>{_bi}</b>)' if _bi else ''
             _lk = str(_rm.get('link') or '').strip()
-            if _lk:
-                p += f' <a href="{_html.escape(_lk, quote=True)}" target="_blank">관련 링크</a>'
+            if _lk:   # 이 RULE의 확인/조치 = 첨부 링크(해당 모드에 개별 연결)
+                p += f'. <b>확인/조치</b>: <a href="{_html.escape(_lk, quote=True)}" target="_blank">관련 링크</a>'
+            else:
+                p += '.'
             paras.append(p)
         if not paras:   # rule_modes가 모두 빈 모드명 → 안내로 폴백
             paras.append('지식 규칙(ANOMALY_KNOWLEDGE.md)에 매칭되는 불량 모드가 없어 <b>수동 검토가 필요</b>합니다.')
@@ -646,29 +649,32 @@ def _assemble_final_html(final_text, modes, rule_modes=None):
         p += f' (이상 항목: <b>{basis_txt}</b>).' if basis_txt else '.'
         paras.append(p)
 
-    # ② 현상/원인 서술 — 관찰 사실(phenomenon) + 종합 판단(summary)을 이어서 평문으로
-    _body = ' '.join(_sent(_esc(data.get(k))) for k in ('phenomenon', 'summary') if data.get(k))
-    if _body:
-        paras.append(_body)
+    # ② 종합 판단(summary) — 매칭 모드가 없을 때만(요약이 유일한 AI 결론). 항목별 상세 분석
+    #   (phenomenon: '어느 shot에서 spec-out 1pt' 등)은 HTML에 넣지 않는다 → PPT Anomaly 상세 페이지 담당(요청 1).
+    if not rule_modes:
+        _sm = data.get('summary')
+        if isinstance(_sm, str) and _sm.strip() and _sm.strip().lower() not in ('null', 'none'):
+            paras.append(_sent(_esc(_sm)))
 
-    # ③ 측정이상 추정(있을 때만) — 재측정 우선 안내
+    # ③ 측정이상 추정(있을 때만) — 재측정 우선 안내(측정 신뢰성 이슈는 간결하게 유지)
     _ms = data.get('meas_suspect')
     if isinstance(_ms, str) and _ms.strip() and _ms.strip().lower() not in ('null', 'none'):
         paras.append(f'<b>측정이상 가능성</b>: {_sent(_esc(_ms))} 불량 단정 전 <b>재측정으로 재현성 확인</b>을 우선하세요.')
 
-    # ④ 확인/조치 — LLM actions + 매칭 [RULE]의 코멘트(comment, 있으면). 비어있으면 섹션 자체를 숨김.
-    #   MD(지식베이스)에 조치가 없으면 '지식베이스 미기재' 같은 문구는 표시하지 않고 섹션째로 숨긴다(요청).
-    _act_raw = data.get('actions')
-    _act = _esc(_act_raw).strip() if (isinstance(_act_raw, str)
-                                      and _act_raw.strip().lower() not in ('null', 'none', 'n/a')) else ''
-    if _act and '미기재' in _act:   # '지식베이스 미기재 — 추가 분석 필요' 등 → 조치 없음으로 간주(숨김)
-        _act = ''
-    if entry and entry.get('comment'):
-        _cm = _esc(entry['comment'])
-        if _cm not in _act:
-            _act = (_act + ' ' if _act else '') + _sent(_cm)
-    if _act:
-        paras.append(f'<b>확인/조치</b>: {_sent(_act)}')
+    # ④ 확인/조치(뭉친 AI actions) — rule_modes가 있으면 각 RULE에 링크로 개별 연결했으므로 표시하지 않는다.
+    #   rule_modes가 없을 때만(수동 검토) AI actions/entry.comment를 폴백으로 표기. '미기재' 문구는 숨김.
+    if not rule_modes:
+        _act_raw = data.get('actions')
+        _act = _esc(_act_raw).strip() if (isinstance(_act_raw, str)
+                                          and _act_raw.strip().lower() not in ('null', 'none', 'n/a')) else ''
+        if _act and '미기재' in _act:
+            _act = ''
+        if entry and entry.get('comment'):
+            _cm = _esc(entry['comment'])
+            if _cm not in _act:
+                _act = (_act + ' ' if _act else '') + _sent(_cm)
+        if _act:
+            paras.append(f'<b>확인/조치</b>: {_sent(_act)}')
 
     return ''.join(f'<div style="margin:3px 0;">{p}</div>' for p in paras)
 
