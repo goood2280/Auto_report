@@ -2375,6 +2375,19 @@ def _render_item_charts(task):
             _mx = abs(_csx) * 0.08; _my = abs(_csy) * 0.08
             _px_lo = min(_px_lo, _ccx - _csx - _mx); _px_hi = max(_px_hi, _ccx + _csx + _mx)
             _py_lo = min(_py_lo, _ccy - _csy - _my); _py_hi = max(_py_hi, _ccy + _csy + _my)
+        # ── 셀 표시영역을 '정사각형'으로 맞춰 wafer 원이 셀을 꽉 채우게(HTML 단일맵과 동일 크기) ──
+        # display box h/w = aspect·Δy/Δx. Δx/Δy=aspect로 맞추면 정사각 셀을 원이 꽉 채운다.
+        # (안 맞추면 set_aspect(...,'box')가 짧은 변에 맞춰 원을 셀 안에서 축소 → HTML보다 작게 보였음)
+        _asp = _wfmap_aspect(_circ_ppt)
+        _aval = _asp if isinstance(_asp, (int, float)) and _asp > 0 else 1.0
+        _cxm = 0.5 * (_px_lo + _px_hi); _cym = 0.5 * (_py_lo + _py_hi)
+        _dx = _px_hi - _px_lo; _dy = _py_hi - _py_lo
+        if _dx < _aval * _dy:      # x 부족 → x를 넓혀 정사각(원 상하 여백 = 좌우 여백)
+            _dx = _aval * _dy
+        else:                       # y 부족 → y를 넓힘
+            _dy = _dx / _aval
+        _px_lo, _px_hi = _cxm - _dx / 2.0, _cxm + _dx / 2.0
+        _py_lo, _py_hi = _cym - _dy / 2.0, _cym + _dy / 2.0
 
         # 칩 격자 차원(예: 13x13)
         nx = max(int(item_df[map_x].nunique()), 1)
@@ -2444,8 +2457,16 @@ def _render_item_charts(task):
                         facecolor='white', pil_kwargs={'quality': map_q})
         plt.close(fig_map)
         out['imgs']['map'] = tmp_map.getvalue()
-        # 고정 크기 배치용 비율(25칸 고정 → wafer 수와 무관하게 동일). 조립부에서 사용.
-        out['map_ratio'] = fig_h / fig_disp_w
+        # 배치 비율은 실제 저장 이미지(tight 크롭 반영) 픽셀 h/w로 잡는다.
+        # (nominal fig_h/fig_disp_w로 잡으면 tight 크롭된 이미지가 배치 박스에 늘어나
+        #  일부 WF MAP 원이 위아래로 찌그러져 보였음 — 실제 픽셀비로 맞춰 왜곡 제거.)
+        try:
+            from PIL import Image as _PILImg
+            tmp_map.seek(0)
+            _iw, _ih = _PILImg.open(tmp_map).size
+            out['map_ratio'] = (_ih / _iw) if _iw else (fig_h / fig_disp_w)
+        except Exception:
+            out['map_ratio'] = fig_h / fig_disp_w
 
         # ---- WF MAP 컬러바(별도 이미지) : 슬라이드에서 항상 같은 크기로 우측에 세로로 길게 배치 ----
         if sc is not None:
