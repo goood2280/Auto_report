@@ -654,12 +654,13 @@ def _assemble_final_html(final_text, modes, rule_modes=None):
         p += f' (이상 항목: <b>{basis_txt}</b>).' if basis_txt else '.'
         paras.append(p)
 
-    # ② 종합 판단(summary) — 매칭 모드가 없을 때만(요약이 유일한 AI 결론). 항목별 상세 분석
-    #   (phenomenon: '어느 shot에서 spec-out 1pt' 등)은 HTML에 넣지 않는다 → PPT Anomaly 상세 페이지 담당(요청 1).
-    if not rule_modes:
-        _sm = data.get('summary')
-        if isinstance(_sm, str) and _sm.strip() and _sm.strip().lower() not in ('null', 'none'):
-            paras.append(_sent(_esc(_sm)))
+    # ② 종합 판단(summary) — AI가 정리한 결론 문장은 **항상** 표시(rule_modes 유무 무관).
+    #   (종전에는 RULE 매칭 시 생략했으나, use_gpt_summary=True인데 GPT 정리 문구가 안 보이는
+    #   문제로 복원 — 2026-07-07.) 항목별 상세 분석(phenomenon: '어느 shot에서 spec-out 1pt' 등)은
+    #   계속 HTML에 넣지 않는다 → PPT Anomaly 상세 페이지 담당.
+    _sm = data.get('summary')
+    if isinstance(_sm, str) and _sm.strip() and _sm.strip().lower() not in ('null', 'none'):
+        paras.append(f'<b>종합 판단</b>: {_sent(_esc(_sm))}')
 
     # ③ 측정이상 추정(있을 때만) — 재측정 우선 안내(측정 신뢰성 이슈는 간결하게 유지)
     _ms = data.get('meas_suspect')
