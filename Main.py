@@ -1438,12 +1438,34 @@ def main():
                         top_item_names = []
                         _seen = set()
 
+                        # CAT2 중복 제거: 같은 CAT2(예: VTH 계열 VTH_N/VTH_P/VTH_DIFF…)는 '대표 1개'만
+                        # Trend chart에 노출(사용자 요구). 이상 4건이라도 CAT2가 2종이면 2개만 나온다.
+                        # ALIAS→CAT2 매핑(reformatter). CAT2 없는(빈값) 항목은 dedup 대상 아님(각각 허용).
+                        _alias_cat2 = {}
+                        try:
+                            if 'ALIAS' in reformatter.columns and 'CAT2' in reformatter.columns:
+                                for _al, _c2 in zip(reformatter['ALIAS'].astype(str), reformatter['CAT2']):
+                                    _c2s = str(_c2).strip()
+                                    if _al and _c2s and _c2s.lower() != 'nan':
+                                        _alias_cat2[_al] = _c2s
+                        except Exception:
+                            _alias_cat2 = {}
+                        _seen_cat2 = set()
+
+                        def _cat2_of(_it):
+                            return _alias_cat2.get(str(_it).strip())
+
                         def _try_add(_it):
                             _it = str(_it).strip()
                             if (not _it) or (_it in _seen) or (_it not in merged_df.columns) or (not _has_png(_it)) \
                                     or item_excluded(_it, _excl_items):
                                 return
+                            _c2 = _cat2_of(_it)
+                            if _c2 is not None and _c2 in _seen_cat2:   # 같은 CAT2 이미 채택 → 스킵(대표 1개만)
+                                return
                             top_item_names.append(_it); _seen.add(_it)
+                            if _c2 is not None:
+                                _seen_cat2.add(_c2)
 
                         # (AI on) 지식판정(RULE) 매칭 항목을 MD 규칙 순서대로 '먼저' 배치 →
                         #         위에 적힌(강한) 규칙 항목이 앞, 일반 이상 항목보다 우선.
@@ -1472,7 +1494,12 @@ def main():
                                 if (_it in _seen) or (_it not in merged_df.columns) or (not _has_png(_it)) \
                                         or item_excluded(_it, _excl_items):
                                     continue
+                                _c2 = _cat2_of(_it)
+                                if _c2 is not None and _c2 in _seen_cat2:   # 같은 CAT2 이미 채택 → 스킵
+                                    continue
                                 top_item_names.append(_it); _seen.add(_it)
+                                if _c2 is not None:
+                                    _seen_cat2.add(_c2)
                                 if len(top_item_names) >= _top_n: break
                         print(f"[INFO] Anomaly Trend chart 항목 {len(top_item_names)}개 선정(통계 자동분석 상위): {top_item_names}")
 

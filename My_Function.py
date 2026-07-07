@@ -2364,9 +2364,15 @@ def _render_item_charts(task):
 
         # ---- WF MAP 공유 컬러 스케일 (spec line 기준 diverging, HTML과 동일 규칙) ----
         wfmap_norm = _wfmap_norm(direction, wfmap_spec_low, wfmap_spec_high, item_df[item_name])
-        # 배경 wafer 원(150mm) — radius(mm) 기반 중심·x/y 스케일 fit (모든 셀 공통)
-        _circ_ppt = _wafer_circle_params(item_df, map_x, map_y, col_rad,
-                                         mask_col=col_mask, main_vehicle=main_vehicle)   # 실제 150mm 원(vehicle 매칭)
+        # 배경 wafer 원 — PPT WF MAP은 '격자(grid) 좌표계 등방(aspect=1)'으로 그린다.
+        #   ⚠️ 2026-07-07: radius(mm) 기반 fit(aspect=shot_h/shot_w)을 쓰면, 물리 칩이 정사각이
+        #   아닐 때(shot_w≠shot_h) aspect≠1이 되어 shot이 세로로 압축된 직사각형으로 렌더된다
+        #   (계측: 물리 비정사각 칩에서 원이 113×103으로 세로 압축 → 사용자 "샷 위아래 압축" 증상).
+        #   wafer map은 die를 정사각 격자로 그리는 것이 관례이므로 rad_col=None으로 등방 원
+        #   (aspect=1, 반경=최대 칩 격자거리)만 쓴다 → shot 항상 정사각·격자 gap 없음·원 정원.
+        #   (HTML score board/spec-out 맵은 종전 규칙 유지 — 여기선 PPT 셀만.)
+        _circ_ppt = _wafer_circle_params(item_df, map_x, map_y, None,
+                                         mask_col=col_mask, main_vehicle=main_vehicle)   # 등방(grid) 원, aspect=1
         # 셀 공통 축범위: 데이터(패딩) + wafer 경계(타원)를 모두 포함(경계 안 잘리게)
         _px_lo, _px_hi = global_x_min, global_x_max
         _py_lo, _py_hi = global_y_min, global_y_max
@@ -2376,9 +2382,8 @@ def _render_item_charts(task):
             _px_lo = min(_px_lo, _ccx - _csx - _mx); _px_hi = max(_px_hi, _ccx + _csx + _mx)
             _py_lo = min(_py_lo, _ccy - _csy - _my); _py_hi = max(_py_hi, _ccy + _csy + _my)
         # ── 셀 표시영역을 '정사각형'으로 맞춰 wafer 원이 셀을 꽉 채우게(HTML 단일맵과 동일 크기) ──
-        # display box h/w = aspect·Δy/Δx. Δx/Δy=aspect로 맞추면 정사각 셀을 원이 꽉 채운다.
-        # (안 맞추면 set_aspect(...,'box')가 짧은 변에 맞춰 원을 셀 안에서 축소 → HTML보다 작게 보였음)
-        _asp = _wfmap_aspect(_circ_ppt)
+        # 등방(grid) 원이라 aspect=1 → Δx=Δy(정사각 축범위) → shot 정사각.
+        _asp = _wfmap_aspect(_circ_ppt)   # 등방 원이므로 1.0
         _aval = _asp if isinstance(_asp, (int, float)) and _asp > 0 else 1.0
         _cxm = 0.5 * (_px_lo + _px_hi); _cym = 0.5 * (_py_lo + _py_hi)
         _dx = _px_hi - _px_lo; _dy = _py_hi - _py_lo
@@ -2412,9 +2417,9 @@ def _render_item_charts(task):
         _cmap_ppt = _wfmap_cmap(direction); _asp_ppt = _wfmap_aspect(_circ_ppt)
 
         def _render_ppt_cell(w_grp):
-            """한 wafer를 독립 axes로 렌더 → 정사각 PNG bytes(HTML spec-out 단일맵과 동일).
-            축범위는 정사각(_px_*/_py_*)이고 aspect=ky/kx(box)라 tight 크롭 결과가 정사각이 되어
-            합성 시 (CELL×CELL) 리사이즈가 왜곡을 만들지 않는다. color만 diverging(values+cmap+norm)."""
+            """한 wafer를 독립 axes로 렌더 → 정사각 PNG bytes.
+            등방(grid) 원이라 aspect=1, 축범위 정사각(_px_*/_py_*) → shot 정사각·원 정원.
+            tight 크롭 결과도 정사각이라 (CELL×CELL) 합성 리사이즈 왜곡 없음. color만 diverging."""
             _f, _a = plt.subplots(figsize=(0.62, 0.62))
             _draw_wfmap_shots(_a, w_grp[map_x].astype(float).values,
                               w_grp[map_y].astype(float).values, _shot_px, _shot_py,
@@ -2422,7 +2427,7 @@ def _render_item_charts(task):
                               cmap=_cmap_ppt, norm=wfmap_norm)
             _add_wafer_circle(_a, _circ_ppt, color='#000000', lw=1.0)   # 배경 wafer 원 (HTML과 동일)
             _a.set_xticks([]); _a.set_yticks([]); _a.set_facecolor('white')
-            _a.set_aspect(_asp_ppt, adjustable='box')                    # aspect=ky/kx → 정원 유지
+            _a.set_aspect(_asp_ppt, adjustable='box')                    # aspect=1(등방) → shot 정사각·원 정원
             for _sp in _a.spines.values():
                 _sp.set_visible(False)
             # 방향: 왼쪽=chip_x_adj 작은 쪽, 위쪽=chip_y_adj 작은 쪽(y축 반전). HTML과 동일. 경계 포함
