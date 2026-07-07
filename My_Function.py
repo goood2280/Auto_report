@@ -2345,58 +2345,30 @@ def _render_item_charts(task):
         sub_groups = list(item_df.groupby(_wfmap_grp_col))
         n_pgm = len(sub_groups) if len(sub_groups) > 0 else 1
 
-        global_x_min = item_df[map_x].min()
-        global_x_max = item_df[map_x].max()
-        global_y_min = item_df[map_y].min()
-        global_y_max = item_df[map_y].max()
-
-        x_range = global_x_max - global_x_min if global_x_max > global_x_min else 1
-        y_range = global_y_max - global_y_min if global_y_max > global_y_min else 1
-        # 가장자리 칩(사각 마커)이 잘리지 않도록 반칩 이상 여백 확보 (칩 간격 기준)
-        _nxu = max(int(item_df[map_x].nunique()), 1)
-        _nyu = max(int(item_df[map_y].nunique()), 1)
-        x_pad = (x_range / max(_nxu - 1, 1)) * 0.7 if _nxu > 1 else x_range * 0.1
-        y_pad = (y_range / max(_nyu - 1, 1)) * 0.7 if _nyu > 1 else y_range * 0.1
-        global_x_min -= x_pad
-        global_x_max += x_pad
-        global_y_min -= y_pad
-        global_y_max += y_pad
-
         # ---- WF MAP 공유 컬러 스케일 (spec line 기준 diverging, HTML과 동일 규칙) ----
         wfmap_norm = _wfmap_norm(direction, wfmap_spec_low, wfmap_spec_high, item_df[item_name])
-        # 배경 wafer 원(150mm) — Chip_Radius 기반 fit(HTML spec-out 맵과 동일 규칙).
-        #   각 shot 중심까지의 물리거리(Chip_Radius, mm)로 shot_w/shot_h(격자 1칸당 mm)와
-        #   wafer 중점(cx,cy)을 최소자승 fit → 그 중점에서 반지름 150mm 원을 격자 반축
-        #   (150/shot_w, 150/shot_h)으로 그린다. aspect=shot_h/shot_w를 set_aspect에 줘서
-        #   원은 정원으로, shot은 물리 w·h 비율 그대로(비정사각 칩이면 직사각) 보인다.
-        _circ_ppt = _wafer_circle_params(item_df, map_x, map_y, col_rad,
-                                         mask_col=col_mask, main_vehicle=main_vehicle)   # 실제 150mm 원(vehicle 매칭)
-        # 셀 공통 축범위: 데이터(패딩) + wafer 경계(타원)를 모두 포함(경계 안 잘리게)
-        _px_lo, _px_hi = global_x_min, global_x_max
-        _py_lo, _py_hi = global_y_min, global_y_max
-        if _circ_ppt:
-            _ccx, _ccy, _csx, _csy = _circ_ppt[0], _circ_ppt[1], _circ_ppt[2], _circ_ppt[3]
-            _mx = abs(_csx) * 0.08; _my = abs(_csy) * 0.08
-            _px_lo = min(_px_lo, _ccx - _csx - _mx); _px_hi = max(_px_hi, _ccx + _csx + _mx)
-            _py_lo = min(_py_lo, _ccy - _csy - _my); _py_hi = max(_py_hi, _ccy + _csy + _my)
-        # ── 셀 표시영역을 '정사각형'으로 맞춰 wafer 원이 셀을 꽉 채우게(HTML 단일맵과 동일 크기) ──
-        # display box h/w = aspect·Δy/Δx. Δx=aspect·Δy로 맞추면 표시영역이 정사각이 되어
-        # 150mm 원이 셀을 꽉 채운다(안 맞추면 set_aspect(...,'box')가 원을 셀 안에서 축소).
-        _asp = _wfmap_aspect(_circ_ppt)   # = shot_h/shot_w (radius fit 실패 시 1.0)
-        _aval = _asp if isinstance(_asp, (int, float)) and _asp > 0 else 1.0
-        _cxm = 0.5 * (_px_lo + _px_hi); _cym = 0.5 * (_py_lo + _py_hi)
-        _dx = _px_hi - _px_lo; _dy = _py_hi - _py_lo
-        if _dx < _aval * _dy:      # x 부족 → x를 넓혀 정사각(원 상하 여백 = 좌우 여백)
-            _dx = _aval * _dy
-        else:                       # y 부족 → y를 넓힘
-            _dy = _dx / _aval
-        _px_lo, _px_hi = _cxm - _dx / 2.0, _cxm + _dx / 2.0
-        _py_lo, _py_hi = _cym - _dy / 2.0, _cym + _dy / 2.0
 
-        # 칩 격자 차원(예: 13x13)
-        nx = max(int(item_df[map_x].nunique()), 1)
-        ny = max(int(item_df[map_y].nunique()), 1)
-        gdim = max(nx, ny)
+        # ---- PPT WF MAP 좌표계 = '물리 mm' ----
+        # Chip_Radius fit(_wafer_circle_params): 각 shot 중심(격자좌표)과 Chip_Radius(mm)의 관계
+        #   r² = shot_w²(x-cx)² + shot_h²(y-cy)²  를 최소자승 fit → shot 크기(shot_w×shot_h mm,
+        # 비정사각 칩이면 서로 다름)와 wafer 중점(cx,cy)을 얻는다. 셀은 그 mm 좌표로 렌더한다:
+        #   · shot = (pitch·shot_w)×(pitch·shot_h) mm 직사각형 — 칩 물리 비율(w≠h) 그대로 표시
+        #   · wafer 외곽선 = 중점 기준 반경 150mm 정원 (mm 등방 좌표라 원 왜곡 여지 없음)
+        #   · aspect='equal' + 대칭 정사각 축범위(±_wf_L) → 셀 PNG가 항상 정사각 →
+        #     (CELL×CELL) 합성 리사이즈로도 원이 찌그러질 수 없다.
+        # (종전 '격자좌표+set_aspect(ky/kx)'는 원 왜곡, '등방(grid) bounding 원'은 외곽선이
+        #  실제 wafer 크기(150mm)와 무관해지는 문제 — mm 렌더는 둘 다 원천 해소.
+        #  Chip_Radius가 없으면 fit 폴백(등방 bounding 원)이 같은 150/semi 스케일 규칙으로 동작.)
+        _circ_ppt = _wafer_circle_params(item_df, map_x, map_y, col_rad,
+                                         mask_col=col_mask, main_vehicle=main_vehicle)
+        if _circ_ppt:
+            _wf_cx, _wf_cy = float(_circ_ppt[0]), float(_circ_ppt[1])
+            _mm_x = 150.0 / float(_circ_ppt[2])   # 격자 1칸당 mm (x) = shot_w
+            _mm_y = 150.0 / float(_circ_ppt[3])   # 격자 1칸당 mm (y) = shot_h
+        else:   # 좌표 무효(유효 shot<6) — 원 없이 격자 그대로(등방)
+            _wf_cx = float(pd.to_numeric(item_df[map_x], errors='coerce').mean())
+            _wf_cy = float(pd.to_numeric(item_df[map_y], errors='coerce').mean())
+            _mm_x = _mm_y = 1.0
 
         # ---- WF MAP 배치: 행=PGM(pt), 열=wafer #1~25 고정 ----
         # 각 wafer 셀을 '독립 단일 axes'(HTML spec-out WF MAP과 완전히 동일한 렌더 파이프라인)로
@@ -2411,27 +2383,39 @@ def _render_item_charts(task):
         cell_map = {(i, c): (sub_grp, str(c + 1), sub_name)
                     for i, (sub_name, sub_grp) in enumerate(sub_groups)
                     for c in range(FIXED_N_WAF)}
-        # shot: 인접 센터 간격(pitch) 크기 사각형으로 그려 gap 없이(측정 pt 수와 무관하게 동일 크기)
-        _shot_px = _wfmap_shot_pitch(item_df[map_x]); _shot_py = _wfmap_shot_pitch(item_df[map_y])
-        _cmap_ppt = _wfmap_cmap(direction); _asp_ppt = _wfmap_aspect(_circ_ppt)
+        # shot 크기(mm) = 인접 shot 센터 간 pitch(격자)×mm 스케일 — 측정 pt 수와 무관·gap 없음
+        _shot_px = _wfmap_shot_pitch(item_df[map_x]) * _mm_x
+        _shot_py = _wfmap_shot_pitch(item_df[map_y]) * _mm_y
+        # 셀 공통 축범위(±_wf_L mm, 정사각): 150mm 원 + 모든 shot(반 pitch 여백 포함)을 포함
+        _xs_mm = (pd.to_numeric(item_df[map_x], errors='coerce') - _wf_cx) * _mm_x
+        _ys_mm = (pd.to_numeric(item_df[map_y], errors='coerce') - _wf_cy) * _mm_y
+        _wf_L = max((150.0 if _circ_ppt else 0.0),
+                    float(_xs_mm.abs().max()) + _shot_px / 2.0,
+                    float(_ys_mm.abs().max()) + _shot_py / 2.0) * 1.04
+        if not np.isfinite(_wf_L) or _wf_L <= 0:
+            _wf_L = 160.0
+        _cmap_ppt = _wfmap_cmap(direction)
 
         def _render_ppt_cell(w_grp):
-            """한 wafer를 독립 axes로 렌더 → 정사각 PNG bytes(HTML spec-out 단일맵과 동일).
-            축범위가 Δx=aspect·Δy로 맞춰져 있고 aspect=shot_h/shot_w(box)라 표시영역이 정사각
-            → 150mm 원은 정원, shot은 물리 w·h 비율 유지. tight 크롭 결과도 정사각이라
-            (CELL×CELL) 합성 리사이즈 왜곡 없음. color만 diverging(values+cmap+norm)."""
+            """한 wafer를 물리 mm 좌표의 독립 axes로 렌더 → 정사각 PNG bytes.
+            shot=(pitch·shot_w)×(pitch·shot_h)mm 직사각형(칩 물리 비율 유지),
+            원=중점(0,0)·반경 150mm 정원. aspect='equal'+정사각 축범위(±_wf_L)라
+            크롭/리사이즈 왜곡이 구조적으로 불가능. color만 diverging(HTML과 동일 규칙)."""
             _f, _a = plt.subplots(figsize=(0.62, 0.62))
-            _draw_wfmap_shots(_a, w_grp[map_x].astype(float).values,
-                              w_grp[map_y].astype(float).values, _shot_px, _shot_py,
+            _draw_wfmap_shots(_a,
+                              (w_grp[map_x].astype(float).values - _wf_cx) * _mm_x,
+                              (w_grp[map_y].astype(float).values - _wf_cy) * _mm_y,
+                              _shot_px, _shot_py,
                               values=w_grp[item_name].astype(float).values,
                               cmap=_cmap_ppt, norm=wfmap_norm)
-            _add_wafer_circle(_a, _circ_ppt, color='#000000', lw=1.0)   # 배경 150mm wafer 원 (HTML과 동일)
+            if _circ_ppt:   # wafer 외곽선 — 중점 기준 150mm 정원
+                _add_wafer_circle(_a, (0.0, 0.0, 150.0, 150.0, 1.0), color='#000000', lw=1.0)
             _a.set_xticks([]); _a.set_yticks([]); _a.set_facecolor('white')
-            _a.set_aspect(_asp_ppt, adjustable='box')                    # aspect=shot_h/shot_w → 원 정원·shot 물리비율
+            _a.set_aspect('equal', adjustable='box')   # mm 등방 — 원 정원·shot 물리 비율
             for _sp in _a.spines.values():
                 _sp.set_visible(False)
-            # 방향: 왼쪽=chip_x_adj 작은 쪽, 위쪽=chip_y_adj 작은 쪽(y축 반전). HTML과 동일. 경계 포함
-            _a.set_xlim(_px_lo, _px_hi); _a.set_ylim(_py_hi, _py_lo)
+            # 방향: 왼쪽=chip_x_adj 작은 쪽, 위쪽=chip_y_adj 작은 쪽(y축 반전). HTML과 동일
+            _a.set_xlim(-_wf_L, _wf_L); _a.set_ylim(_wf_L, -_wf_L)
             _f.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
             _png = _wfmap_png_bytes(_f, max(int(dpi), 200), colors=256)   # HTML 단일맵과 동일 인코딩
             plt.close(_f)
