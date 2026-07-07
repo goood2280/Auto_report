@@ -2452,18 +2452,18 @@ def _render_item_charts(task):
                 ax.set_ylim(_py_hi, _py_lo)
 
         fig_map.subplots_adjust(left=_ML, right=_MR, top=_MT, bottom=_MB)
-        # 칩 격자가 선명하도록 해상도 상향
-        fig_map.savefig(tmp_map, format='jpg', dpi=max(int(dpi), 200), bbox_inches="tight",
-                        facecolor='white', pil_kwargs={'quality': map_q})
+        # WF MAP은 PNG(무손실, 팔레트 양자화)로 저장 — HTML 단일맵(_wfmap_png_bytes)과 동일 방식.
+        #   JPG는 경계가 번져 인접 shot이 겹쳐 보였음(격자감 저하) → PNG로 crisp하게(HTML과 동일).
+        #   bbox_inches='tight'·pad_inches=0.02도 HTML과 동일하게 _wfmap_png_bytes가 처리.
+        _map_png = _wfmap_png_bytes(fig_map, max(int(dpi), 200), colors=256)
         plt.close(fig_map)
-        out['imgs']['map'] = tmp_map.getvalue()
+        out['imgs']['map'] = _map_png
         # 배치 비율은 실제 저장 이미지(tight 크롭 반영) 픽셀 h/w로 잡는다.
         # (nominal fig_h/fig_disp_w로 잡으면 tight 크롭된 이미지가 배치 박스에 늘어나
-        #  일부 WF MAP 원이 위아래로 찌그러져 보였음 — 실제 픽셀비로 맞춰 왜곡 제거.)
+        #  WF MAP 원이 위아래로 찌그러져 보였음 — 실제 픽셀비로 맞춰 왜곡 제거.)
         try:
             from PIL import Image as _PILImg
-            tmp_map.seek(0)
-            _iw, _ih = _PILImg.open(tmp_map).size
+            _iw, _ih = _PILImg.open(_io.BytesIO(_map_png)).size
             out['map_ratio'] = (_ih / _iw) if _iw else (fig_h / fig_disp_w)
         except Exception:
             out['map_ratio'] = fig_h / fig_disp_w

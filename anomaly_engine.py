@@ -627,9 +627,14 @@ def _assemble_final_html(final_text, modes, rule_modes=None):
             _mode = _esc(_rm.get('mode', '')).strip()
             if not _mode:
                 continue
-            _bi = ', '.join(_esc(x) for x in (_rm.get('items') or []) if x)
-            p = f'<b>{_mode}</b>(이)가 추정됩니다'
-            p += f' (근거: <b>{_bi}</b>)' if _bi else ''
+            _nl = _esc(str(_rm.get('nl') or '').strip())
+            _notn = _esc(str(_rm.get('not_note') or '').strip())
+            if _nl:   # 자연어 근거: "A가 이상 수준이고 B도 이상 수준이므로 <b>모드</b> 판정 (단, ...)"
+                p = f'{_nl}이므로 <b>{_mode}</b> 판정{_notn}'
+            else:     # 폴백: 근거 항목만 나열
+                _bi = ', '.join(_esc(x) for x in (_rm.get('items') or []) if x)
+                p = f'<b>{_mode}</b>(이)가 추정됩니다'
+                p += f' (근거: <b>{_bi}</b>)' if _bi else ''
             _lk = str(_rm.get('link') or '').strip()
             if _lk:   # 이 RULE의 확인/조치 = 첨부 링크(해당 모드에 개별 연결)
                 p += f'. <b>확인/조치</b>: <a href="{_html.escape(_lk, quote=True)}" target="_blank">관련 링크</a>'
@@ -1776,6 +1781,72 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
 
         return True
 
+    # ── 근거 자연어화: 왜 이 규칙이 매칭됐는지 조건을 사람이 읽는 문장으로 구성 ──
+    def _grade_word(lv):
+        return {2: '이상 수준', 1: '주의 수준', 0: '참고 수준'}.get(lv, '조건 충족')
+
+    def _op_word(op):
+        return {'>=': '이상', '<=': '이하', '>': '초과', '<': '미만', '==': ''}.get(op, '')
+
+    def _rhs_word(rhs):
+        rhs = str(rhs).strip()
+        m = re.match(r'(spec_high|spec_low)\s*(?:([*/])\s*([\d.]+))?$', rhs, re.I)
+        if m:
+            base = '스펙 상한' if m.group(1).lower() == 'spec_high' else '스펙 하한'
+            if m.group(2) == '*':
+                return f"{base}의 {float(m.group(3)) * 100:g}%"
+            if m.group(2) == '/':
+                return f"{base}/{m.group(3)}"
+            return base
+        return rhs
+
+    def _num_clause(field, expr):
+        nm = {'median': 'median', 'stddev': 'stddev', 'disp_ratio': '산포',
+              'spec_out': 'spec-out point'}.get(field, field)
+        unit = {'disp_ratio': '배', 'spec_out': '개'}.get(field, '')
+        exprs = expr if isinstance(expr, list) else [expr]
+        parts = []
+        for e in exprs:
+            _m = re.match(r'(>=|<=|>|<|==)\s*(.+)$', str(e).strip())
+            if _m:
+                parts.append(f"{_rhs_word(_m.group(2))}{unit} {_op_word(_m.group(1))}".strip())
+                continue
+            _mr = re.match(r'([\d.]+)\s*[~∼〜]\s*([\d.]+)$', str(e).strip())
+            if _mr:
+                parts.append(f"{_mr.group(1)}~{_mr.group(2)}{unit}")
+        return (f"{nm}이 " + ', '.join(parts)) if parts else None
+
+    def _build_basis_nl(cond, results, not_raw, tr_raw, dirn, tr_ok):
+        """매칭 근거를 '~수준이고 ~이하이므로' 로 이어지는 자연어 절로 반환.
+        return (reason_clause, not_suffix). reason은 '이므로'가 자연스럽게 붙는 형태로 끝맺음."""
+        matched, _seen_rk = [], set()
+        for nm, rk, ok in results:
+            if ok and rk not in _seen_rk:   # 같은 항목 2회 참조 규칙 → 중복 제거
+                _seen_rk.add(rk); matched.append((nm, rk))
+        clauses = []
+        has_grade = bool(cond.get('grade'))
+        if matched:
+            item_parts = []
+            for i, (nm, rk) in enumerate(matched):
+                lv = item_ctx.get(rk, {}).get('level', 0)
+                gw = _grade_word(lv) if has_grade else '조건 충족'
+                item_parts.append((f"{_disp(rk)}가 " if i == 0 else f"{_disp(rk)}도 ") + gw)
+            clauses.append('이고 '.join(item_parts))
+        for _f in ('median', 'stddev', 'disp_ratio', 'spec_out'):
+            if cond.get(_f) is not None:
+                _nc = _num_clause(_f, cond.get(_f))
+                if _nc:
+                    clauses.append(_nc)
+        if tr_raw and tr_ok:
+            tdisp = ' → '.join(_disp(_resolve_item(nm, item_ctx) or nm) for nm in tr_raw)
+            clauses.append(f"{tdisp} 순으로 산포가 점점 {'커지는' if dirn != 'desc' else '작아지는'} 추세")
+        reason = ', '.join(clauses) if clauses else '규칙 조건이 충족'
+        not_sfx = ''
+        if not_raw:
+            nd = [_disp(_resolve_item(nm, item_ctx) or nm) for nm in not_raw]
+            not_sfx = f" (단, {'·'.join(nd)}에서는 이상 없음)"
+        return reason, not_sfx
+
     for ri, rule in enumerate(json_rules):
         try:
             items_raw = rule.get('items', [])
@@ -1882,6 +1953,12 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
                 _fd['rule_rank'] = ri
                 _fd['rule_matched_keys'] = matched_keys
                 _fd['rule_matched_disp'] = [_disp(rk) for rk in matched_keys]   # 근거 표시명(AI블록 다중모드용)
+                # 근거 자연어(왜 매칭됐는지) — HTML AI블록에서 "~이므로 {모드} 판정"으로 렌더
+                _basis_reason, _basis_notsfx = _build_basis_nl(
+                    cond, results, _not_raw, _tr_raw, str(rule.get('trend') or 'asc').lower(),
+                    tr_ok=(bool(_tr_raw) and '충족' in _tr_note))
+                _fd['rule_basis_nl'] = _basis_reason
+                _fd['rule_not_note'] = _basis_notsfx
                 findings.append(_fd)
 
             rule_trace.append({
@@ -3720,10 +3797,12 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
                     [_f.get('display_name')] if _f.get('display_name') else [])):
                 if _x and _x not in _items:    # 중복 항목 제거(같은 항목 2회 참조 규칙 대응), 순서 유지
                     _items.append(_x)
-            _rule_modes.append({'mode': _mode, 'link': _f.get('link', ''), 'items': _items})
+            _rule_modes.append({'mode': _mode, 'link': _f.get('link', ''), 'items': _items,
+                                'nl': _f.get('rule_basis_nl', ''), 'not_note': _f.get('rule_not_note', '')})
         body = _assemble_final_html(final, _valid_modes, rule_modes=_rule_modes)
         note = ('<div style="font-size:11px; color:#9aa0a6; font-style:italic; margin:2px 0 4px;">'
-                '※ 아래 내용은 AI가 자동 생성한 참고용 요약입니다. 보조 자료로만 활용하세요.</div>')
+                '※ 설정된 불량모드 판정 로직에 매칭된 결과를 AI가 정리한 내용입니다. '
+                '보조 자료로만 참고하시기 바랍니다.</div>')
         # 본문은 검정 글씨 + 글머리 점 제거(list-style:none)
         return note + (
             '<div class="ai-interp" style="color:#1a1a1a; font-size:13px;">'
