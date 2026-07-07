@@ -1301,17 +1301,20 @@ def main():
                         # ── Score Board WF MAP 보드: 전체 index의 wafer 맵을 '이미지 1장'으로 합성 ──
                         # 첨부 개수가 index 수·wafer 수와 무관하게 항상 1이 되도록, item 라벨 열과
                         # wafer 번호 헤더(다중 lot이면 lot 구간 포함)를 이미지 안에 직접 그린다.
+                        # 합성 픽셀은 표시 크기의 html_img_scale배(supersample) — HTML 표시 px는 1x 유지
+                        # → 줌/고해상도 화면에서도 선명(합성으로 인한 화질 저하 방지).
                         if wfmaps_by_item:
                             try:
                                 from PIL import Image as _PILImg, ImageDraw as _PILDraw, ImageFont as _PILFont
                                 import base64 as _b64_sb
                                 import io as _io_sb
-                                _slot = _wf_w                       # wafer 열 pitch(px)
-                                _map_px = _wf_w - 2
-                                _row_h = _map_px + 6
-                                _LBL_W = 190                        # 좌측 item 라벨 열 폭
-                                _hdr_lot = 16 if len(_lot_groups) > 1 else 0
-                                _hdr_h = _hdr_lot + 16              # wafer 번호 헤더
+                                _hs_sb = max(1, int(getattr(GLOBAL_CONFIG, 'html_img_scale', 2)))
+                                _slot = _wf_w * _hs_sb              # wafer 열 pitch(합성px = 표시px × 배율)
+                                _map_px = (_wf_w - 2) * _hs_sb
+                                _row_h = _map_px + 6 * _hs_sb
+                                _LBL_W = 190 * _hs_sb               # 좌측 item 라벨 열 폭
+                                _hdr_lot = 16 * _hs_sb if len(_lot_groups) > 1 else 0
+                                _hdr_h = _hdr_lot + 16 * _hs_sb     # wafer 번호 헤더
                                 _b_items = [it for _k, _c, it, _p in render_seq if it in wfmaps_by_item]
                                 _b_items = list(dict.fromkeys(_b_items))
                                 _board_w = _LBL_W + _slot * len(_wcols)
@@ -1319,8 +1322,8 @@ def main():
                                 _board = _PILImg.new('RGB', (_board_w, _board_h), (255, 255, 255))
                                 _bdraw = _PILDraw.Draw(_board)
                                 try:
-                                    _bfont = _PILFont.truetype("arial.ttf", 10)
-                                    _bfont_s = _PILFont.truetype("arial.ttf", 9)
+                                    _bfont = _PILFont.truetype("arial.ttf", 10 * _hs_sb)
+                                    _bfont_s = _PILFont.truetype("arial.ttf", 9 * _hs_sb)
                                 except Exception:
                                     _bfont = _bfont_s = _PILFont.load_default()
 
@@ -1344,22 +1347,22 @@ def main():
                                     _cx = _LBL_W
                                     for _lot, _cols in _lot_groups:
                                         _seg_w = _slot * len(_cols)
-                                        _lt = _fit_text(str(_lot), _seg_w - 4, _bfont_s)
-                                        _bdraw.text((_cx + max(0, (_seg_w - _txt_w(_lt, _bfont_s)) // 2), 2),
+                                        _lt = _fit_text(str(_lot), _seg_w - 4 * _hs_sb, _bfont_s)
+                                        _bdraw.text((_cx + max(0, (_seg_w - _txt_w(_lt, _bfont_s)) // 2), 2 * _hs_sb),
                                                     _lt, fill=(30, 30, 30), font=_bfont_s)
                                         _bdraw.line([(_cx, 0), (_cx, _hdr_h - 1)], fill=(180, 180, 180))
                                         _cx += _seg_w
                                 for _ci, col in enumerate(_wcols):
                                     _lab = f"#{col[1]}"
                                     _bdraw.text((_LBL_W + _ci * _slot + max(0, (_slot - _txt_w(_lab, _bfont_s)) // 2),
-                                                 _hdr_lot + 2), _lab, fill=(60, 60, 60), font=_bfont_s)
+                                                 _hdr_lot + 2 * _hs_sb), _lab, fill=(60, 60, 60), font=_bfont_s)
                                 # 행: item 라벨 + wafer별 맵
                                 for _ri, _bit in enumerate(_b_items):
                                     _y0 = _hdr_h + _ri * _row_h
                                     _bmaps = wfmaps_by_item[_bit]
                                     _bdraw.rectangle([0, _y0, _LBL_W - 1, _y0 + _row_h - 1], fill=(235, 244, 255))
-                                    _bdraw.text((6, _y0 + (_row_h - 12) // 2),
-                                                _fit_text(str(display_name(_bit)), _LBL_W - 12, _bfont),
+                                    _bdraw.text((6 * _hs_sb, _y0 + (_row_h - 12 * _hs_sb) // 2),
+                                                _fit_text(str(display_name(_bit)), _LBL_W - 12 * _hs_sb, _bfont),
                                                 fill=(31, 78, 121), font=_bfont)
                                     for _ci, col in enumerate(_wcols):
                                         _x0 = _LBL_W + _ci * _slot
@@ -1367,8 +1370,8 @@ def main():
                                         if _b:
                                             try:
                                                 _mimg = (_PILImg.open(_io_sb.BytesIO(_b64_sb.b64decode(_b)))
-                                                         .convert('RGB').resize((_map_px, _map_px)))
-                                                _board.paste(_mimg, (_x0 + (_slot - _map_px) // 2, _y0 + 3))
+                                                         .convert('RGB').resize((_map_px, _map_px), _PILImg.LANCZOS))
+                                                _board.paste(_mimg, (_x0 + (_slot - _map_px) // 2, _y0 + 3 * _hs_sb))
                                             except Exception:
                                                 pass
                                         else:   # 측정 없음 셀
@@ -1382,11 +1385,13 @@ def main():
                                 _sbuf = _io_sb.BytesIO()
                                 _board.save(_sbuf, format='PNG', optimize=True)
                                 _board_b64 = _b64_sb.b64encode(_sbuf.getvalue()).decode('utf-8')
+                                # 표시 크기는 1x(px) — 픽셀은 _hs_sb배로 담겨 선명하게 렌더링됨
+                                _board_dw, _board_dh = _board_w // _hs_sb, _board_h // _hs_sb
                                 sb_html += (
                                     '<div style="margin:6px 0 2px 0; font-size:11px; color:#555;">'
                                     f'WF MAP (측정 ≥{_wf_min}pt index)</div>'
-                                    f'<img src="data:image/png;base64,{_board_b64}" width="{_board_w}" height="{_board_h}" '
-                                    f'style="width:{_board_w}px; height:{_board_h}px; display:block;"/>')
+                                    f'<img src="data:image/png;base64,{_board_b64}" width="{_board_dw}" height="{_board_dh}" '
+                                    f'style="width:{_board_dw}px; height:{_board_dh}px; display:block;"/>')
                             except Exception as _sb_comp_err:
                                 print(f"[WARN] Score Board WF MAP 보드 합성 실패 → WF MAP 생략(PPT 참조): {_sb_comp_err}")
                         score_board_html = sb_html
@@ -1506,7 +1511,7 @@ def main():
                         # ==================== [0] Anomaly: 코드 분석 + (선택)AI 다단계 해석 + Trend chart ====================
                         # 코드(analyze_commonality)는 AI 유무와 무관하게 항상 동작하여 통계 Finding을 산출.
                         # use_gpt_summary가 켜져 있고 LLM이 가능하면, 그 Finding을 입력으로 AI 다단계 해석을 곁들임.
-                        _top_n = getattr(GLOBAL_CONFIG, 'anomaly_trend_chart_top_n', 6)
+                        _top_n = getattr(GLOBAL_CONFIG, 'anomaly_trend_chart_top_n', 3)
 
                         # 1) 코드 통계 분석 결과(위 1-3b에서 계산) → HTML 요약
                         #    AI on: 지식판정(RULE) 내용은 상단 AI 해석 블록(_ai_block)에만 표시하고,
@@ -1611,6 +1616,8 @@ def main():
                                 if top_item_names:
                                     _wf_on = getattr(GLOBAL_CONFIG, 'anomaly_wfmap_specout', True)
                                     _wf_max = getattr(GLOBAL_CONFIG, 'anomaly_wfmap_max_count', 25)
+                                    # PIL 합성 이미지 supersample 배율(픽셀=표시px×배율, 표시 크기는 1x 유지)
+                                    _hs = max(1, int(getattr(GLOBAL_CONFIG, 'html_img_scale', 2)))
 
                                     def _html_table(cells, ncol, cellpad=2, cellstyle='vertical-align:top;'):
                                         """cell HTML 리스트를 ncol개씩 table 행으로 배치(포워딩에서 flex/grid 대체).
@@ -1692,7 +1699,8 @@ def main():
                                                     try:
                                                         from PIL import Image as _PILImg, ImageDraw as _PILDraw, ImageFont as _PILFont
                                                         import io as _io
-                                                        _CELL_W, _CELL_H = 62, 74   # 셀: 이미지(58)+여백 / 이미지(58)+라벨(16)
+                                                        # 셀(표시px): 이미지(58)+여백 / 이미지(58)+라벨(16) — 합성 픽셀은 _hs배
+                                                        _CELL_W, _CELL_H = 62 * _hs, 74 * _hs
                                                         _ncol2 = max(1, -(-len(_wfmaps) // 2))
                                                         _nrow2 = -(-len(_wfmaps) // _ncol2)
                                                         _comp_w = _ncol2 * _CELL_W
@@ -1700,7 +1708,7 @@ def main():
                                                         _comp = _PILImg.new('RGB', (_comp_w, _comp_h), (255, 255, 255))
                                                         _draw = _PILDraw.Draw(_comp)
                                                         try:
-                                                            _font = _PILFont.truetype("arial.ttf", 9)
+                                                            _font = _PILFont.truetype("arial.ttf", 9 * _hs)
                                                         except Exception:
                                                             _font = _PILFont.load_default()
                                                         for _wi, _wf in enumerate(_wfmaps):
@@ -1708,24 +1716,26 @@ def main():
                                                             _is_tgt = _wf[2] if len(_wf) > 2 else False
                                                             _col = _wi % _ncol2
                                                             _row = _wi // _ncol2
-                                                            _ox = _col * _CELL_W + 2
+                                                            _ox = _col * _CELL_W + 2 * _hs
                                                             _oy = _row * _CELL_H
                                                             # WF MAP 이미지 붙이기
                                                             _wf_bytes = base64.b64decode(_b)
-                                                            _wf_img = _PILImg.open(_io.BytesIO(_wf_bytes)).resize((58, 58))
+                                                            _wf_img = _PILImg.open(_io.BytesIO(_wf_bytes)).resize(
+                                                                (58 * _hs, 58 * _hs), _PILImg.LANCZOS)
                                                             _comp.paste(_wf_img, (_ox, _oy))
                                                             # 라벨 텍스트 (target은 파란색 볼드)
                                                             _lcolor = (0, 51, 204) if _is_tgt else (85, 85, 85)
-                                                            _draw.text((_ox, _oy + 59), str(_lab), fill=_lcolor, font=_font)
+                                                            _draw.text((_ox, _oy + 59 * _hs), str(_lab), fill=_lcolor, font=_font)
                                                         # 합성 이미지 → base64 (+ Trend와 최종 병합용 PIL 객체 보관)
                                                         _wf_comp = _comp
                                                         _buf = _io.BytesIO()
                                                         _comp.save(_buf, format='PNG', optimize=True)
                                                         _comp_b64 = base64.b64encode(_buf.getvalue()).decode('utf-8')
+                                                        _comp_dw, _comp_dh = _comp_w // _hs, _comp_h // _hs   # 표시 크기(1x)
                                                         _wf_block = (
                                                             f'<img src="data:image/png;base64,{_comp_b64}" '
-                                                            f'width="{_comp_w}" height="{_comp_h}" '
-                                                            f'style="width:{_comp_w}px; height:{_comp_h}px; display:block; border:none;"/>')
+                                                            f'width="{_comp_dw}" height="{_comp_dh}" '
+                                                            f'style="width:{_comp_dw}px; height:{_comp_dh}px; display:block; border:none;"/>')
                                                     except Exception as _comp_err:
                                                         print(f"[WARN] WF MAP 합성 실패 ({item}), 개별 이미지 유지: {_comp_err}")
                                                         # fallback: 기존 개별 이미지 방식
@@ -1754,21 +1764,23 @@ def main():
                                         try:
                                             from PIL import Image as _PILImg
                                             import io as _io
-                                            _trend_im = _PILImg.open(img_path).convert('RGB').resize((_tw, _th))
-                                            if _wf_comp is not None:
-                                                _mw = _tw + 12 + _wf_comp.width
-                                                _mh = max(_th, _wf_comp.height)
+                                            # Trend는 _hs배 픽셀로 리샘플(원본 PNG가 html_chart_dpi로 그만큼 크게 렌더됨)
+                                            _trend_im = _PILImg.open(img_path).convert('RGB').resize(
+                                                (_tw * _hs, _th * _hs), _PILImg.LANCZOS)
+                                            if _wf_comp is not None:   # _wf_comp도 이미 _hs배 픽셀
+                                                _mw = _tw * _hs + 12 * _hs + _wf_comp.width
+                                                _mh = max(_th * _hs, _wf_comp.height)
                                                 _mg = _PILImg.new('RGB', (_mw, _mh), (255, 255, 255))
                                                 _mg.paste(_trend_im, (0, 0))
-                                                _mg.paste(_wf_comp, (_tw + 12, 0))
+                                                _mg.paste(_wf_comp, (_tw * _hs + 12 * _hs, 0))
                                             else:
-                                                _mg, _mw, _mh = _trend_im, _tw, _th
+                                                _mg, _mw, _mh = _trend_im, _tw * _hs, _th * _hs
                                             _buf = _io.BytesIO()
                                             _mg.save(_buf, format='PNG', optimize=True)
                                             _mg_b64 = base64.b64encode(_buf.getvalue()).decode('utf-8')
                                             _spec_rows.append(
                                                 '<div style="margin-bottom:14px;">' + _item_hdr +
-                                                _trend_block(item, True, _mg_b64, _mw, _mh) + '</div>')
+                                                _trend_block(item, True, _mg_b64, _mw // _hs, _mh // _hs) + '</div>')
                                             _merged_done = True
                                         except Exception as _mge:
                                             print(f"[WARN] Trend+WF MAP 병합 실패({item}) — 개별 이미지 유지: {_mge}")
@@ -1790,8 +1802,9 @@ def main():
                                         try:
                                             from PIL import Image as _PILImg
                                             import io as _io
-                                            _gcol, _gap = 2, 8
-                                            _cells = [_PILImg.open(_wp).convert('RGB').resize((_ww, _wh))
+                                            _gcol, _gap = 2, 8 * _hs
+                                            _cells = [_PILImg.open(_wp).convert('RGB').resize(
+                                                          (_ww * _hs, _wh * _hs), _PILImg.LANCZOS)
                                                       for _wp, _ww, _wh in _warn_imgs]
                                             _rows2 = [_cells[i:i + _gcol] for i in range(0, len(_cells), _gcol)]
                                             _gw = max(sum(c.width for c in r) + _gap * (len(r) - 1) for r in _rows2)
@@ -1808,7 +1821,7 @@ def main():
                                             _buf = _io.BytesIO()
                                             _grid.save(_buf, format='PNG', optimize=True)
                                             _grid_b64 = base64.b64encode(_buf.getvalue()).decode('utf-8')
-                                            _parts.append(_trend_block(None, False, _grid_b64, _gw, _gh))
+                                            _parts.append(_trend_block(None, False, _grid_b64, _gw // _hs, _gh // _hs))
                                         except Exception as _wge:
                                             print(f"[WARN] 주의 차트 병합 실패 — 개별 이미지 유지: {_wge}")
                                             _parts.append(_html_table(_warn_blocks, 2, cellpad=4,
@@ -1913,9 +1926,9 @@ def main():
                         else:
                             print_status("S3 업로드", "off", f"{search_key} → S3 미연결 스킵")
 
-                        # ==================== 사내 메일 API 발송 (PPT + HTML) ====================
+                        # ==================== 사내 메일 API 발송 (PPT 첨부 + HTML 본문) ====================
                         # My_config.use_email_send 로 on/off. 생성된 HTML(html_content)은 본문으로,
-                        # 저화질 PPT는 첨부로 전송한다.
+                        # 첨부파일은 '저화질 PPT 1개만' 전송한다(HTML 파일 첨부 없음).
                         if getattr(GLOBAL_CONFIG, 'use_email_send', False):
                             _mail_fh = None
                             try:
@@ -1925,30 +1938,27 @@ def main():
                                 # 사내 메일 API는 본문 인라인(data:image) 이미지 + 첨부파일 합계가
                                 # 제한(기본 10)을 넘으면 "Attach file count is over 10"으로 발송을 거부한다.
                                 # 섹션별 PIL 합성(Score Board 보드 1장 / SPEC OUT item당 1장 / WARNING 그리드 1장)
-                                # 으로 본문 이미지 수는 상수화되어 평시엔 제한 이내. 그래도 초과하면:
-                                #  ① 전체 리포트 HTML(이미지 전부 포함)을 '첨부파일'로 추가 → 내용 무손실
-                                #  ② 본문은 뒤쪽 이미지부터 안내 문구로 대체해 제한 이내로 조정 → 발송 보장
-                                # (저장된 HTML 파일은 영향 없음 — 메일 body 사본만 조정)
+                                # 으로 본문 이미지 수는 상수화되어 평시엔 제한 이내. 그래도 초과하면
+                                # 본문 뒤쪽 이미지부터 안내 문구로 대체해 제한 이내로 조정 → 발송 보장.
+                                # (첨부는 PPT 1개 고정 — 저장된 HTML 파일은 영향 없음, 메일 body 사본만 조정)
                                 import re as _re_mail
                                 _img_pattern = r'<img\s[^>]*src="data:image/[^"]*"[^>]*/?\s*>'
                                 _attach_limit = int(getattr(GLOBAL_CONFIG, 'mail_attach_limit', 10))
                                 _imgs = _re_mail.findall(_img_pattern, html_code_final, _re_mail.DOTALL)
                                 _n_inline = len(_imgs)
-                                _attach_report_html = False
                                 if _n_inline + 1 > _attach_limit:
-                                    _attach_report_html = True   # 리포트 HTML 첨부(+1)로 원본 내용 보존
-                                    _budget = max(0, _attach_limit - 2)   # PPT(1) + 리포트HTML(1) 제외한 본문 허용 수
-                                    _n_drop = min(_n_inline, _n_inline - _budget)
+                                    _budget = max(0, _attach_limit - 1)   # PPT(1) 제외한 본문 허용 수
+                                    _n_drop = _n_inline - _budget
                                     _note = ('<div style="font-size:11px; color:#888; border:1px dashed #bbb; '
                                              'padding:6px 10px; margin:4px 0;">이미지 생략 — 전체 이미지는 첨부된 '
-                                             'HTML 리포트/PPT를 참조해 주세요.</div>')
+                                             'PPT를 참조해 주세요.</div>')
                                     for _im in reversed(_imgs[-_n_drop:]):   # 뒤쪽 이미지부터 대체(중복 태그 안전하게 rfind)
                                         _pos = html_code_final.rfind(_im)
                                         if _pos >= 0:
                                             html_code_final = (html_code_final[:_pos] + _note
                                                                + html_code_final[_pos + len(_im):])
                                     print(f"[WARN] 메일 첨부 합계 {_n_inline + 1}개 (본문 이미지 {_n_inline} + PPT 1) > 제한 {_attach_limit}개 "
-                                          f"— 리포트 HTML을 첨부하고 본문 뒤쪽 이미지 {_n_drop}개를 안내 문구로 대체 후 발송")
+                                          f"— 본문 뒤쪽 이미지 {_n_drop}개를 안내 문구로 대체 후 발송")
                                 else:
                                     print(f"[INFO] 메일 첨부 합계 {_n_inline + 1}개 (본문 이미지 {_n_inline} + PPT 1) — 제한 이내")
 
@@ -1969,16 +1979,12 @@ def main():
                                 }
                                 payload = {'mailSendString': f'{payload_content}'}
 
+                                # 첨부파일은 PPT 1개만 (HTML은 본문 전용 — 파일 첨부하지 않음)
                                 _ppt_full = os.path.join(low_qual_ppt_save_path, final_ppt_file_name_DX)
                                 _mail_fh = open(_ppt_full, 'rb')
                                 files = [
                                     ('file', (final_ppt_file_name_DX, _mail_fh, 'application/vnd.ms-powerpoint'))
                                 ]
-                                if _attach_report_html:
-                                    # 본문에서 대체된 이미지를 포함한 '원본 전체 HTML'을 첨부 — 내용 무손실
-                                    import io as _io_mail
-                                    files.append(('file', (fname, _io_mail.BytesIO(html_content.encode('utf-8')),
-                                                           'text/html')))
                                 headers = {'x-dep-ticket': GLOBAL_CONFIG.get("TICKET")}
 
                                 response = requests.request(

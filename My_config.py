@@ -528,7 +528,7 @@ class Config:
         self.use_gpt_summary = True        # GPT 리포트 요약(요약문) 사용 여부 (텍스트 요약에만 영향)
         self.use_gpt_multistep = True      # AI 다단계 해석(triage→root-cause→final) 사용 (use_gpt_summary=True일 때)
         self.use_email_send = False        # 사내 메일 API로 PPT+HTML 발송 on/off (True면 리포트 발행 후 메일 전송)
-        self.mail_attach_limit = 10        # 메일 API 첨부 최대 개수(본문 인라인 이미지 + 첨부파일 합계). 초과 시 전체 HTML을 첨부하고 본문 초과 이미지는 안내 문구로 대체(발송 항상 성공)
+        self.mail_attach_limit = 10        # 메일 API 첨부 최대 개수(본문 인라인 이미지 + 첨부파일 합계). 첨부파일은 PPT 1개만 사용, 초과 시 본문 뒤쪽 이미지를 안내 문구로 대체(발송 항상 성공)
         self.use_s3_upload = True          # 생성 PPT의 S3(DX) 업로드 on/off
         self.use_description_page = True   # PPT CAT2 간지(Description) 페이지 삽입 on/off
         # 이상 Trend chart([0] 섹션) 표시 여부.
@@ -536,7 +536,7 @@ class Config:
         #   - use_gpt_summary=False 이거나 GPT 호출이 실패해도,
         #     metrics_dict 기반 코드 우선순위로 이상 Trend chart를 첨부합니다.
         self.show_anomaly_trend_chart = True
-        self.anomaly_trend_chart_top_n = 5   # 이상 Trend chart 최대 개수(이상+주의 합산, 통계 자동분석 상위와 동일)
+        self.anomaly_trend_chart_top_n = 3   # 이상 Trend chart 최대 개수(이상+주의 합산, 통계 자동분석 상위와 동일)
         self.anomaly_deviation_sigma = 1.5   # 코드 이상판정 임계: 평균 이탈도(sigma) 초과 시 이상
 
         # ──────────────────────────────────────────────────────
@@ -651,8 +651,13 @@ class Config:
         # ── HTML 리포트용 이미지 해상도(DPI) — PPT와 독립적으로 조정 ──
         # HTML [0] Anomaly Trend chart(RUN/TEMP png)와 Score Board/anomaly WF MAP의 DPI.
         # 높이면 HTML 이미지가 선명해지지만 HTML 용량이 커진다.
-        self.html_chart_dpi = 100          # HTML에 들어가는 Trend chart PNG 해상도
-        self.html_wfmap_dpi = 100          # HTML에 들어가는 WF MAP PNG 해상도(Score Board/anomaly)
+        # html_img_scale: HTML 본문 PIL 합성 이미지(Score Board 보드/Anomaly Trend+WF MAP/주의 그리드)의
+        #   supersample 배율. 합성 픽셀을 표시 크기의 N배로 만들고 HTML 표시 px는 그대로 유지(레티나 방식)
+        #   → 줌/고해상도 화면에서도 선명. 배율만큼 소스 dpi(html_chart_dpi/html_wfmap_dpi)도 함께
+        #   높아야 실제 디테일이 생긴다(아래 기본값은 scale=2에 맞춰 튜닝됨).
+        self.html_img_scale = 2            # HTML 합성 이미지 supersample 배율 (1=합성 픽셀=표시 px)
+        self.html_chart_dpi = 170          # HTML Trend chart PNG 해상도 (figsize 4.55in×170 ≈ 773px ≥ 표시 380px×2)
+        self.html_wfmap_dpi = 200          # HTML WF MAP PNG 해상도 (0.62in×200 ≈ 124px ≥ 셀 58px×2)
 
         # ──────────────────────────────────────────────────────
         # 병렬 렌더링 설정 (Parallel chart rendering)
