@@ -556,7 +556,12 @@ def _parse_defect_modes(text):
 
 
 def _extract_json_obj(text):
-    """LLM 응답에서 JSON 객체를 추출(코드펜스/설명문 혼입 허용). 실패 시 None."""
+    """LLM 응답에서 JSON 객체를 추출(코드펜스/설명문/reasoning 혼입 허용). 실패 시 None.
+
+    reasoning 모델(gpt-oss 등)은 JSON 앞뒤로 사고 텍스트가 붙을 수 있고 그 안에
+    중괄호가 섞이면 '최초 { ~ 최후 }' 스팬 파싱이 깨진다 → ① 스팬 파싱 실패 시
+    ② 각 '{' 위치에서 raw_decode로 스캔해 마지막 유효 dict(최종 답)를 채택한다.
+    """
     import json
     t = str(text or '').strip()
     i, j = t.find('{'), t.rfind('}')
@@ -564,9 +569,21 @@ def _extract_json_obj(text):
         return None
     try:
         obj = json.loads(t[i:j + 1])
+        if isinstance(obj, dict):
+            return obj
     except Exception:
-        return None
-    return obj if isinstance(obj, dict) else None
+        pass
+    dec = json.JSONDecoder()
+    best, k = None, i
+    while k != -1:
+        try:
+            obj, _end = dec.raw_decode(t, k)
+            if isinstance(obj, dict):
+                best = obj          # 뒤쪽(최종 답) 우선 — 계속 스캔
+        except Exception:
+            pass
+        k = t.find('{', k + 1)
+    return best
 
 
 def _assemble_final_html(final_text, modes, rule_modes=None):
@@ -599,7 +616,11 @@ def _assemble_final_html(final_text, modes, rule_modes=None):
     data = _extract_json_obj(final_text)
     if not isinstance(data, dict):
         t = str(final_text or '').strip()
-        return t if '<' in t else f'<div style="margin:3px 0;">{_esc(t)}</div>'
+        if t and '<' in t:
+            return t   # HTML 응답 폴백(하위호환)
+        # 비-JSON/빈 응답 — RULE 판정(①, 코드 deterministic)은 그대로 렌더하고,
+        # 평문 응답이 있으면 '종합 판단'으로 사용(응답이 비어도 판정 문장은 항상 나오게).
+        data = {'summary': t or None}
 
     # 불량 모드 검증 — [RULE] 모드명과 대조(공백 차이 허용, 부분 포함까지)
     mode_raw = data.get('defect_mode')
@@ -3663,6 +3684,9 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
 
     def _stage(name, system, user):
         out = llm_fn(system, user)
+        if not str(out or '').strip():
+            # 빈 응답 — transport(헤더/모델/reasoning content 설정) 문제 신호. 덤프로 재현 가능.
+            print(f"[WARN] AI 응답이 비어 있음 — stage '{name}' (RUN/AI 덤프·GPT transport 확인 필요)")
         _io.append({"stage": name, "system": system, "user": user, "output": out})
         return out
 
