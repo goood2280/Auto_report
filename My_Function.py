@@ -2564,7 +2564,7 @@ def _render_item_charts(task):
         _dr = _PDraw.Draw(_canvas)
 
         def _pick_font(px):
-            for _fn in ('malgun.ttf', 'arial.ttf', 'DejaVuSans.ttf'):
+            for _fn in ('NanumGothic.ttf', 'malgun.ttf', 'arial.ttf', 'DejaVuSans.ttf'):
                 try:
                     return _PFont.truetype(_fn, px)
                 except Exception:
@@ -4108,4 +4108,4 @@ def wipdata_query():
     
     except Exception as e:
         print(f"wipdata_query 에러가 발생했습니다: {e}")
-        traceback.print_exc()
+        tra
