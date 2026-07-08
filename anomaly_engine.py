@@ -321,7 +321,7 @@ def item_excluded(name, patterns):
 
 
 def trend_agg_spec(name, agg_map, spec_name=None):
-    """trend_tkout_agg 매칭 → 집계 스펙 문자열('PXX' 임의 백분위수/'MEDIAN'/'MEAN') 또는 None.
+    """trend_tkout_agg 매칭 → 집계 스펙 문자열('P10'/'P90'/'MEDIAN'/'MEAN') 또는 None.
 
     My_config.trend_tkout_agg = {키: 스펙}. 키는 base ALIAS(예: 'MAWIN')로 두어도 그 파생
     컬럼(MAWIN_minus_margin, MAWIN_ovl_index …)까지 매칭되도록 아래 규칙으로 판정한다(대소문자 무시):
