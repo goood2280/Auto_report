@@ -1452,7 +1452,6 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
     # 축 표시범위(원 포함) — 모든 wafer 공통. shot은 인접 센터 간격(pitch) 크기 사각형으로 그림(gap 제거)
     _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(_gx0, _gx1, _gy0, _gy1, _xpad, _ypad, _circ)
     _pit_x, _pit_y = _wfmap_shot_pitch_xy(d, cx, cy)   # 좌표파일 layout 있으면 그 기준(측정 pt수 무관)
-    _bg_grid = _wfmap_full_grid(cx, cy)   # 전체 chip layout 격자 (배경용)
 
     out = {}
     # by_lot: (lot, wafer)별로 그려 형제 lot을 분리. 아니면 wafer별(lot은 첫 측정 선택).
@@ -1482,10 +1481,6 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
         if len(g) == 0:
             continue
         fig, ax = plt.subplots(figsize=(size_in, size_in))
-        # 전체 chip layout 배경 — 측정 pt가 적어도 full grid가 보이도록
-        if _bg_grid is not None:
-            _draw_wfmap_shots(ax, _bg_grid[0], _bg_grid[1], _pit_x, _pit_y,
-                              colors=['#f0f0f0'] * len(_bg_grid[0]), zorder=0)
         _draw_wfmap_shots(ax, g[cx].astype(float).values, g[cy].astype(float).values,
                           _pit_x, _pit_y, values=g[item].astype(float).values, cmap=cmap, norm=norm)
         # 원 테두리: radius 기반 원점·150mm 원을 '진한 검정'으로. 내부 배경색 없음(흰색)
@@ -1609,15 +1604,10 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
     # 축 표시범위(원 포함) — 모든 맵 공통. shot은 인접 센터 간격(pitch) 크기 사각형으로 그림(gap 제거)
     _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(gx0, gx1, gy0, gy1, xpad, ypad, _circ)
     _pit_x, _pit_y = _wfmap_shot_pitch_xy(d, cx, cy)   # 좌표파일 layout 있으면 그 기준(측정 pt수 무관)
-    _bg_grid = _wfmap_full_grid(cx, cy)   # 전체 chip layout 격자 (배경용)
 
     res = []
     for gd, g in ordered:
         fig, ax = plt.subplots(figsize=(size_in, size_in))
-        # 전체 chip layout 배경 — 측정 pt가 적어도 full grid가 보이도록
-        if _bg_grid is not None:
-            _draw_wfmap_shots(ax, _bg_grid[0], _bg_grid[1], _pit_x, _pit_y,
-                              colors=['#f0f0f0'] * len(_bg_grid[0]), zorder=0)
         colors = np.where(g['_specout'].values, '#d32f2f', '#bdbdbd')
         _draw_wfmap_shots(ax, g[cx].astype(float).values, g[cy].astype(float).values,
                           _pit_x, _pit_y, colors=colors)
@@ -1757,15 +1747,10 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
     # 축 표시범위(원 포함) — shot은 인접 센터 간격(pitch) 크기 사각형으로 그림(gap 제거)
     _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(_gx0, _gx1, _gy0, _gy1, _xpad, _ypad, _circ)
     _pit_x, _pit_y = _wfmap_shot_pitch_xy(d, cx, cy)   # 좌표파일 layout 있으면 그 기준(측정 pt수 무관)
-    _bg_grid = _wfmap_full_grid(cx, cy)   # 전체 chip layout 격자 (배경용)
     import matplotlib.colors as _mcolors
     _norm_idx = _mcolors.Normalize(vmin=vmin, vmax=vmax)
 
     fig, ax = plt.subplots(figsize=(size_in, size_in))
-    # 전체 chip layout 배경 — 측정 pt가 적어도 full grid가 보이도록
-    if _bg_grid is not None:
-        _draw_wfmap_shots(ax, _bg_grid[0], _bg_grid[1], _pit_x, _pit_y,
-                          colors=['#f0f0f0'] * len(_bg_grid[0]), zorder=0)
     _draw_wfmap_shots(ax, g[cx].astype(float).values, g[cy].astype(float).values,
                       _pit_x, _pit_y, values=g[item].astype(float).values,
                       cmap=(cmap or _wfmap_cmap(direction)), norm=_norm_idx)
@@ -2509,21 +2494,17 @@ def _render_item_charts(task):
         _pit_gx, _pit_gy = _wfmap_shot_pitch_xy(item_df, map_x, map_y, main_vehicle)
         _shot_px = _pit_gx * _mm_x
         _shot_py = _pit_gy * _mm_y
-        # 전체 chip layout 격자(mm) — 측정 pt가 적어도 full grid 표시
-        _bg_ppt_grid = _wfmap_full_grid(map_x, map_y, main_vehicle)
-        if _bg_ppt_grid is not None:
-            _bg_x_mm = (_bg_ppt_grid[0] - _wf_cx) * _mm_x
-            _bg_y_mm = (_bg_ppt_grid[1] - _wf_cy) * _mm_y
-        else:
-            _bg_x_mm = _bg_y_mm = None
         # 셀 공통 축범위(±_wf_L mm, 정사각): 150mm 원 + 모든 shot(반 pitch 여백 포함)을 포함
         _xs_mm = (pd.to_numeric(item_df[map_x], errors='coerce') - _wf_cx) * _mm_x
         _ys_mm = (pd.to_numeric(item_df[map_y], errors='coerce') - _wf_cy) * _mm_y
         _ext_parts = [(150.0 if _circ_ppt else 0.0),
                       float(_xs_mm.abs().max()) + _shot_px / 2.0,
                       float(_ys_mm.abs().max()) + _shot_py / 2.0]
-        # chip layout 전체 grid도 축범위에 포함
-        if _bg_x_mm is not None:
+        # chip layout 전체 grid도 축범위에 포함 (위치만 반영, 배경 회색 그리기 없음)
+        _bg_ppt_grid = _wfmap_full_grid(map_x, map_y, main_vehicle)
+        if _bg_ppt_grid is not None:
+            _bg_x_mm = (_bg_ppt_grid[0] - _wf_cx) * _mm_x
+            _bg_y_mm = (_bg_ppt_grid[1] - _wf_cy) * _mm_y
             _ext_parts.append(float(np.abs(_bg_x_mm).max()) + _shot_px / 2.0)
             _ext_parts.append(float(np.abs(_bg_y_mm).max()) + _shot_py / 2.0)
         _wf_L = max(_ext_parts) * 1.04
@@ -2537,10 +2518,6 @@ def _render_item_charts(task):
             원=중점(0,0)·반경 150mm 정원. aspect='equal'+정사각 축범위(±_wf_L)라
             크롭/리사이즈 왜곡이 구조적으로 불가능. color만 diverging(HTML과 동일 규칙)."""
             _f, _a = plt.subplots(figsize=(0.62, 0.62))
-            # 전체 chip layout 배경 — 측정 pt가 적어도 full grid가 보이도록
-            if _bg_x_mm is not None:
-                _draw_wfmap_shots(_a, _bg_x_mm, _bg_y_mm, _shot_px, _shot_py,
-                                  colors=['#f0f0f0'] * len(_bg_x_mm), zorder=0)
             _draw_wfmap_shots(_a,
                               (w_grp[map_x].astype(float).values - _wf_cx) * _mm_x,
                               (w_grp[map_y].astype(float).values - _wf_cy) * _mm_y,

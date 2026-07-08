@@ -1938,6 +1938,30 @@ def main():
                             try:
                                 html_code_final = html_content   # 생성된 HTML 코드 문자열
 
+                                # ── 인라인 PNG → JPEG 변환 (메일 첨부 분리 방지) ──
+                                # 사내 메일 API가 data:image/png 인라인을 별도 첨부로 분리하는 현상 대응.
+                                # PNG base64를 JPEG base64로 변환(품질 85)하여 인라인 유지 + 용량 절감.
+                                try:
+                                    import re as _re_png
+                                    from PIL import Image as _PILConv
+                                    import io as _io_conv
+                                    def _png_b64_to_jpeg_b64(m):
+                                        _b64 = m.group(1)
+                                        try:
+                                            _raw = base64.b64decode(_b64)
+                                            _im = _PILConv.open(_io_conv.BytesIO(_raw)).convert('RGB')
+                                            _buf = _io_conv.BytesIO()
+                                            _im.save(_buf, format='JPEG', quality=85, optimize=True)
+                                            return 'data:image/jpeg;base64,' + base64.b64encode(_buf.getvalue()).decode('ascii')
+                                        except Exception:
+                                            return m.group(0)   # 변환 실패 시 원본 유지
+                                    html_code_final = _re_png.sub(
+                                        r'data:image/png;base64,([A-Za-z0-9+/=\s]+)',
+                                        _png_b64_to_jpeg_b64, html_code_final)
+                                    print("[INFO] 메일 본문 인라인 PNG→JPEG 변환 완료")
+                                except Exception as _conv_err:
+                                    print(f"[WARN] PNG→JPEG 변환 스킵: {_conv_err}")
+
                                 # ── 메일 첨부 개수 최종 가드 (발송은 어떤 경우에도 성공해야 함) ──
                                 # 사내 메일 API는 본문 인라인(data:image) 이미지 + 첨부파일 합계가
                                 # 제한(기본 10)을 넘으면 "Attach file count is over 10"으로 발송을 거부한다.
