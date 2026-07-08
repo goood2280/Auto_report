@@ -3170,12 +3170,17 @@ def insert_plots(merged_df, prs, description_image_info_dict,
         ordered_index = spec_data.index
     plot_items = []
     seen_cols = set()
+    _all_aliases = set(ordered_index)   # spec_data에 등록된 모든 ALIAS
     for nm in ordered_index:
         # alias 자체가 컬럼이면 포함(MA_Window의 '' 출력 = alias) + alias_로 시작하는 다중컬럼 파생 모두 포함
+        # 단, 파생 컬럼이 자체적으로 spec_data에 ALIAS로 등록되어 있으면 제외
+        # (예: Junction_N+PW → Junction_N+PW_LKG, Junction_N+PW_BV 는 각각 별도 ALIAS)
         cols_for_nm = []
         if nm in merged_df.columns:
             cols_for_nm.append(nm)
-        cols_for_nm += [c for c in merged_df.columns if str(c).startswith(str(nm) + "_")]
+        for c in merged_df.columns:
+            if str(c).startswith(str(nm) + "_") and str(c) not in _all_aliases:
+                cols_for_nm.append(c)
         if cols_for_nm:
             for d in cols_for_nm:
                 if d not in seen_cols:
@@ -4100,12 +4105,4 @@ def wipdata_query():
 
         Query_Table_tmp = getData_with_retry(params, custom_columns=GLOBAL_CONFIG.get("wip_custom_columns"), user_name=GLOBAL_CONFIG.get("user_name"))
         Query_Table_tmp['lot_id6'] = Query_Table_tmp['lot_id'].str.split('.').str[0]
-        Query_Table_tmp.rename(columns={'step_seq': 'step_id'}, inplace=True)
-
-        Query_Table_tmp.to_csv(GLOBAL_CONFIG.get('DB') + f"{GLOBAL_CONFIG.get('vehicle')}_wip_current.csv", index = False, encoding='cp949')
-            
-        print('wip data 추출완료')
-    
-    except Exception as e:
-        print(f"wipdata_query 에러가 발생했습니다: {e}")
-    
+        Query_Table_tmp.rename(column
