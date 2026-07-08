@@ -671,7 +671,9 @@ def main():
                 )
 
                 # ── ADDP (Index) 계산 ──
+                _cols_before_addp = set(merged_df.columns)
                 merged_df = Reformatize(merged_df, ALIAS, FORMULA)
+                _cols_added_by_addp = set(merged_df.columns) - _cols_before_addp
                 merged_df = merged_df.reset_index()
                 merged_df['mask'] = vehicle
                 # ── with_vehicle 데이터 로드 & Merge (daily Hive 파티션 사용) ──
@@ -720,7 +722,9 @@ def main():
                                 values='et_value', index=wv_pivot_idx,
                                 columns='item_id', aggfunc='last', observed=True
                             )
+                            _wv_cols_before = set(wv_pivot.columns)
                             wv_pivot = Reformatize(wv_pivot, wv_ALIAS, wv_FORMULA)
+                            _cols_added_by_addp |= (set(wv_pivot.columns) - _wv_cols_before)
                             wv_pivot = wv_pivot.reset_index()
                             wv_pivot['mask'] = with_vehicle_now
 
@@ -741,10 +745,10 @@ def main():
                 # 을 위해 merged_df에 유지한다. (REPORT ORDER가 없어 include_1엔 안 잡히므로 별도 보존)
                 pchk_keep = [c for c in merged_df.columns if 'PCHK' in str(c).upper()]
                 # 다중컬럼 ADDP 파생(MA_Window 등: {alias}_minus_margin/_ovl_index 등)도 유지.
-                # Reformatize가 {alias}_{subcol} 형태로 만든 컬럼들을 REPORT ORDER alias 접두로 보존한다.
-                derived_addp = [c for c in merged_df.columns
-                                if c not in columns_to_include_1
-                                and any(str(c).startswith(str(a) + "_") for a in columns_to_include_1)]
+                # Reformatize가 실제로 추가한 컬럼만 유지 — startswith 방식은 ALIAS 접두어가
+                # 겹치는 별개 아이템(예: LKG → LKG_REMOVE_L)을 잘못 포함하는 문제가 있었음.
+                derived_addp = [c for c in _cols_added_by_addp
+                                if c not in columns_to_include_1]
                 columns_to_include = columns_to_include_1 + columns_to_include_2 + pchk_keep + derived_addp
                 filtered_columns = [col for col in columns_to_include if col in merged_df.columns]
                 merged_df = merged_df[list(dict.fromkeys(filtered_columns))]
