@@ -3170,16 +3170,32 @@ def insert_plots(merged_df, prs, description_image_info_dict,
         ordered_index = spec_data.index
     plot_items = []
     seen_cols = set()
-    _all_aliases = set(spec_data.index)   # spec_data에 등록된 모든 ALIAS (REPORT ORDER 유무 무관)
+    # 접두어 보호 기준 ALIAS 집합 — spec_data는 Main에서 'REPORT ORDER 있는 행'만 필터돼
+    # 전달되므로, REPORT ORDER 없는 ALIAS(비차트, 예: PCHK류)까지 보호하려면
+    # reformatter의 '전체' ALIAS를 합쳐야 한다.
+    _all_aliases = set(str(a) for a in spec_data.index)
+    if reformatter is not None and 'ALIAS' in getattr(reformatter, 'columns', []):
+        _all_aliases |= set(reformatter['ALIAS'].dropna().astype(str))
+
+    # 컬럼별 소유 ALIAS = 컬럼과 정확 일치하거나 'ALIAS_' 접두어인 것 중 '최장' ALIAS.
+    # (예: 'Junction_N+PW_LKG_sub'는 'Junction_N+PW'가 아니라 'Junction_N+PW_LKG' 소유)
+    def _owner_alias(col):
+        c = str(col)
+        _cands = [a for a in _all_aliases if c == a or c.startswith(a + '_')]
+        return max(_cands, key=len) if _cands else None
+
+    _col_owner = {str(c): _owner_alias(c) for c in merged_df.columns}
     for nm in ordered_index:
-        # alias 자체가 컬럼이면 포함(MA_Window의 '' 출력 = alias) + alias_로 시작하는 다중컬럼 파생 모두 포함
-        # 단, 파생 컬럼이 자체적으로 spec_data에 ALIAS로 등록되어 있으면 제외
-        # (예: Junction_N+PW → Junction_N+PW_LKG, Junction_N+PW_BV 는 각각 별도 ALIAS)
+        # alias 자체가 컬럼이면 포함(MA_Window의 '' 출력 = alias) + alias_로 시작하는
+        # 다중컬럼 파생 중 '소유 ALIAS가 이 alias인 것'만 포함.
+        # (예: Junction_N+PW → Junction_N+PW_LKG/_BV는 각각 별도 ALIAS 소유라 제외.
+        #  소유 ALIAS에 REPORT ORDER가 없으면 그 컬럼은 어느 페이지에도 안 실린다 — 비차트.)
         cols_for_nm = []
         if nm in merged_df.columns:
             cols_for_nm.append(nm)
         for c in merged_df.columns:
-            if str(c).startswith(str(nm) + "_") and str(c) not in _all_aliases:
+            if str(c) != str(nm) and str(c).startswith(str(nm) + "_") \
+                    and _col_owner.get(str(c)) == str(nm):
                 cols_for_nm.append(c)
         if cols_for_nm:
             for d in cols_for_nm:
@@ -3188,6 +3204,14 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                     seen_cols.add(d)
         else:
             plot_items.append((nm, nm))  # 데이터 없음 → 루프에서 skip
+
+    # 소유 ALIAS가 있는데 그 ALIAS에 REPORT ORDER가 없어 페이지가 안 생기는 컬럼을 로그
+    # (reformatter 의도대로면 비차트 항목 — 오귀속이 아니라 '정의된 제외'임을 확인용)
+    _ordered_set = set(str(x) for x in ordered_index)
+    _no_page = sorted(c for c, o in _col_owner.items()
+                      if o is not None and o not in _ordered_set)
+    if _no_page:
+        print(f"[insert_plots] REPORT ORDER 없는 ALIAS 소유 컬럼 {len(_no_page)}개 → 페이지 미생성(비차트): {_no_page}")
 
     # ── ADDP 파생 index 제목 옆 'real 항목' 표시용 준비 ──
     # (1) 대상 lot에서 실제로 데이터가 있는(비어있지 않은) 항목 컬럼 집합
