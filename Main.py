@@ -650,7 +650,11 @@ def main():
                 # ── Scale Factor 적용 (REAL item 값 × SCALE FACTOR) ──
                 # 매칭 안된 raw item은 SCALE FACTOR=1.0 (원값 유지). REAL 값이 여기서 스케일되므로
                 # 이후 ADDP(Reformatize) 계산에 들어가는 ALIAS들은 이미 scale factor가 적용된 상태.
-                raw_df = pd.merge(raw_df, real, left_on='item_id', right_on='ITEMID', how='left')
+                # ITEMID 중복 방지: 같은 ITEMID가 여러 ALIAS로 매핑되면 pivot 시
+                # 데이터가 여러 컬럼에 중복 들어감(예: Junction_N+PW_LKG → BV, N+PW).
+                # 첫 번째 매칭만 유지하여 1:1 대응 보장.
+                _real_dedup = real.drop_duplicates(subset='ITEMID', keep='first')
+                raw_df = pd.merge(raw_df, _real_dedup, left_on='item_id', right_on='ITEMID', how='left')
                 raw_df['et_value'] = pd.to_numeric(raw_df['et_value'], errors='coerce')
                 _sf = pd.to_numeric(raw_df['SCALE FACTOR'], errors='coerce').fillna(1.0)
                 raw_df['et_value'] = raw_df['et_value'] * _sf
@@ -710,7 +714,8 @@ def main():
                             wv_ALIAS = list(map(str, wv_addp.ALIAS))
                             wv_FORMULA = list(map(str, wv_addp.addpscale))
 
-                            wv_raw_df = pd.merge(wv_raw_df, wv_real, left_on='item_id', right_on='ITEMID', how='left')
+                            _wv_real_dedup = wv_real.drop_duplicates(subset='ITEMID', keep='first')
+                            wv_raw_df = pd.merge(wv_raw_df, _wv_real_dedup, left_on='item_id', right_on='ITEMID', how='left')
                             wv_raw_df['et_value'] = pd.to_numeric(wv_raw_df['et_value'], errors='coerce')
                             wv_raw_df['et_value'] = wv_raw_df['et_value'] * pd.to_numeric(wv_raw_df['SCALE FACTOR'], errors='coerce').fillna(1.0)
                             wv_raw_df['item_id'] = wv_raw_df['ALIAS'].fillna(wv_raw_df['item_id'])
@@ -1624,7 +1629,7 @@ def main():
                                 if top_item_names:
                                     _wf_on = getattr(GLOBAL_CONFIG, 'anomaly_wfmap_specout', True)
                                     _wf_max = getattr(GLOBAL_CONFIG, 'anomaly_wfmap_max_count', 25)
-                                    # PIL 합성 이미지 supersample 배율(픽셀=표시px×배율, 표시 크기는 1x 유지)
+                                    # supersample 배율 (Score Board WF MAP 합성 등에서 사용)
                                     _hs = max(1, int(getattr(GLOBAL_CONFIG, 'html_img_scale', 2)))
 
                                     def _html_table(cells, ncol, cellpad=2, cellstyle='vertical-align:top;'):
@@ -1677,7 +1682,7 @@ def main():
                                         except Exception:
                                             return target_w, round(target_w * 0.44)
 
-                                    _spec_rows, _warn_blocks, _warn_imgs = [], [], []
+                                    _spec_rows, _warn_blocks = [], []
                                     for item in top_item_names:
                                         safe_item = re.sub(r'[\\/:*?"<>|]', '_', str(item))
                                         img_path = f"RUN/TEMP/{safe_item}.png"
@@ -1689,11 +1694,11 @@ def main():
                                         _is_spec = metrics_dict.get(item, {}).get('spec_out_count', 0) > 0
                                         if not _is_spec:
                                             _warn_blocks.append(_trend_block(item, False, img_b64, _tw, _th))
-                                            _warn_imgs.append((img_path, _tw, _th))   # 그리드 합성용 원본 PNG 경로
                                             continue
-                                        # 이상(SPEC OUT) — 우측에 spec-out WF MAP 최대한 많이
+                                        # 이상(SPEC OUT) — 우측에 spec-out WF MAP 개별 img 태그로 표시
+                                        # (Trend + WF MAP PIL 합성 → 큰 이미지 → 메일 API가 첨부 분리하는 문제 대응)
+                                        # Trend와 WF MAP을 각각 작은 <img>로 분리하면 인라인 유지됨
                                         _wf_block = ''
-                                        _wf_comp = None   # WF MAP 합성 PIL 이미지(Trend와 최종 병합용)
                                         if _wf_on:
                                             try:
                                                 _slow, _shigh = _spec_bounds(item)
@@ -1701,103 +1706,34 @@ def main():
                                                     merged_df, item, spec_low=_slow, spec_high=_shigh,
                                                     target_lot=target_lot_id, max_maps=_wf_max)
                                                 if _wfmaps:
-                                                    # ── WF MAP 합성: 개별 img를 PIL로 합쳐 단일 이미지로 (메일 첨부 10개 제한 대응) ──
-                                                    # 각 WF MAP(58×58)과 라벨을 하나의 그리드 이미지로 병합 → <img> 1개로 축소
-                                                    # WF MAP 데이터는 전부 유지, 메일 HTML = fwd HTML 동일
-                                                    try:
-                                                        from PIL import Image as _PILImg, ImageDraw as _PILDraw, ImageFont as _PILFont
-                                                        import io as _io
-                                                        # 셀(표시px): 이미지(58)+여백 / 이미지(58)+라벨(16) — 합성 픽셀은 _hs배
-                                                        _CELL_W, _CELL_H = 62 * _hs, 74 * _hs
-                                                        _ncol2 = max(1, -(-len(_wfmaps) // 2))
-                                                        _nrow2 = -(-len(_wfmaps) // _ncol2)
-                                                        _comp_w = _ncol2 * _CELL_W
-                                                        _comp_h = _nrow2 * _CELL_H
-                                                        _comp = _PILImg.new('RGB', (_comp_w, _comp_h), (255, 255, 255))
-                                                        _draw = _PILDraw.Draw(_comp)
-                                                        try:
-                                                            _font = _PILFont.truetype("arial.ttf", 9 * _hs)
-                                                        except Exception:
-                                                            _font = _PILFont.load_default()
-                                                        for _wi, _wf in enumerate(_wfmaps):
-                                                            _lab, _b = _wf[0], _wf[1]
-                                                            _is_tgt = _wf[2] if len(_wf) > 2 else False
-                                                            _col = _wi % _ncol2
-                                                            _row = _wi // _ncol2
-                                                            _ox = _col * _CELL_W + 2 * _hs
-                                                            _oy = _row * _CELL_H
-                                                            # WF MAP 이미지 붙이기
-                                                            _wf_bytes = base64.b64decode(_b)
-                                                            _wf_img = _PILImg.open(_io.BytesIO(_wf_bytes)).resize(
-                                                                (58 * _hs, 58 * _hs), _PILImg.LANCZOS)
-                                                            _comp.paste(_wf_img, (_ox, _oy))
-                                                            # 라벨 텍스트 (target은 파란색 볼드)
-                                                            _lcolor = (0, 51, 204) if _is_tgt else (85, 85, 85)
-                                                            _draw.text((_ox, _oy + 59 * _hs), str(_lab), fill=_lcolor, font=_font)
-                                                        # 합성 이미지 → base64 (+ Trend와 최종 병합용 PIL 객체 보관)
-                                                        _wf_comp = _comp
-                                                        _buf = _io.BytesIO()
-                                                        _comp.save(_buf, format='PNG', optimize=True)
-                                                        _comp_b64 = base64.b64encode(_buf.getvalue()).decode('utf-8')
-                                                        _comp_dw, _comp_dh = _comp_w // _hs, _comp_h // _hs   # 표시 크기(1x)
-                                                        _wf_block = (
-                                                            f'<img src="data:image/png;base64,{_comp_b64}" '
-                                                            f'width="{_comp_dw}" height="{_comp_dh}" '
-                                                            f'style="width:{_comp_dw}px; height:{_comp_dh}px; display:block; border:none;"/>')
-                                                    except Exception as _comp_err:
-                                                        print(f"[WARN] WF MAP 합성 실패 ({item}), 개별 이미지 유지: {_comp_err}")
-                                                        # fallback: 기존 개별 이미지 방식
-                                                        _wf_cells = []
-                                                        for _wf in _wfmaps:
-                                                            _lab, _b = _wf[0], _wf[1]
-                                                            _is_tgt = _wf[2] if len(_wf) > 2 else False
-                                                            _lab_style = ('font-size:8px; white-space:nowrap; '
-                                                                          + ('color:#0033cc; font-weight:bold;' if _is_tgt else 'color:#555;'))
-                                                            _wf_cells.append(
-                                                                f'<img src="data:image/png;base64,{_b}" width="58" height="58" '
-                                                                'style="width:58px; height:58px; display:block; margin:0 auto; border:none;"/>'
-                                                                f'<div style="{_lab_style}">{_lab}</div>')
-                                                        _ncol2 = max(1, -(-len(_wf_cells) // 2))
-                                                        _wf_block = _html_table(_wf_cells, _ncol2, cellpad=2,
-                                                                                cellstyle='vertical-align:top; text-align:center;')
+                                                    # 개별 WF MAP img 태그 + 라벨(root_lot_id #wafer_id) — 큰 폰트, 중심 정렬
+                                                    _wf_cells = []
+                                                    for _wf in _wfmaps:
+                                                        _lab, _b = _wf[0], _wf[1]
+                                                        _is_tgt = _wf[2] if len(_wf) > 2 else False
+                                                        _lab_style = ('font-size:10px; white-space:nowrap; text-align:center; '
+                                                                      'margin-top:2px; '
+                                                                      + ('color:#0033cc; font-weight:bold;' if _is_tgt else 'color:#555;'))
+                                                        _wf_cells.append(
+                                                            f'<img src="data:image/png;base64,{_b}" width="58" height="58" '
+                                                            'style="width:58px; height:58px; display:block; margin:0 auto; border:none;"/>'
+                                                            f'<div style="{_lab_style}">{_lab}</div>')
+                                                    _ncol2 = max(1, -(-len(_wf_cells) // 2))
+                                                    _wf_block = _html_table(_wf_cells, _ncol2, cellpad=2,
+                                                                            cellstyle='vertical-align:top; text-align:center;')
                                             except Exception as _we:
                                                 print(f"[WARN] spec-out WF MAP 스킵 ({item}): {_we}")
-                                        # 이상 항목명(헤더) → 그 밑에 Trend+WF MAP을 '이미지 1장'으로 병합
-                                        # (첨부 개수를 item당 1로 상수화. 병합 실패 시 기존 2-셀 레이아웃 fallback)
+                                        # 이상 항목명(헤더) → Trend(좌)와 WF MAP(우)를 개별 <img>로 분리 배치
+                                        # (큰 합성 이미지 대신 작은 개별 이미지 → 메일 인라인 유지)
                                         _item_hdr = (
                                             '<div style="font-size:13px; font-weight:bold; color:#1f4e79; '
                                             'margin:2px 0 3px 2px; border-left:4px solid #d32f2f; padding-left:7px;">'
                                             f'{display_name(item)}</div>')
-                                        _merged_done = False
-                                        try:
-                                            from PIL import Image as _PILImg
-                                            import io as _io
-                                            # Trend는 _hs배 픽셀로 리샘플(원본 PNG가 html_chart_dpi로 그만큼 크게 렌더됨)
-                                            _trend_im = _PILImg.open(img_path).convert('RGB').resize(
-                                                (_tw * _hs, _th * _hs), _PILImg.LANCZOS)
-                                            if _wf_comp is not None:   # _wf_comp도 이미 _hs배 픽셀
-                                                _mw = _tw * _hs + 12 * _hs + _wf_comp.width
-                                                _mh = max(_th * _hs, _wf_comp.height)
-                                                _mg = _PILImg.new('RGB', (_mw, _mh), (255, 255, 255))
-                                                _mg.paste(_trend_im, (0, 0))
-                                                _mg.paste(_wf_comp, (_tw * _hs + 12 * _hs, 0))
-                                            else:
-                                                _mg, _mw, _mh = _trend_im, _tw * _hs, _th * _hs
-                                            _buf = _io.BytesIO()
-                                            _mg.save(_buf, format='PNG', optimize=True)
-                                            _mg_b64 = base64.b64encode(_buf.getvalue()).decode('utf-8')
-                                            _spec_rows.append(
-                                                '<div style="margin-bottom:14px;">' + _item_hdr +
-                                                _trend_block(item, True, _mg_b64, _mw // _hs, _mh // _hs) + '</div>')
-                                            _merged_done = True
-                                        except Exception as _mge:
-                                            print(f"[WARN] Trend+WF MAP 병합 실패({item}) — 개별 이미지 유지: {_mge}")
-                                        if not _merged_done:
-                                            _spec_rows.append(
-                                                '<div style="margin-bottom:14px;">' + _item_hdr +
-                                                '<table cellpadding="0" cellspacing="0" style="border-collapse:collapse; border:none;">'
-                                                f'<tr><td style="border:none; vertical-align:top; padding-right:12px;">{_trend_block(item, True, img_b64, _tw, _th)}</td>'
-                                                f'<td style="border:none; vertical-align:top;">{_wf_block}</td></tr></table></div>')
+                                        _spec_rows.append(
+                                            '<div style="margin-bottom:14px;">' + _item_hdr +
+                                            '<table cellpadding="0" cellspacing="0" style="border-collapse:collapse; border:none;">'
+                                            f'<tr><td style="border:none; vertical-align:top; padding-right:12px;">{_trend_block(item, True, img_b64, _tw, _th)}</td>'
+                                            f'<td style="border:none; vertical-align:top;">{_wf_block}</td></tr></table></div>')
 
                                     # '이상'/'주의' 탭 라벨은 표시하지 않는다. 각 차트 좌상단의
                                     # SPEC OUT / WARNING 스티커가 상태 식별 역할을 대신한다.
@@ -1805,35 +1741,9 @@ def main():
                                     if _spec_rows:
                                         _parts.extend(_spec_rows)
                                     if _warn_blocks:
-                                        # 주의 차트 N장을 '이미지 1장'(2열 그리드)으로 병합 — 첨부 개수를
-                                        # 주의 항목 수와 무관하게 상수(1)로. 그룹 좌상단에 WARNING 스티커 1개.
-                                        try:
-                                            from PIL import Image as _PILImg
-                                            import io as _io
-                                            _gcol, _gap = 2, 8 * _hs
-                                            _cells = [_PILImg.open(_wp).convert('RGB').resize(
-                                                          (_ww * _hs, _wh * _hs), _PILImg.LANCZOS)
-                                                      for _wp, _ww, _wh in _warn_imgs]
-                                            _rows2 = [_cells[i:i + _gcol] for i in range(0, len(_cells), _gcol)]
-                                            _gw = max(sum(c.width for c in r) + _gap * (len(r) - 1) for r in _rows2)
-                                            _gh = (sum(max(c.height for c in r) for r in _rows2)
-                                                   + _gap * (len(_rows2) - 1))
-                                            _grid = _PILImg.new('RGB', (_gw, _gh), (255, 255, 255))
-                                            _gy = 0
-                                            for r in _rows2:
-                                                _gx = 0
-                                                for c in r:
-                                                    _grid.paste(c, (_gx, _gy))
-                                                    _gx += c.width + _gap
-                                                _gy += max(c.height for c in r) + _gap
-                                            _buf = _io.BytesIO()
-                                            _grid.save(_buf, format='PNG', optimize=True)
-                                            _grid_b64 = base64.b64encode(_buf.getvalue()).decode('utf-8')
-                                            _parts.append(_trend_block(None, False, _grid_b64, _gw // _hs, _gh // _hs))
-                                        except Exception as _wge:
-                                            print(f"[WARN] 주의 차트 병합 실패 — 개별 이미지 유지: {_wge}")
-                                            _parts.append(_html_table(_warn_blocks, 2, cellpad=4,
-                                                                      cellstyle='vertical-align:top;'))
+                                        # 주의 차트 — 개별 <img> 태그로 표시 (PIL 합성 → 큰 이미지 → 첨부 분리 방지)
+                                        _parts.append(_html_table(_warn_blocks, 2, cellpad=4,
+                                                                  cellstyle='vertical-align:top;'))
                                     anomaly_html = ''.join(_parts) if _parts else '<p style="margin:4px 0;">이상항목 없음</p>'
                                 else:
                                     anomaly_html = '<p style="margin:4px 0;">이상항목 없음</p>'
@@ -2089,3 +1999,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            
