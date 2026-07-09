@@ -648,13 +648,16 @@ def _assemble_final_html(final_text, modes, rule_modes=None):
             _mode = _esc(_rm.get('mode', '')).strip()
             if not _mode:
                 continue
+            # spec-out wafer 번호 표시 (예: "#1, #3, #7")
+            _wids = _rm.get('so_wafer_ids') or []
+            _waf_tag = (' [' + ', '.join(f'#{w}' for w in _wids) + ']') if _wids else ''
             _nl = _esc(str(_rm.get('nl') or '').strip())
             _notn = _esc(str(_rm.get('not_note') or '').strip())
             if _nl:   # 자연어 근거: "A가 이상 수준이고 B도 이상 수준이므로 <b>모드</b> 판정 (단, ...)"
-                p = f'{_nl}이므로 <b style="color:#0000FF;">{_mode}</b> 판정{_notn}'
+                p = f'{_nl}이므로 <b style="color:#0000FF;">{_mode}</b> 판정{_waf_tag}{_notn}'
             else:     # 폴백: 근거 항목만 나열
                 _bi = ', '.join(_esc(x) for x in (_rm.get('items') or []) if x)
-                p = f'<b style="color:#0000FF;">{_mode}</b>(이)가 추정됩니다'
+                p = f'<b style="color:#0000FF;">{_mode}</b>(이)가 추정됩니다{_waf_tag}'
                 p += f' (근거: <b>{_bi}</b>)' if _bi else ''
             _lk = str(_rm.get('link') or '').strip()
             if _lk:   # 이 RULE의 확인/조치 = 첨부 링크(해당 모드에 개별 연결)
@@ -675,13 +678,11 @@ def _assemble_final_html(final_text, modes, rule_modes=None):
         p += f' (이상 항목: <b>{basis_txt}</b>).' if basis_txt else '.'
         paras.append(p)
 
-    # ② 종합 판단(summary) — AI가 정리한 결론 문장은 **항상** 표시(rule_modes 유무 무관).
-    #   (종전에는 RULE 매칭 시 생략했으나, use_gpt_summary=True인데 GPT 정리 문구가 안 보이는
-    #   문제로 복원 — 2026-07-07.) 항목별 상세 분석(phenomenon: '어느 shot에서 spec-out 1pt' 등)은
-    #   계속 HTML에 넣지 않는다 → PPT Anomaly 상세 페이지 담당.
-    _sm = data.get('summary')
-    if isinstance(_sm, str) and _sm.strip() and _sm.strip().lower() not in ('null', 'none'):
-        paras.append(f'<b>종합 판단</b>: {_sent(_esc(_sm))}')
+    # ② 종합 판단(summary) — 비활성화. 불량 모드 판정 문장으로 충분하므로 표시하지 않음.
+    #   (2026-07-09 요청: 종합판단 제거)
+    # _sm = data.get('summary')
+    # if isinstance(_sm, str) and _sm.strip() and _sm.strip().lower() not in ('null', 'none'):
+    #     paras.append(f'<b>종합 판단</b>: {_sent(_esc(_sm))}')
 
     # ③ 측정이상 추정(있을 때만) — 재측정 우선 안내(측정 신뢰성 이슈는 간결하게 유지)
     _ms = data.get('meas_suspect')
@@ -2853,6 +2854,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'seq': _seq_metrics(it, lo, hi),     # seq_out/seq_front_heavy/seq_mostly_dead 규칙 함수용
             # ── 확장 조건 원자용(전부 이 루프에서 이미 계산된 값 — 추가 비용 없음) ──
             'so_wafers': int(so_n_wafers),       # spec_out_wafers(ITEM): spec-out wafer 수
+            'so_wafer_ids': sorted(set(w for ws in specout_map.values() for w in ws),
+                                   key=lambda z: (z is None, z)),  # spec-out wafer 번호 목록
             'so_ratio': float(so_max_ratio),     # spec_out_ratio(ITEM): wafer 최고 이탈 비율(0~1)
             'med_dev': float(worst_med_dev),     # median_dev_sigma(ITEM): worst wafer median 이탈 σ
             'pattern': so_pattern or '',         # pattern(ITEM, 라벨): 특이맵 라벨(판정 on일 때만)
@@ -3833,8 +3836,13 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
                     [_f.get('display_name')] if _f.get('display_name') else [])):
                 if _x and _x not in _items:    # 중복 항목 제거(같은 항목 2회 참조 규칙 대응), 순서 유지
                     _items.append(_x)
+            # trigger item의 spec-out wafer 번호 목록 (Anomaly Summary에 표시)
+            _trig = _f.get('item', '')
+            _tctx2 = _find_ctx(_trig) if _trig else None
+            _so_wids = (_tctx2 or {}).get('so_wafer_ids', [])
             _rule_modes.append({'mode': _mode, 'link': _f.get('link', ''), 'items': _items,
-                                'nl': _f.get('rule_basis_nl', ''), 'not_note': _f.get('rule_not_note', '')})
+                                'nl': _f.get('rule_basis_nl', ''), 'not_note': _f.get('rule_not_note', ''),
+                                'so_wafer_ids': _so_wids})
         body = _assemble_final_html(final, _valid_modes, rule_modes=_rule_modes)
         note = ('<div style="font-size:11px; color:#9aa0a6; font-style:italic; margin:2px 0 4px;">'
                 '※ 설정된 불량모드 판정 로직에 매칭된 결과를 AI가 정리한 내용입니다. '

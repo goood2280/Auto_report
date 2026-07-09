@@ -1924,78 +1924,13 @@ def main():
                             try:
                                 html_code_final = html_content   # 생성된 HTML 코드 문자열
 
-                                # ── CID 변환 비활성화 ──
-                                # 사내 메일 API가 CID(Content-ID) 참조를 지원하지 않아 인라인 유지.
-                                # Score Board WF MAP 제거로 이미지 수 감소 → 인라인 JPEG로 충분.
-                                _cid_images = []
-
-                                # ── 인라인 PNG → JPEG 변환 (메일 첨부 분리 방지) ──
-                                # 사내 메일 API가 data:image/png 인라인을 별도 첨부로 분리하는 현상 대응.
-                                # PNG base64를 JPEG base64로 변환(품질 85)하여 인라인 유지 + 용량 절감.
-                                try:
-                                    import re as _re_png
-                                    from PIL import Image as _PILConv
-                                    import io as _io_conv
-                                    def _png_b64_to_jpeg_b64(m):
-                                        _b64 = m.group(1)
-                                        try:
-                                            _raw = base64.b64decode(_b64)
-                                            _im = _PILConv.open(_io_conv.BytesIO(_raw)).convert('RGB')
-                                            _buf = _io_conv.BytesIO()
-                                            _im.save(_buf, format='JPEG', quality=85, optimize=True)
-                                            return 'data:image/jpeg;base64,' + base64.b64encode(_buf.getvalue()).decode('ascii')
-                                        except Exception:
-                                            return m.group(0)   # 변환 실패 시 원본 유지
-                                    html_code_final = _re_png.sub(
-                                        r'data:image/png;base64,([A-Za-z0-9+/=\s]+)',
-                                        _png_b64_to_jpeg_b64, html_code_final)
-                                    print("[INFO] 메일 본문 인라인 PNG→JPEG 변환 완료")
-                                except Exception as _conv_err:
-                                    print(f"[WARN] PNG→JPEG 변환 스킵: {_conv_err}")
-
-                                # ── 메일 첨부 개수 최종 가드 (발송은 어떤 경우에도 성공해야 함) ──
-                                # 사내 메일 API는 본문 인라인(data:image) 이미지 + 첨부파일 합계가
-                                # 제한(기본 10)을 넘으면 "Attach file count is over 10"으로 발송을 거부한다.
-                                # 우선순위: Anomaly Trend Chart·Spec WF MAP(필수) → Score Board WF MAP(삭제 가능)
-                                # Score Board WF MAP(class="sb-wfmap")을 먼저 드롭한 뒤에도 초과하면
-                                # 일반 이미지 뒤쪽부터 드롭한다.
+                                # ── 본문 인라인 이미지 정보 ──
+                                # data:image/png;base64 인라인은 첨부로 분리되지 않음(확인 완료).
+                                # PNG→JPEG 변환·CID 방식 모두 불필요 — 원본 PNG 인라인 그대로 발송.
                                 import re as _re_mail
                                 _img_pattern = r'<img\s[^>]*src="data:image/[^"]*"[^>]*/?\s*>'
-                                _attach_limit = int(getattr(GLOBAL_CONFIG, 'mail_attach_limit', 10))
                                 _imgs = _re_mail.findall(_img_pattern, html_code_final, _re_mail.DOTALL)
-                                _n_inline = len(_imgs)
-                                if _n_inline + 1 > _attach_limit:
-                                    _budget = max(0, _attach_limit - 1)   # PPT(1) 제외한 본문 허용 수
-                                    _n_drop = _n_inline - _budget
-                                    _note = ('<div style="font-size:11px; color:#888; border:1px dashed #bbb; '
-                                             'padding:6px 10px; margin:4px 0;">이미지 생략 — 전체 이미지는 첨부된 '
-                                             'PPT를 참조해 주세요.</div>')
-                                    # 1단계: Score Board WF MAP(sb-wfmap) 먼저 드롭 (Anomaly/Spec 보호)
-                                    _sb_imgs = [im for im in _imgs if 'class="sb-wfmap"' in im]
-                                    _dropped = 0
-                                    for _im in reversed(_sb_imgs):
-                                        if _dropped >= _n_drop:
-                                            break
-                                        _pos = html_code_final.rfind(_im)
-                                        if _pos >= 0:
-                                            html_code_final = (html_code_final[:_pos] + _note
-                                                               + html_code_final[_pos + len(_im):])
-                                            _dropped += 1
-                                    # 2단계: 그래도 부족하면 나머지 일반 이미지 뒤쪽부터 드롭
-                                    if _dropped < _n_drop:
-                                        _remaining = _re_mail.findall(_img_pattern, html_code_final, _re_mail.DOTALL)
-                                        for _im in reversed(_remaining):
-                                            if _dropped >= _n_drop:
-                                                break
-                                            _pos = html_code_final.rfind(_im)
-                                            if _pos >= 0:
-                                                html_code_final = (html_code_final[:_pos] + _note
-                                                                   + html_code_final[_pos + len(_im):])
-                                                _dropped += 1
-                                    print(f"[WARN] 메일 첨부 합계 {_n_inline + 1}개 (본문 이미지 {_n_inline} + PPT 1) > 제한 {_attach_limit}개 "
-                                          f"— Score Board WF MAP 우선 {_dropped}개 드롭 후 발송")
-                                else:
-                                    print(f"[INFO] 메일 첨부 합계 {_n_inline + 1}개 (본문 이미지 {_n_inline} + PPT 1) — 제한 이내")
+                                print(f"[INFO] 메일 본문 인라인 이미지 {len(_imgs)}개 (PNG 원본 유지)")
 
                                 # 수신 그룹(=메일링 xlsx의 시트명). config email_receiver가 리스트면 첫 항목 사용.
                                 email_receiver_now = (email_receiver[0]
