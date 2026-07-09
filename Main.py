@@ -1311,126 +1311,139 @@ def main():
                             sb_html += '    </tr>\n'
                         sb_html += '  </tbody>\n</table>\n'
 
-                        # ── Score Board WF MAP 보드: 전체 index의 wafer 맵을 '이미지 1장'으로 합성 ──
-                        # 첨부 개수가 index 수·wafer 수와 무관하게 항상 1이 되도록, item 라벨 열과
-                        # wafer 번호 헤더(다중 lot이면 lot 구간 포함)를 이미지 안에 직접 그린다.
-                        # 합성 픽셀은 표시 크기의 html_img_scale배(supersample) — HTML 표시 px는 1x 유지
-                        # → 줌/고해상도 화면에서도 선명(합성으로 인한 화질 저하 방지).
+                        # ── Score Board WF MAP: 항목별 개별 inline img src로 Score Board 아래에 표시 ──
+                        # 모든 WF MAP을 data:image base64 inline으로 넣어 메일 첨부 개수 제한 회피.
+                        # 전체 이미지 총량이 2MB를 초과하면 해상도를 자동 축소해 조정한다.
+                        _WF_BUDGET_BYTES = 2 * 1024 * 1024   # 2MB
                         if wfmaps_by_item:
                             try:
                                 from PIL import Image as _PILImg, ImageDraw as _PILDraw, ImageFont as _PILFont
                                 import base64 as _b64_sb
                                 import io as _io_sb
                                 _hs_sb = max(1, int(getattr(GLOBAL_CONFIG, 'html_img_scale', 2)))
-                                _slot = _wf_w * _hs_sb              # wafer 열 pitch(합성px = 표시px × 배율)
-                                _map_px = (_wf_w - 2) * _hs_sb
-                                _row_h = _map_px + 6 * _hs_sb
-                                _LBL_W = 190 * _hs_sb               # 좌측 item 라벨 열 폭
-                                _hdr_lot = 16 * _hs_sb if len(_lot_groups) > 1 else 0
-                                _hdr_h = _hdr_lot + 16 * _hs_sb     # wafer 번호 헤더
-                                _b_items_all = [it for _k, _c, it, _p in render_seq if it in wfmaps_by_item]
-                                _b_items_all = list(dict.fromkeys(_b_items_all))
-                                if len(_b_items_all) > 4:
-                                    # CAT2별 REPORT ORDER 상위 1개만 표시 (render_seq 순서가 REPORT ORDER)
-                                    _seen_cat2 = set()
-                                    _b_items = []
-                                    # render_seq에서 CAT2(cat)→item 매핑: 순서대로 첫 번째만 취함
-                                    for _k, _c, _it, _p in render_seq:
-                                        if _it not in wfmaps_by_item:
-                                            continue
-                                        if _c not in _seen_cat2:
-                                            _seen_cat2.add(_c)
-                                            _b_items.append(_it)
-                                    _b_items = list(dict.fromkeys(_b_items))
-                                    print(f"[INFO] WF MAP CAT2 필터링: {len(_b_items_all)}개 → {len(_b_items)}개 (CAT2별 상위 1개)")
-                                else:
-                                    _b_items = _b_items_all
-                                _board_w = _LBL_W + _slot * len(_wcols)
-                                _board_h = _hdr_h + _row_h * len(_b_items)
-                                _board = _PILImg.new('RGB', (_board_w, _board_h), (255, 255, 255))
-                                _bdraw = _PILDraw.Draw(_board)
-                                try:
-                                    _sb_ttf = "NanumGothic.ttf"
-                                    try:
-                                        _PILFont.truetype(_sb_ttf, 10)
-                                    except Exception:
-                                        _sb_ttf = "arial.ttf"
-                                    _bfont = _PILFont.truetype(_sb_ttf, 10 * _hs_sb)
-                                    _bfont_s = _PILFont.truetype(_sb_ttf, 9 * _hs_sb)
-                                except Exception:
-                                    _bfont = _bfont_s = _PILFont.load_default()
 
-                                def _fit_text(txt, max_w, font):
-                                    try:
-                                        while txt and _bdraw.textlength(txt, font=font) > max_w:
-                                            txt = txt[:-1]
-                                    except Exception:
-                                        txt = txt[:28]
-                                    return txt
+                                # 모든 WF MAP 보유 항목 표시 (첨부 제한 없으므로 CAT2 필터링 불필요)
+                                _b_items = [it for _k, _c, it, _p in render_seq if it in wfmaps_by_item]
+                                _b_items = list(dict.fromkeys(_b_items))
 
-                                def _txt_w(txt, font):
+                                def _render_wfmap_strips(scale):
+                                    """항목별 strip 이미지를 렌더링해 [(item, b64, disp_w, disp_h), ...] 반환."""
+                                    _sc = max(1, int(scale))
+                                    _slot = _wf_w * _sc
+                                    _map_px = (_wf_w - 2) * _sc
+                                    _row_h = _map_px + 6 * _sc
+                                    _LBL_W = 190 * _sc
+                                    _hdr_lot = 16 * _sc if len(_lot_groups) > 1 else 0
+                                    _hdr_h = _hdr_lot + 16 * _sc
+                                    _strip_w = _LBL_W + _slot * len(_wcols)
                                     try:
-                                        return _bdraw.textlength(txt, font=font)
+                                        _sb_ttf = "NanumGothic.ttf"
+                                        try:
+                                            _PILFont.truetype(_sb_ttf, 10)
+                                        except Exception:
+                                            _sb_ttf = "arial.ttf"
+                                        _bfont = _PILFont.truetype(_sb_ttf, 10 * _sc)
+                                        _bfont_s = _PILFont.truetype(_sb_ttf, 9 * _sc)
                                     except Exception:
-                                        return len(txt) * 5
+                                        _bfont = _bfont_s = _PILFont.load_default()
 
-                                # 헤더 (lot 구간 + wafer 번호)
-                                _bdraw.rectangle([0, 0, _board_w - 1, _hdr_h - 1], fill=(240, 240, 240))
-                                if _hdr_lot:
-                                    _cx = _LBL_W
-                                    for _lot, _cols in _lot_groups:
-                                        _seg_w = _slot * len(_cols)
-                                        _lt = _fit_text(str(_lot), _seg_w - 4 * _hs_sb, _bfont_s)
-                                        _bdraw.text((_cx + max(0, (_seg_w - _txt_w(_lt, _bfont_s)) // 2), 2 * _hs_sb),
-                                                    _lt, fill=(30, 30, 30), font=_bfont_s)
-                                        _bdraw.line([(_cx, 0), (_cx, _hdr_h - 1)], fill=(180, 180, 180))
-                                        _cx += _seg_w
-                                for _ci, col in enumerate(_wcols):
-                                    _lab = f"#{col[1]}"
-                                    _bdraw.text((_LBL_W + _ci * _slot + max(0, (_slot - _txt_w(_lab, _bfont_s)) // 2),
-                                                 _hdr_lot + 2 * _hs_sb), _lab, fill=(60, 60, 60), font=_bfont_s)
-                                # 행: item 라벨 + wafer별 맵
-                                for _ri, _bit in enumerate(_b_items):
-                                    _y0 = _hdr_h + _ri * _row_h
-                                    _bmaps = wfmaps_by_item[_bit]
-                                    _bdraw.rectangle([0, _y0, _LBL_W - 1, _y0 + _row_h - 1], fill=(235, 244, 255))
-                                    _bdraw.text((6 * _hs_sb, _y0 + (_row_h - 12 * _hs_sb) // 2),
-                                                _fit_text(str(display_name(_bit)), _LBL_W - 12 * _hs_sb, _bfont),
-                                                fill=(31, 78, 121), font=_bfont)
+                                    def _fit_t(txt, max_w, font):
+                                        try:
+                                            while txt and _PILDraw.Draw(_PILImg.new('RGB', (1, 1))).textlength(txt, font=font) > max_w:
+                                                txt = txt[:-1]
+                                        except Exception:
+                                            txt = txt[:28]
+                                        return txt
+
+                                    def _txt_w(txt, font):
+                                        try:
+                                            return _PILDraw.Draw(_PILImg.new('RGB', (1, 1))).textlength(txt, font=font)
+                                        except Exception:
+                                            return len(txt) * 5
+
+                                    strips = []
+                                    # 헤더 strip (lot 구간 + wafer 번호)
+                                    _hdr = _PILImg.new('RGB', (_strip_w, _hdr_h), (240, 240, 240))
+                                    _hdraw = _PILDraw.Draw(_hdr)
+                                    if _hdr_lot:
+                                        _cx = _LBL_W
+                                        for _lot, _cols in _lot_groups:
+                                            _seg_w = _slot * len(_cols)
+                                            _lt = _fit_t(str(_lot), _seg_w - 4 * _sc, _bfont_s)
+                                            _hdraw.text((_cx + max(0, (_seg_w - _txt_w(_lt, _bfont_s)) // 2), 2 * _sc),
+                                                        _lt, fill=(30, 30, 30), font=_bfont_s)
+                                            _hdraw.line([(_cx, 0), (_cx, _hdr_h - 1)], fill=(180, 180, 180))
+                                            _cx += _seg_w
                                     for _ci, col in enumerate(_wcols):
-                                        _x0 = _LBL_W + _ci * _slot
-                                        _b = _bmaps.get(f"{col[0]}|{col[1]}")
-                                        if _b:
-                                            try:
-                                                _mimg = (_PILImg.open(_io_sb.BytesIO(_b64_sb.b64decode(_b)))
-                                                         .convert('RGB').resize((_map_px, _map_px), _PILImg.LANCZOS))
-                                                _board.paste(_mimg, (_x0 + (_slot - _map_px) // 2, _y0 + 3 * _hs_sb))
-                                            except Exception:
-                                                pass
-                                        else:   # 측정 없음 셀
-                                            _bdraw.rectangle([_x0 + 1, _y0 + 1, _x0 + _slot - 1, _y0 + _row_h - 1],
-                                                             fill=(246, 246, 246))
-                                    _bdraw.line([(0, _y0), (_board_w - 1, _y0)], fill=(210, 210, 210))
-                                for _ci in range(len(_wcols)):
-                                    _x = _LBL_W + _ci * _slot
-                                    _bdraw.line([(_x, 0), (_x, _board_h - 1)], fill=(225, 225, 225))
-                                _bdraw.rectangle([0, 0, _board_w - 1, _board_h - 1], outline=(44, 44, 44))
-                                _sbuf = _io_sb.BytesIO()
-                                _board.save(_sbuf, format='PNG', optimize=True)
-                                _board_b64 = _b64_sb.b64encode(_sbuf.getvalue()).decode('utf-8')
-                                # 표시 크기는 1x(px) — 픽셀은 _hs_sb배로 담겨 선명하게 렌더링됨
-                                _board_dw, _board_dh = _board_w // _hs_sb, _board_h // _hs_sb
+                                        _lab = f"#{col[1]}"
+                                        _hdraw.text((_LBL_W + _ci * _slot + max(0, (_slot - _txt_w(_lab, _bfont_s)) // 2),
+                                                     _hdr_lot + 2 * _sc), _lab, fill=(60, 60, 60), font=_bfont_s)
+                                    _hdraw.rectangle([0, 0, _strip_w - 1, _hdr_h - 1], outline=(44, 44, 44))
+                                    _hbuf = _io_sb.BytesIO()
+                                    _hdr.save(_hbuf, format='PNG', optimize=True)
+                                    strips.append(('__header__', _b64_sb.b64encode(_hbuf.getvalue()).decode('utf-8'),
+                                                   _strip_w // _sc, _hdr_h // _sc))
+
+                                    # 항목별 strip
+                                    for _bit in _b_items:
+                                        _bmaps = wfmaps_by_item[_bit]
+                                        _strip = _PILImg.new('RGB', (_strip_w, _row_h), (255, 255, 255))
+                                        _sdraw = _PILDraw.Draw(_strip)
+                                        _sdraw.rectangle([0, 0, _LBL_W - 1, _row_h - 1], fill=(235, 244, 255))
+                                        _sdraw.text((6 * _sc, (_row_h - 12 * _sc) // 2),
+                                                    _fit_t(str(display_name(_bit)), _LBL_W - 12 * _sc, _bfont),
+                                                    fill=(31, 78, 121), font=_bfont)
+                                        for _ci, col in enumerate(_wcols):
+                                            _x0 = _LBL_W + _ci * _slot
+                                            _b = _bmaps.get(f"{col[0]}|{col[1]}")
+                                            if _b:
+                                                try:
+                                                    _mimg = (_PILImg.open(_io_sb.BytesIO(_b64_sb.b64decode(_b)))
+                                                             .convert('RGB').resize((_map_px, _map_px), _PILImg.LANCZOS))
+                                                    _strip.paste(_mimg, (_x0 + (_slot - _map_px) // 2, 3 * _sc))
+                                                except Exception:
+                                                    pass
+                                            else:
+                                                _sdraw.rectangle([_x0 + 1, 1, _x0 + _slot - 1, _row_h - 1],
+                                                                 fill=(246, 246, 246))
+                                        _sdraw.line([(0, 0), (_strip_w - 1, 0)], fill=(210, 210, 210))
+                                        for _ci in range(len(_wcols)):
+                                            _x = _LBL_W + _ci * _slot
+                                            _sdraw.line([(_x, 0), (_x, _row_h - 1)], fill=(225, 225, 225))
+                                        _sdraw.rectangle([0, 0, _strip_w - 1, _row_h - 1], outline=(180, 180, 180))
+                                        _sbuf = _io_sb.BytesIO()
+                                        _strip.save(_sbuf, format='PNG', optimize=True)
+                                        strips.append((_bit, _b64_sb.b64encode(_sbuf.getvalue()).decode('utf-8'),
+                                                       _strip_w // _sc, _row_h // _sc))
+                                    return strips
+
+                                # 1차 렌더 (기본 배율)
+                                _strips = _render_wfmap_strips(_hs_sb)
+                                _total_bytes = sum(len(s[1]) * 3 // 4 for s in _strips)  # base64 → 실제 byte 추정
+                                # 2MB 초과 시 배율 축소 후 재렌더
+                                if _total_bytes > _WF_BUDGET_BYTES and _hs_sb > 1:
+                                    _ratio = (_WF_BUDGET_BYTES / _total_bytes) ** 0.5
+                                    _new_sc = max(1, int(_hs_sb * _ratio))
+                                    if _new_sc < _hs_sb:
+                                        print(f"[INFO] WF MAP 총 {_total_bytes / 1024:.0f}KB > 2MB → 배율 {_hs_sb}→{_new_sc} 축소 재렌더")
+                                        _strips = _render_wfmap_strips(_new_sc)
+                                        _total_bytes = sum(len(s[1]) * 3 // 4 for s in _strips)
+                                print(f"[INFO] Score Board WF MAP: {len(_b_items)}개 항목, 총 {_total_bytes / 1024:.0f}KB")
+
                                 sb_html += (
                                     '<div style="margin:6px 0 2px 0; font-size:11px; color:#555;">'
-                                    f'WF MAP (측정 ≥{_wf_min}pt index)</div>'
-                                    f'<img src="data:image/png;base64,{_board_b64}" width="{_board_dw}" height="{_board_dh}" '
-                                    f'style="width:{_board_dw}px; height:{_board_dh}px; display:block;"/>'
+                                    f'WF MAP (측정 ≥{_wf_min}pt index)</div>')
+                                for _sname, _sb64, _sw, _sh in _strips:
+                                    sb_html += (
+                                        f'<img src="data:image/png;base64,{_sb64}" width="{_sw}" height="{_sh}" '
+                                        f'style="width:{_sw}px; height:{_sh}px; display:block; margin:0; padding:0;"/>')
+                                sb_html += (
                                     '<div style="margin:2px 0 0 0; font-size:10px; color:#888;">'
                                     'Color: <span style="color:#d62728; font-weight:bold;">■</span> Spec High(빨강) '
                                     '/ <span style="color:#1f77b4; font-weight:bold;">■</span> Spec Low(파랑) '
                                     '/ <span style="color:#999999; font-weight:bold;">■</span> Median(회색)</div>')
                             except Exception as _sb_comp_err:
-                                print(f"[WARN] Score Board WF MAP 보드 합성 실패 → WF MAP 생략(PPT 참조): {_sb_comp_err}")
+                                print(f"[WARN] Score Board WF MAP 생성 실패 → WF MAP 생략(PPT 참조): {_sb_comp_err}")
                         score_board_html = sb_html
 
                         # ==================== Inline Table HTML 렌더링 (Manual) ====================
