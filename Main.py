@@ -1435,7 +1435,7 @@ def main():
                                     f'WF MAP (측정 ≥{_wf_min}pt index)</div>')
                                 for _sname, _sb64, _sw, _sh in _strips:
                                     sb_html += (
-                                        f'<img src="data:image/png;base64,{_sb64}" width="{_sw}" height="{_sh}" '
+                                        f'<img class="sb-wfmap" src="data:image/png;base64,{_sb64}" width="{_sw}" height="{_sh}" '
                                         f'style="width:{_sw}px; height:{_sh}px; display:block; margin:0; padding:0;"/>')
                                 sb_html += (
                                     '<div style="margin:2px 0 0 0; font-size:10px; color:#888;">'
@@ -1954,10 +1954,9 @@ def main():
                                 # ── 메일 첨부 개수 최종 가드 (발송은 어떤 경우에도 성공해야 함) ──
                                 # 사내 메일 API는 본문 인라인(data:image) 이미지 + 첨부파일 합계가
                                 # 제한(기본 10)을 넘으면 "Attach file count is over 10"으로 발송을 거부한다.
-                                # 섹션별 PIL 합성(Score Board 보드 1장 / SPEC OUT item당 1장 / WARNING 그리드 1장)
-                                # 으로 본문 이미지 수는 상수화되어 평시엔 제한 이내. 그래도 초과하면
-                                # 본문 뒤쪽 이미지부터 안내 문구로 대체해 제한 이내로 조정 → 발송 보장.
-                                # (첨부는 PPT 1개 고정 — 저장된 HTML 파일은 영향 없음, 메일 body 사본만 조정)
+                                # 우선순위: Anomaly Trend Chart·Spec WF MAP(필수) → Score Board WF MAP(삭제 가능)
+                                # Score Board WF MAP(class="sb-wfmap")을 먼저 드롭한 뒤에도 초과하면
+                                # 일반 이미지 뒤쪽부터 드롭한다.
                                 import re as _re_mail
                                 _img_pattern = r'<img\s[^>]*src="data:image/[^"]*"[^>]*/?\s*>'
                                 _attach_limit = int(getattr(GLOBAL_CONFIG, 'mail_attach_limit', 10))
@@ -1969,13 +1968,30 @@ def main():
                                     _note = ('<div style="font-size:11px; color:#888; border:1px dashed #bbb; '
                                              'padding:6px 10px; margin:4px 0;">이미지 생략 — 전체 이미지는 첨부된 '
                                              'PPT를 참조해 주세요.</div>')
-                                    for _im in reversed(_imgs[-_n_drop:]):   # 뒤쪽 이미지부터 대체(중복 태그 안전하게 rfind)
+                                    # 1단계: Score Board WF MAP(sb-wfmap) 먼저 드롭 (Anomaly/Spec 보호)
+                                    _sb_imgs = [im for im in _imgs if 'class="sb-wfmap"' in im]
+                                    _dropped = 0
+                                    for _im in reversed(_sb_imgs):
+                                        if _dropped >= _n_drop:
+                                            break
                                         _pos = html_code_final.rfind(_im)
                                         if _pos >= 0:
                                             html_code_final = (html_code_final[:_pos] + _note
                                                                + html_code_final[_pos + len(_im):])
+                                            _dropped += 1
+                                    # 2단계: 그래도 부족하면 나머지 일반 이미지 뒤쪽부터 드롭
+                                    if _dropped < _n_drop:
+                                        _remaining = _re_mail.findall(_img_pattern, html_code_final, _re_mail.DOTALL)
+                                        for _im in reversed(_remaining):
+                                            if _dropped >= _n_drop:
+                                                break
+                                            _pos = html_code_final.rfind(_im)
+                                            if _pos >= 0:
+                                                html_code_final = (html_code_final[:_pos] + _note
+                                                                   + html_code_final[_pos + len(_im):])
+                                                _dropped += 1
                                     print(f"[WARN] 메일 첨부 합계 {_n_inline + 1}개 (본문 이미지 {_n_inline} + PPT 1) > 제한 {_attach_limit}개 "
-                                          f"— 본문 뒤쪽 이미지 {_n_drop}개를 안내 문구로 대체 후 발송")
+                                          f"— Score Board WF MAP 우선 {_dropped}개 드롭 후 발송")
                                 else:
                                     print(f"[INFO] 메일 첨부 합계 {_n_inline + 1}개 (본문 이미지 {_n_inline} + PPT 1) — 제한 이내")
 

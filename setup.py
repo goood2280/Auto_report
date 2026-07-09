@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Auto Report 배포 번들 설치 스크립트.
-SHA-256(raw): 79603535b80f644db1f3f15e9bc170d5388eea50b3660281d3fa9516fee31d83
+SHA-256(raw): 1b694866427d905defad1dad0429c34509ba1d87cd004cf46e57a7a12977eab6
 """
 import json, gzip, base64, hashlib, os, sys
 
 DATA = """
-H4sIAM8oT2oC/8y9f1ccR5Io+lVyxPF2ldQ0PyR7PG3jdxBCltYIcQGPxwvcuk13NfTQv6arEWCG
+H4sIACgqT2oC/8y9f1ccR5Io+lVyxPF2ldQ0PyR7PG3jdxBCltYIcQGPxwvcuk13NfTQv6arEWCG
 OdhGfrIlP0tjYSMPaNGOPJK8mjNYQja6Y797zrxv4j/p6nO/wouIzKzKqq6uqkb47mALuqsyMzIj
 IyMjIiMiV09cyhTKqerKiTQ70cW68YeNrdTnK2XWvLVt319njZ0f7J39xsGNxr8/bvzl8XS5UKpW
 anU2l3U+ViznY810Plor7uN6oeS+qNcyWXM2k11wniwuFnLT5XytUmK5TN3E0ky8kt+T1EbOLNYz
@@ -3681,7 +3681,7 @@ wn0mSrFqnuaD8kXmoqPb6dC7qnpwooj2HLdf/9yLQol4+sARySXCeCdsFU/YJ894zn9bzTkB5gre
 aNkhEdAWzXJE99Y0wCsZMpqzTZZMMXiYkqB2oRV8UhGih3sjolSfRtGmWm259P8AsrE3QGMaCwA=
 """
 
-CHECKSUM = "79603535b80f644db1f3f15e9bc170d5388eea50b3660281d3fa9516fee31d83"
+CHECKSUM = "1b694866427d905defad1dad0429c34509ba1d87cd004cf46e57a7a12977eab6"
 
 
 def install(target_dir=None):

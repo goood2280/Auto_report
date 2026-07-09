@@ -502,10 +502,19 @@ class Config:
             (0.0,   '#C00000'),   # 0점: 진빨강
             (50.0,  '#FF0000'),   # 50:  빨강
             (70.0,  '#FFC000'),   # 70:  주황
-            (90.0,  '#92D050'),   # 90:  연초록
-            (100.0, '#00B050'),   # 100: 초록
+            (89.9,  '#FFD700'),   # 89.9: 노랑(직전)
+            (90.0,  '#FFD700'),   # 90:  노랑 — 100 미만은 눈에 띄게
+            (99.9,  '#FFD700'),   # 99.9: 노랑 유지
+            (100.0, '#00B050'),   # 100: 초록(만점만 초록)
         ]
         self.score_color_na = '#555555'   # 측정 없음(N/A) 회색
+
+        # 100이 아니면 빨간색으로 표시할 항목 목록 (ALIAS명).
+        # 여기 등록된 항목은 score=100이면 초록, 그 외 모든 값은 빨강으로 표시.
+        self.score_color_must_100_items = [
+            # 'VTH_N',
+            # 'IDSAT_N',
+        ]
 
         self.score_color_scale_by_item = {
             # 'VTH_N': [(0,'#C00000'), (90,'#FF0000'), (95,'#FFC000'), (100,'#00B050')],
@@ -762,13 +771,21 @@ class Config:
 
     def score_color(self, value, item=None):
         """점수(0~100) → (배경 hex, 글자 hex). 연속 보간. ITEM별 스케일 override 지원.
-        측정 없음/비수치는 (score_color_na, 흰색) 반환."""
+        측정 없음/비수치는 (score_color_na, 흰색) 반환.
+        score_color_must_100_items에 등록된 항목은 100이면 초록, 그 외 빨강."""
         try:
             v = float(value)
         except (TypeError, ValueError):
             return (self.score_color_na, '#ffffff')
         if v != v:   # NaN
             return (self.score_color_na, '#ffffff')
+        # must-100 항목: 100이면 초록, 아니면 빨강
+        _must100 = getattr(self, 'score_color_must_100_items', None) or []
+        if item is not None and str(item) in [str(x) for x in _must100]:
+            if abs(v - 100.0) < 0.01:
+                return ('#00B050', '#ffffff')   # 100: 초록
+            else:
+                return ('#C00000', '#ffffff')   # 100 아님: 빨강
         scale = None
         if item is not None:
             scale = (self.score_color_scale_by_item or {}).get(item)

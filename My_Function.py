@@ -2186,7 +2186,7 @@ def _render_item_charts(task):
     dpi = cfg['dpi']; jpg_q = cfg['jpg_q']; map_q = cfg['map_q']
     C_NAVY = cfg['C_NAVY']; C_ACCENT = cfg['C_ACCENT']; C_NEUTRAL = cfg['C_NEUTRAL']
     C_GRID = cfg['C_GRID']; C_SPINE = cfg['C_SPINE']; C_VEHICLE = cfg['C_VEHICLE']
-    C_BAND = cfg['C_BAND']; WV_PALETTE = cfg['WV_PALETTE']; FONT = cfg['FONT']
+    C_BAND = cfg['C_BAND']; C_WV = cfg['C_WV']; WV_PALETTE = cfg['WV_PALETTE']; FONT = cfg['FONT']
     main_vehicle = cfg['main_vehicle']
 
     w_colors = {str(i): _WAFER_PALETTE[(i - 1) % len(_WAFER_PALETTE)] for i in range(1, 26)}
@@ -3284,7 +3284,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
         'dpi': dpi, 'jpg_q': jpg_q, 'map_q': map_q,
         'C_NAVY': C_NAVY, 'C_ACCENT': C_ACCENT, 'C_NEUTRAL': C_NEUTRAL,
         'C_GRID': C_GRID, 'C_SPINE': C_SPINE, 'C_VEHICLE': C_VEHICLE,
-        'C_BAND': C_BAND, 'WV_PALETTE': WV_PALETTE, 'FONT': FONT,
+        'C_BAND': C_BAND, 'C_WV': C_WV, 'WV_PALETTE': WV_PALETTE, 'FONT': FONT,
         'main_vehicle': main_vehicle,
         'trend_tkout_agg': getattr(GLOBAL_CONFIG, 'trend_tkout_agg', {}) or {},
         'html_chart_dpi': getattr(GLOBAL_CONFIG, 'html_chart_dpi', 100),
