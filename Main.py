@@ -28,7 +28,7 @@ import requests
 #    출력이 매번 발생하던 문제 방지 — 실제 쿼리는 My_Function 내부에서 지연 import한다.)
 from My_Function import *
 from My_config import GLOBAL_CONFIG
-from anomaly_engine import run_anomaly_pipeline, analyze_commonality, render_findings_html, render_findings_count_html, interpret_with_ai, item_excluded, compile_nl_to_json
+from anomaly_engine import analyze_commonality, render_findings_html, render_findings_count_html, interpret_with_ai, item_excluded, compile_nl_to_json
 
 # ==================================================================================================================================
 # GPT OSS 120B API 연결 설정

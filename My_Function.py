@@ -1827,19 +1827,24 @@ def _copy_slide_into(dest_prs, src_slide, src_w=None, src_h=None):
     _R = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
 
     # ── 설명 이미지 재압축 설정 (My_config) ── 원본 고해상도 이미지를 다운스케일+JPEG 재압축해 용량 절감
+    #   용량 목표(description_image_target_mb)를 넘으면 해상도(최대 변 px)를 자동으로 낮춰
+    #   목표 이하가 될 때까지 재인코딩한다(하한 min_px). 목표를 0 이하로 두면 max_px만 적용.
     _recompress = getattr(GLOBAL_CONFIG, 'description_image_recompress', True)
     _max_px = int(getattr(GLOBAL_CONFIG, 'description_image_max_px', 2000) or 0)
+    _min_px = int(getattr(GLOBAL_CONFIG, 'description_image_min_px', 600) or 0)
     _jpeg_q = int(getattr(GLOBAL_CONFIG, 'description_image_jpeg_quality', 80))
+    _target_mb = float(getattr(GLOBAL_CONFIG, 'description_image_target_mb', 0) or 0)
+    _target_bytes = int(_target_mb * 1024 * 1024) if _target_mb > 0 else 0
 
     def _shrink_image_blob(blob):
-        """이미지 blob을 max_px 이하로 축소 + JPEG 재압축한 bytes 반환(실패/무효 시 None)."""
+        """이미지 blob을 max_px 이하로 축소 + JPEG 재압축한 bytes 반환(실패/무효 시 None).
+
+        target_bytes(>0)이면 목표 용량 이하가 될 때까지 해상도(최대 변 px)를 단계적으로
+        낮춰 재인코딩한다(하한 min_px). 목표 미설정(0)이면 max_px 한 번만 적용.
+        """
         try:
             from PIL import Image
             im = Image.open(_io.BytesIO(blob))
-            w, h = im.size
-            if _max_px and max(w, h) > _max_px:
-                _s = _max_px / float(max(w, h))
-                im = im.resize((max(1, int(w * _s)), max(1, int(h * _s))), Image.LANCZOS)
             # 투명도 있으면 흰 배경 합성 후 RGB로(JPEG는 알파 미지원)
             if im.mode in ('RGBA', 'LA', 'P'):
                 _rgba = im.convert('RGBA')
@@ -1848,9 +1853,33 @@ def _copy_slide_into(dest_prs, src_slide, src_w=None, src_h=None):
                 im = _bg
             else:
                 im = im.convert('RGB')
-            _out = _io.BytesIO()
-            im.save(_out, format='JPEG', quality=_jpeg_q, optimize=True)
-            return _out.getvalue()
+
+            def _encode_at(cap_px):
+                """최대 변을 cap_px 이하로 축소해 JPEG로 인코딩한 bytes 반환."""
+                _im = im
+                w, h = _im.size
+                if cap_px and max(w, h) > cap_px:
+                    _s = cap_px / float(max(w, h))
+                    _im = _im.resize((max(1, int(w * _s)), max(1, int(h * _s))), Image.LANCZOS)
+                _buf = _io.BytesIO()
+                _im.save(_buf, format='JPEG', quality=_jpeg_q, optimize=True)
+                return _buf.getvalue()
+
+            # 1) 해상도 상한(max_px)에서 1차 인코딩
+            out = _encode_at(_max_px if _max_px else max(im.size))
+            # 2) 목표 용량 초과 시 해상도를 단계적으로 낮춰 목표 이하로(하한 min_px)
+            if _target_bytes and len(out) > _target_bytes:
+                _cap = _max_px if _max_px else max(im.size)
+                for _ in range(12):
+                    if _cap <= _min_px:
+                        break
+                    # 현재 용량 대비 목표 비율의 제곱근만큼 변(px)을 줄임(면적≈용량 가정) + 여유 5%
+                    _ratio = (_target_bytes / float(len(out))) ** 0.5
+                    _cap = max(_min_px, int(_cap * min(0.95, _ratio * 0.95)))
+                    out = _encode_at(_cap)
+                    if len(out) <= _target_bytes:
+                        break
+            return out
         except Exception:
             return None
 

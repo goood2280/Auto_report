@@ -537,12 +537,6 @@ class Config:
         self.use_gpt_summary = True        # GPT 리포트 요약(요약문) 사용 여부 (텍스트 요약에만 영향)
         self.use_gpt_multistep = True      # AI 다단계 해석(triage→root-cause→final) 사용 (use_gpt_summary=True일 때)
         self.use_email_send = False        # 사내 메일 API로 PPT+HTML 발송 on/off (True면 리포트 발행 후 메일 전송)
-        self.mail_attach_limit = 10        # 메일 API 첨부 최대 개수(본문 인라인 이미지 + 첨부파일 합계). 첨부파일은 PPT 1개만.
-                                           #   본문 이미지는 이 제한에 맞춰 구조화됨:
-                                           #   · [1] Score Board: 점수행 아래 WF MAP 스트립(1장/index, 상한 scoreboard_wfmap_strip_max)
-                                           #     — 미표시 index는 문구 안내(PPT 참고), 보드/칸 미생성(용량 절약)
-                                           #   · [0] SPEC OUT '이미지 예산제'(초과 item은 세로 스택 합성) + WARNING 그리드 1장
-                                           #   그래도 초과 시 안내 문구 대체(Score Board 스트립은 마지막 순위로 보호) → 발송 항상 성공
         self.use_s3_upload = True          # 생성 PPT의 S3(DX) 업로드 on/off
         self.use_description_page = True   # PPT CAT2 간지(Description) 페이지 삽입 on/off
         # 이상 Trend chart([0] 섹션) 표시 여부.
@@ -570,11 +564,6 @@ class Config:
             'MAWIN_minus_margin', 'MAWIN_plus_margin', 'MAWIN_ovl_index', 'MAWIN_new',
         ]
         self.scoreboard_wfmap_min_pts = 50       # Score Board(HTML)에 wafer별 WF MAP을 넣을 최소 측정 point 수
-        # Score Board WF MAP 스트립(점수행 아래 wafer별 맵 1행 이미지) 최대 개수.
-        #   대상 index가 이 수 이하면 전부 표시, 초과하면 CAT2(category)별 첫 index 1개씩
-        #   (그래도 초과 시 표 위쪽 순으로 이 수까지). 미표시 index는 표 아래 문구로 안내(PPT 참고).
-        #   메일 용량이 index 수에 비례해 커지는 것을 막는 상한 — HTML/메일 본문에만 적용.
-        self.scoreboard_wfmap_strip_max = 6
         # WF MAP 제외 키워드: item(ALIAS)명에 아래 키워드가 포함되면 측정 point 수와
         # 무관하게 Score Board WF MAP을 표시하지 않는다. (예: PCHK 측정 항목)
         # 새 키워드를 추가하려면 이 리스트에 문자열을 넣으면 된다.
@@ -716,20 +705,17 @@ class Config:
 
         # ── Description 페이지 복사 시 내장 이미지 재압축(용량 절감) ──
         #   설명 슬라이드를 그대로 복사하면 원본 고해상도 이미지(수 MB~15MB)가 그대로 들어가
-        #   PPT 용량이 커진다. 아래 값으로 다운스케일+JPEG 재압축해 약 2MB 수준으로 줄인다.
+        #   PPT 용량이 커진다. 아래 값으로 다운스케일+JPEG 재압축해 목표 용량 이하로 줄인다.
         #   description_image_recompress=False면 원본 그대로 복사(재압축 안 함).
         self.description_image_recompress = True   # 설명 이미지 재압축 on/off
-        self.description_image_max_px = 2400       # 이미지 최대 변(px) — 이보다 크면 축소(≈2MB 목표)
-        self.description_image_jpeg_quality = 85   # 재압축 JPEG 품질(0~100)
-
-        # ──────────────────────────────────────────────────────
-        # 이상치 탐지 설정 (Anomaly detection settings)
-        # Z-score 기반 이상치 탐지 및 차트 표시 파라미터
-        # ──────────────────────────────────────────────────────
-        self.anomaly_z_threshold = 3.0            # Z-score 임계값 (threshold)
-        self.max_anomaly_chart_items = 6           # 차트에 표시할 최대 이상 항목 수
-        self.anomaly_chart_figsize = (10, 4.0)     # 차트 크기 (width, height in inches)
-        self.anomaly_chart_dpi = 120               # 차트 해상도 (DPI)
+        # ★ 용량 목표(MB): 재압축 후 '이미지 1장'이 이 크기를 넘지 않도록 코드가 자동으로
+        #    해상도(최대 변 px)를 낮춰 재인코딩한다. 예) 2 → 1 로 바꾸면 목표가 절반이 되어
+        #    해상도도 더 낮아지고(=더 흐림) 용량이 준다. 값을 키우면 더 선명·용량↑.
+        #    0 이하로 두면 목표 없음(= max_px 만 적용, 예전 동작).
+        self.description_image_target_mb = 2.0     # 이미지 1장 목표 최대 용량(MB) — 넘으면 해상도 자동 축소
+        self.description_image_max_px = 2400       # 해상도 상한(최대 변 px) — 목표 MB에 맞춰 이 이하에서 자동 축소
+        self.description_image_min_px = 600        # 해상도 하한(최대 변 px) — 목표를 위해서도 이보다 작게는 안 줄임
+        self.description_image_jpeg_quality = 85   # 재압축 JPEG 시작 품질(0~100)
 
         # ── Anomaly 상세(통계 자동 분석) PPT 페이지 분할 ──
         #   1페이지: Rule Check 결과 + 첫 N개 finding / 2페이지부터: 페이지당 M개 finding
