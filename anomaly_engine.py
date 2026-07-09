@@ -651,10 +651,10 @@ def _assemble_final_html(final_text, modes, rule_modes=None):
             _nl = _esc(str(_rm.get('nl') or '').strip())
             _notn = _esc(str(_rm.get('not_note') or '').strip())
             if _nl:   # 자연어 근거: "A가 이상 수준이고 B도 이상 수준이므로 <b>모드</b> 판정 (단, ...)"
-                p = f'{_nl}이므로 <b>{_mode}</b> 판정{_notn}'
+                p = f'{_nl}이므로 <b style="color:#0000FF;">{_mode}</b> 판정{_notn}'
             else:     # 폴백: 근거 항목만 나열
                 _bi = ', '.join(_esc(x) for x in (_rm.get('items') or []) if x)
-                p = f'<b>{_mode}</b>(이)가 추정됩니다'
+                p = f'<b style="color:#0000FF;">{_mode}</b>(이)가 추정됩니다'
                 p += f' (근거: <b>{_bi}</b>)' if _bi else ''
             _lk = str(_rm.get('link') or '').strip()
             if _lk:   # 이 RULE의 확인/조치 = 첨부 링크(해당 모드에 개별 연결)
@@ -665,7 +665,7 @@ def _assemble_final_html(final_text, modes, rule_modes=None):
         if not paras:   # rule_modes가 모두 빈 모드명 → 안내로 폴백
             paras.append('지식 규칙(ANOMALY_KNOWLEDGE.md)에 매칭되는 불량 모드가 없어 <b>수동 검토가 필요</b>합니다.')
     elif entry:
-        p = f'<b>{_esc(entry["mode"])}</b>(이)가 추정됩니다'
+        p = f'<b style="color:#0000FF;">{_esc(entry["mode"])}</b>(이)가 추정됩니다'
         p += f' (근거: <b>{basis_txt}</b>).' if basis_txt else '.'
         if entry.get('link'):
             p += f' <a href="{_html.escape(entry["link"], quote=True)}" target="_blank">관련 링크</a>'

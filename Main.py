@@ -1924,41 +1924,12 @@ def main():
                             try:
                                 html_code_final = html_content   # 생성된 HTML 코드 문자열
 
-                                # ── 인라인 이미지 → CID 참조 변환 (첨부 카운트 방지) ──
-                                # data:image 인라인을 cid: 참조로 바꾸고, 이미지를 별도 MIME 파트
-                                # (filename 없음)로 전송하여 첨부 카운트에서 제외한다.
+                                # ── CID 변환 비활성화 ──
+                                # 사내 메일 API가 CID(Content-ID) 참조를 지원하지 않아 인라인 유지.
+                                # Score Board WF MAP 제거로 이미지 수 감소 → 인라인 JPEG로 충분.
                                 _cid_images = []
-                                try:
-                                    import re as _re_cid
-                                    from PIL import Image as _PILCid
-                                    import io as _io_cid
-                                    _cid_cnt = [0]
-                                    def _to_cid(m):
-                                        _cid_cnt[0] += 1
-                                        _cid_id = f'holimg{_cid_cnt[0]}'
-                                        _b64 = m.group(2)
-                                        try:
-                                            _raw = base64.b64decode(_b64)
-                                            # PNG → JPEG 변환 (용량 절감)
-                                            try:
-                                                _im = _PILCid.open(_io_cid.BytesIO(_raw)).convert('RGB')
-                                                _buf = _io_cid.BytesIO()
-                                                _im.save(_buf, format='JPEG', quality=85, optimize=True)
-                                                _raw = _buf.getvalue()
-                                                _ct = 'image/jpeg'
-                                            except Exception:
-                                                _ct = f'image/{m.group(1)}'
-                                            _cid_images.append((_cid_id, _raw, _ct))
-                                            return f'src="cid:{_cid_id}"'
-                                        except Exception:
-                                            return m.group(0)
-                                    _cid_pat = r'src="data:image/(png|jpeg|jpg);base64,([A-Za-z0-9+/=\s]+)"'
-                                    html_code_final = _re_cid.sub(_cid_pat, _to_cid, html_code_final)
-                                    print(f"[INFO] 인라인 이미지 {len(_cid_images)}개 → CID 참조 변환 완료")
-                                except Exception as _cid_err:
-                                    print(f"[WARN] CID 변환 실패 (인라인 유지): {_cid_err}")
 
-                                # ── 인라인 PNG → JPEG 변환 (CID 실패 fallback) ──
+                                # ── 인라인 PNG → JPEG 변환 (메일 첨부 분리 방지) ──
                                 # 사내 메일 API가 data:image/png 인라인을 별도 첨부로 분리하는 현상 대응.
                                 # PNG base64를 JPEG base64로 변환(품질 85)하여 인라인 유지 + 용량 절감.
                                 try:
@@ -2049,11 +2020,6 @@ def main():
                                 files = [
                                     ('file', (final_ppt_file_name_DX, _mail_fh, 'application/vnd.ms-powerpoint'))
                                 ]
-                                # CID 이미지를 filename 없이 추가 (첨부 카운트 제외)
-                                for _ci, _cr, _cc in _cid_images:
-                                    files.append(('file', (None, _cr, _cc, {'Content-ID': f'<{_ci}>'})))
-                                if _cid_images:
-                                    print(f"[INFO] CID 이미지 {len(_cid_images)}개 멀티파트 추가 (filename 없음)")
                                 headers = {'x-dep-ticket': GLOBAL_CONFIG.get("TICKET")}
 
                                 response = requests.request(
