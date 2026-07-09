@@ -1983,6 +1983,8 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
                     tr_ok=(bool(_tr_raw) and '충족' in _tr_note))
                 _fd['rule_basis_nl'] = _basis_reason
                 _fd['rule_not_note'] = _basis_notsfx
+                # trigger item의 spec-out wafer 번호 목록 — interpret_with_ai에서 Anomaly Summary 표시용
+                _fd['so_wafer_ids'] = (_item_ctx.get(_item0) or {}).get('so_wafer_ids', [])
                 findings.append(_fd)
 
             rule_trace.append({
@@ -3426,11 +3428,14 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                                     in ('critical', '이상') else 'WARNING')
                             _det = f"참고: {_br['link']}" if _br.get('link') else ''
                             _tk = _resolve_item(_tname) if _tname else None
-                            findings.append(_finding(
+                            _dm_fd = _finding(
                                 _lvl, 'DEFECT_MODE', _tname or _note,
                                 f"[불량 모드] {_note}", _det,
                                 cat2=cat2_map.get(_tk, '') if _tk else '',
-                                display_name=_disp(_tname) if _tname else ''))
+                                display_name=_disp(_tname) if _tname else '')
+                            # trigger item의 spec-out wafer 번호 목록 — Anomaly Summary 표시용
+                            _dm_fd['so_wafer_ids'] = (_item_ctx.get(_tk or _tname) or {}).get('so_wafer_ids', [])
+                            findings.append(_dm_fd)
                             _hit_note = _note; _hit_idx = _bi + 1; _hit_link = _br.get('link') or ''
                             break   # 최초 매칭 분기 1개만
                     # trigger의 median/std 실측값 — rule check 이력에 남겨 판정 근거를 투명하게
@@ -3838,9 +3843,7 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
                 if _x and _x not in _items:    # 중복 항목 제거(같은 항목 2회 참조 규칙 대응), 순서 유지
                     _items.append(_x)
             # trigger item의 spec-out wafer 번호 목록 (Anomaly Summary에 표시)
-            _trig = _f.get('item', '')
-            _tctx2 = _find_ctx(_trig) if _trig else None
-            _so_wids = (_tctx2 or {}).get('so_wafer_ids', [])
+            _so_wids = _f.get('so_wafer_ids') or []
             _rule_modes.append({'mode': _mode, 'link': _f.get('link', ''), 'items': _items,
                                 'nl': _f.get('rule_basis_nl', ''), 'not_note': _f.get('rule_not_note', ''),
                                 'so_wafer_ids': _so_wids})
