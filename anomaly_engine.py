@@ -2135,7 +2135,18 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     col_pgm = _pick_col(merged_df, 'PGM(pt)')
     col_rad = _pick_col(merged_df, 'Chip_Radius', 'chip_radius')   # Data Extractor radius(mm)
 
-    items = [it for it in metrics_dict.keys() if it in merged_df.columns]
+    # metrics_dict 기반 항목 + spec_data에 REPORT ORDER가 있고 merged_df에 컬럼이 존재하는 항목 보강
+    # (PPT에서 skip된 항목도 anomaly 감지 대상에 포함)
+    _items_from_metrics = [it for it in metrics_dict.keys() if it in merged_df.columns]
+    _items_from_spec = []
+    if spec_data is not None:
+        for _si in spec_data.index:
+            if _si in merged_df.columns and _si not in metrics_dict:
+                _items_from_spec.append(_si)
+    items = _items_from_metrics + _items_from_spec
+    items = list(dict.fromkeys(items))   # 순서 유지 중복 제거
+    if _items_from_spec:
+        print(f"[anomaly] metrics_dict 미포함 항목 {len(_items_from_spec)}개 보강: {_items_from_spec[:5]}{'...' if len(_items_from_spec) > 5 else ''}")
 
     # 모집단: main_vehicle만 (lot간 비교용)
     pop = merged_df

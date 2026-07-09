@@ -941,7 +941,7 @@ def main():
                         pivot_group = pivot_group.groupby('WAFER_ID').mean()*100
                         pivot_group = pivot_group.T
                         VIP_group_raw = pd.merge(pivot_group, reformatter[['REPORT ORDER','PPT_ONLY']], right_index=True, left_index=True, how='right').sort_values('REPORT ORDER').dropna(subset=['REPORT ORDER'])
-                        VIP_group = VIP_group_raw.drop('REPORT ORDER',axis=1).dropna(how='all')
+                        VIP_group = VIP_group_raw.drop(['REPORT ORDER', 'PPT_ONLY'], axis=1, errors='ignore').dropna(how='all')
                         # PPT_ONLY=True 항목은 HTML score board에서 제외(PPT에만 표시).
                         # 값이 bool/1.0/"True"/"1"/"Y" 등 어떤 형태여도 truthy로 인식하도록 처리.
                         def _ppt_only_true(v):
@@ -1328,8 +1328,23 @@ def main():
                                 _LBL_W = 190 * _hs_sb               # 좌측 item 라벨 열 폭
                                 _hdr_lot = 16 * _hs_sb if len(_lot_groups) > 1 else 0
                                 _hdr_h = _hdr_lot + 16 * _hs_sb     # wafer 번호 헤더
-                                _b_items = [it for _k, _c, it, _p in render_seq if it in wfmaps_by_item]
-                                _b_items = list(dict.fromkeys(_b_items))
+                                _b_items_all = [it for _k, _c, it, _p in render_seq if it in wfmaps_by_item]
+                                _b_items_all = list(dict.fromkeys(_b_items_all))
+                                if len(_b_items_all) > 4:
+                                    # CAT2별 REPORT ORDER 상위 1개만 표시 (render_seq 순서가 REPORT ORDER)
+                                    _seen_cat2 = set()
+                                    _b_items = []
+                                    # render_seq에서 CAT2(cat)→item 매핑: 순서대로 첫 번째만 취함
+                                    for _k, _c, _it, _p in render_seq:
+                                        if _it not in wfmaps_by_item:
+                                            continue
+                                        if _c not in _seen_cat2:
+                                            _seen_cat2.add(_c)
+                                            _b_items.append(_it)
+                                    _b_items = list(dict.fromkeys(_b_items))
+                                    print(f"[INFO] WF MAP CAT2 필터링: {len(_b_items_all)}개 → {len(_b_items)}개 (CAT2별 상위 1개)")
+                                else:
+                                    _b_items = _b_items_all
                                 _board_w = _LBL_W + _slot * len(_wcols)
                                 _board_h = _hdr_h + _row_h * len(_b_items)
                                 _board = _PILImg.new('RGB', (_board_w, _board_h), (255, 255, 255))
@@ -1409,7 +1424,11 @@ def main():
                                     '<div style="margin:6px 0 2px 0; font-size:11px; color:#555;">'
                                     f'WF MAP (측정 ≥{_wf_min}pt index)</div>'
                                     f'<img src="data:image/png;base64,{_board_b64}" width="{_board_dw}" height="{_board_dh}" '
-                                    f'style="width:{_board_dw}px; height:{_board_dh}px; display:block;"/>')
+                                    f'style="width:{_board_dw}px; height:{_board_dh}px; display:block;"/>'
+                                    '<div style="margin:2px 0 0 0; font-size:10px; color:#888;">'
+                                    'Color: <span style="color:#d62728; font-weight:bold;">■</span> Spec High(빨강) '
+                                    '/ <span style="color:#1f77b4; font-weight:bold;">■</span> Spec Low(파랑) '
+                                    '/ <span style="color:#999999; font-weight:bold;">■</span> Median(회색)</div>')
                             except Exception as _sb_comp_err:
                                 print(f"[WARN] Score Board WF MAP 보드 합성 실패 → WF MAP 생략(PPT 참조): {_sb_comp_err}")
                         score_board_html = sb_html
