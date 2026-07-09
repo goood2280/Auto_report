@@ -37,6 +37,7 @@ from io import BytesIO
 
 # Matplotlib 백엔드를 Agg(비-GUI)로 설정하여 서버 환경 호환
 matplotlib.use('Agg')
+plt.rcParams['axes.unicode_minus'] = False   # U+2212 글리프 없는 폰트 경고 방지
 
 
 # ===================================================================

@@ -1414,6 +1414,7 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    plt.rcParams['axes.unicode_minus'] = False
     import base64, io
 
     if dpi is None:   # HTML용 WF MAP 해상도는 My_config.html_wfmap_dpi로 관리
@@ -1525,6 +1526,7 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    plt.rcParams['axes.unicode_minus'] = False
     import numpy as np
     import base64, io
 
@@ -1694,6 +1696,7 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    plt.rcParams['axes.unicode_minus'] = False
     import base64, io
 
     if dpi is None:   # HTML용 WF MAP 해상도는 My_config.html_wfmap_dpi로 관리
@@ -2125,6 +2128,7 @@ def _render_wafer_legend_bytes(cfg):
     import matplotlib.pyplot as plt
 
     plt.rcParams['font.family'] = cfg['FONT']
+    plt.rcParams['axes.unicode_minus'] = False
     w_colors = {str(i): _WAFER_PALETTE[(i - 1) % len(_WAFER_PALETTE)] for i in range(1, 26)}
     fig_leg, ax_leg = plt.subplots(figsize=(8.0, 0.2))
     plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
@@ -2159,6 +2163,7 @@ def _render_item_charts(task):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    plt.rcParams['axes.unicode_minus'] = False
     import matplotlib.dates as mdates
 
     cfg = task['cfg']
@@ -2362,6 +2367,7 @@ def _render_item_charts(task):
         plt.rcParams['axes.linewidth'] = 0.6
         plt.rcParams['font.size'] = 7.5
         plt.rcParams['font.family'] = FONT
+        plt.rcParams['axes.unicode_minus'] = False
         plt.rcParams['axes.facecolor'] = '#ffffff'
         plt.rcParams['figure.facecolor'] = '#ffffff'
         plt.rcParams['grid.color'] = C_GRID
