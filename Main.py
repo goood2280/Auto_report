@@ -6,9 +6,8 @@ import sys
 import time
 import traceback
 import uuid
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 import builtins
-import atexit
 import warnings
 
 # ----- 서드파티
@@ -361,16 +360,13 @@ def main():
     inline_file_sheet = GLOBAL_CONFIG.get("inline_file_sheet")
 
     prod = GLOBAL_CONFIG.get("prod")
-    process_id = GLOBAL_CONFIG.get("process_id")
     with_vehicle = GLOBAL_CONFIG.get("with_vehicle")
-    line_id = GLOBAL_CONFIG.get("line_id")
     delay_min = GLOBAL_CONFIG.get("delay_min")
     viewing_period = int(GLOBAL_CONFIG.get("viewing_period"))
     et_log_show = GLOBAL_CONFIG.get("et_log_show")
     test_mode = GLOBAL_CONFIG.get("test_mode")
     DB_Setting_mode = GLOBAL_CONFIG.get("DB_Setting_mode")
     KNOXID = GLOBAL_CONFIG.get("KNOXID")
-    user_name = GLOBAL_CONFIG.get("user_name")
     email_receiver = GLOBAL_CONFIG.get("email_receiver")
 
     ROOT = GLOBAL_CONFIG.get("ROOT")
@@ -380,8 +376,6 @@ def main():
     low_qual_ppt_save_path = GLOBAL_CONFIG.get("low_qual_ppt_save_path")
     html_save_path = GLOBAL_CONFIG.get("html_save_path")
 
-    et_file_path = GLOBAL_CONFIG.get("et_file_path")
-    fab_file_path = GLOBAL_CONFIG.get("fab_file_path")
     inline_file_path = GLOBAL_CONFIG.get("inline_file_path")
     coordinate_file_path = GLOBAL_CONFIG.get("coordinate_file_path")
     description_ppt_path = GLOBAL_CONFIG.get("description_ppt_path")
@@ -450,7 +444,6 @@ def main():
             print_status("S3 드라이브", "fail", f"client 초기화 실패: {s3_init_err}")
 
     datetime_now = datetime.now()
-    formatted_datetime = datetime_now.strftime('%y-%m-%d-%H-%M')
     upload_date = datetime_now.strftime('%Y%m%d')
 
     # ── AI 다단계 해석용: LLM 호출 함수(transport)와 지식베이스 텍스트를 1회 구성 ──
@@ -748,7 +741,14 @@ def main():
                                             ,'tkout_time','flat_zone','eqp_id','probe_card_id','chip_x_pos','chip_y_pos','subitem_id','temperature','total_site_cnt','match_key']
                 # PCHK(Probe check) 컬럼은 차트/스코어보드엔 안 쓰지만, 측정 신뢰성 분석(동일 site 이탈)
                 # 을 위해 merged_df에 유지한다. (REPORT ORDER가 없어 include_1엔 안 잡히므로 별도 보존)
-                pchk_keep = [c for c in merged_df.columns if 'PCHK' in str(c).upper()]
+                # 인식 기준: ALIAS에 'PCHK' 포함 또는 reformatter CAT2가 'PCHK'
+                # (alias에 PCHK가 없어도 CAT2로 지정하면 유지 — anomaly_engine 인식 기준과 동일)
+                _pchk_cat2_aliases = set()
+                if 'CAT2' in reformatter.columns:
+                    _pchk_cat2_aliases = {str(a) for a in reformatter.loc[
+                        reformatter['CAT2'].astype(str).str.upper() == 'PCHK', 'ALIAS'].dropna()}
+                pchk_keep = [c for c in merged_df.columns
+                             if 'PCHK' in str(c).upper() or str(c) in _pchk_cat2_aliases]
                 # 다중컬럼 ADDP 파생(MA_Window 등: {alias}_minus_margin/_ovl_index 등)도 유지.
                 # Reformatize가 실제로 추가한 컬럼만 유지 — startswith 방식은 ALIAS 접두어가
                 # 겹치는 별개 아이템(예: LKG → LKG_REMOVE_L)을 잘못 포함하는 문제가 있었음.
@@ -851,8 +851,6 @@ def main():
                         _t_report_start = time.perf_counter()
                         print_status("Report 발행 시작", "info", f"{search_key}")
 
-                        not_measured = False
-
                         target_lot_id = search_key.split('_')[0] #{fab_lot_id}
                         target_root_lot_id = target_lot_id[:5] #{root_lot_id}
                         target_DC_step_id = search_key.split('_')[1] #{DC_step_id}
@@ -874,7 +872,6 @@ def main():
 
                         if df.empty :
                             print(f"{search_key}가 비어있습니다.")
-                            not_measured = True
                             log_to_file(f"{search_key}에서 HOL DATA가 측정되지 않아 Report 발행되지 않았습니다.", error_log)
                             continue
 
@@ -1907,7 +1904,7 @@ def main():
                                 # 동일 key가 이미 있으면 먼저 delete 후 업로드(put)
                                 try:
                                     client.delete_object(Bucket=bucket_dx, Key=s3_key)
-                                except Exception as _de:
+                                except Exception:
                                     pass
                                 client.upload_file(_s3_local, bucket_dx, s3_key)
                                 print_status("S3 업로드", "ok", f"{bucket_dx}/{s3_key}")

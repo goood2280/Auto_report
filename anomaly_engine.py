@@ -31,8 +31,6 @@ import re
 import pandas as pd
 import matplotlib
 import matplotlib.pyplot as plt
-import base64
-from io import BytesIO
 
 # Matplotlib 백엔드를 Agg(비-GUI)로 설정하여 서버 환경 호환
 matplotlib.use('Agg')
@@ -630,9 +628,17 @@ RULE_FUNCTION_SPEC = """\
 조건식(when/whenN 공용): 원자를 ' AND ' / ' OR '로 연결(OR로 묶인 AND 그룹).
 사용 가능한 조건 원자/함수(정확히 이 문법만 — 임의 함수 생성 금지):
   spec_out >= n            : trigger 항목의 spec-out pt 수 비교(연산자 >= <= == < >)
-  seq_out(n)               : 측정순서(chip_x 먼저 증가→chip_y 증가)상 연속 spec-out ≥ n
+  seq_out(n)               : 측정순서상 연속 spec-out ≥ n (trigger 기준)
+                             ※ 측정순서 = chip_x_adj 먼저 증가 → chip_y_adj 증가
+                               (1,1)→(2,1)→(3,1)… — WF MAP 좌상단부터 한 줄씩 우측 진행
   seq_mostly_dead(f)       : 측정순서 시퀀스의 spec-out 비율 ≥ f (0~1)
   seq_front_heavy          : 앞 절반 이탈 많음(≥0.6) + 뒤 절반 양호(≤0.2)
+  seq_out(ITEM, n)         : 지정 항목의 측정순서 연속 spec-out ≥ n (trigger 무관)
+  seq_mostly_dead(ITEM, f) : 지정 항목의 측정순서 spec-out 비율 ≥ f
+  seq_front_heavy(ITEM)    : 지정 항목의 측정 앞부분 이탈 집중
+  all_seq_out(A, B, ..., n): 나열 항목 '모두' 측정순서 연속 spec-out ≥ n
+                             ("A,B,C,D 모두에서 측정순서에 따른 이상" 판정)
+  all_seq_front_heavy(A, B, ...) : 나열 항목 '모두' 측정 앞부분 이탈 집중
   sev(ITEM, critical)      : 항목 등급 ≥ 지정 등급 (critical|warning|이상|주의|참고|info)
   sev(ITEM) >= 이상        : 항목 등급 비교(연산자 >= <= == < >, 등급 이상|주의|참고. 미측정=참고)
   all_sev(A, B, critical)  : 나열 그룹(CAT2 또는 항목) '모두' ≥ 지정 등급
@@ -686,6 +692,10 @@ NL_PATTERN_HINTS = """\
   "측정 순서상 연속 n개 이상 이탈하면" → trigger: 항목 + when(또는 분기 조건): seq_out(n)
   "측정점의 N% 이상이 이탈하면"        → seq_mostly_dead(N/100)
   "측정 앞부분에 이탈이 몰려 있으면"   → seq_front_heavy
+  "A가 측정순서상 연속 n개 이탈하면"(임의 항목) → seq_out(A, n)
+  "A,B,C,D 모두에서 측정순서에 따른 이상(연속 이탈)이 보이면" → all_seq_out(A, B, C, D, 3)
+                                         (연속 개수 명시가 없으면 3을 기본으로)
+  "A,B 모두 측정 앞부분에 이탈이 몰리면" → all_seq_front_heavy(A, B)
   "~이고/그리고 ~이면"                 → 조건을 ' AND '로 결합 / "~이거나/또는" → ' OR '
   "…일 때, ~이면 \"X\", 아니면 \"Y\""  → when(게이트) + when2/note("X") + else 마지막 note("Y") (분기)
   "…의 산포 주의 언급은 하지 마"       → suppress_disp: 항목 (조건은 when에)
@@ -721,6 +731,12 @@ _ATOM_VALID_PATTERNS = [
     r'seq_out\(\s*[\d.]+\s*\)$',
     r'seq_mostly_dead\(\s*[\d.]+\s*\)$',
     r'seq_front_heavy$',
+    # ── 측정순서 원자 — 지정 항목/다중 항목 변형 (ITEM 인자형) ──
+    r'seq_out\([^,()]+,\s*[\d.]+\s*\)$',
+    r'seq_mostly_dead\([^,()]+,\s*[\d.]+\s*\)$',
+    r'seq_front_heavy\([^,()]+\)$',
+    r'all_seq_out\([^()]+\)$',
+    r'all_seq_front_heavy\([^()]+\)$',
     r'sev\([^,()]+,\s*(critical|warning|이상|주의|참고|info)\s*\)$',
     r'sev\([^()]+\)\s*(>=|<=|==|<|>)\s*(이상|주의|참고)$',
     r'sev_cat2\([^()]+\)\s*(>=|<=|==|<|>)\s*(이상|주의|참고)$',
@@ -1221,8 +1237,6 @@ def convert_nl_to_json(nl_text, llm_fn=None, cache_dir='RUN/AI', use_cache=True)
     AI 가용 시 LLM으로, 불가 시 키워드 fallback으로 변환한다.
     캐시: RUN/AI/nl_rules_json.json (동일 입력→동일 결과 보장).
     """
-    import re, json
-
     if not (nl_text or '').strip():
         return []
 
@@ -1272,7 +1286,10 @@ def _nl_json_ai(lines, llm_fn):
         '    "median": "<=4",\n'
         '    "stddev": "<0.5",\n'
         '    "disp_ratio": ">2.0",\n'
-        '    "spec_out": ">=3"\n'
+        '    "spec_out": ">=3",\n'
+        '    "seq_run": ">=3",\n'
+        '    "seq_dead": ">=0.5",\n'
+        '    "seq_front_heavy": true\n'
         "  },\n"
         '  "not_items": ["ITEM_C", "ITEM_D"],\n'
         '  "trend_items": ["ITEM_D", "ITEM_C", "ITEM_B", "ITEM_A"],\n'
@@ -1285,6 +1302,13 @@ def _nl_json_ai(lines, llm_fn):
         '- condition.grade: ">=abnormal"(이상 수준 이상), ">=caution"(주의 수준 이상), ">=info"(참고 이상)\n'
         '- condition.logic: "all"(모두 만족), "any"(하나만, 기본값)\n'
         '- condition.median, stddev, disp_ratio, spec_out: 비교 연산자+숫자\n'
+        '- condition.seq_run: 측정순서(chip_x_adj 먼저 증가 → chip_y_adj 증가 = WF MAP 좌상단부터\n'
+        '    한 줄씩 우측 진행)상 "연속" spec-out 개수 비교. "측정순서상 연속 n개 이탈" → ">=n",\n'
+        '    "측정순서에 따른 이상이 보이면"처럼 개수 없으면 ">=3"을 기본으로\n'
+        '- condition.seq_dead: 측정순서 시퀀스 중 spec-out 비율(0~1) 비교\n'
+        '- condition.seq_front_heavy: true — 측정 앞부분(앞 절반 ≥60%)에 이탈 집중 + 뒤 절반 양호(≤20%)\n'
+        '- "[A],[B],[C],[D] 모두에서 측정순서에 따른 이상이 보이면" → items에 4개 전부 +\n'
+        '    "logic": "all" + "seq_run": ">=3" (각 항목이 모두 조건을 만족해야 매칭)\n'
         '- condition.median/stddev 우변은 숫자 대신 "spec_high"/"spec_low"(선택 "*계수") 가능.\n'
         '    예: "median이 스펙 상한의 90% 넘으면" → "median": ">spec_high*0.9"\n'
         '- "median이 10~30 사이면" 같은 범위 조건은 배열로: "median": [">=10", "<=30"] (모두 만족)\n'
@@ -1423,6 +1447,17 @@ def _nl_json_keyword_parse(line):
     m = re.search(r'spec.?out\s*(?:이|가)?\s*([\d]+)\s*(?:개|이상)', line, re.I)
     if m:
         cond['spec_out'] = f'>={m.group(1)}'
+
+    # 측정순서(측정 순서) 관련 — 연속 N개 이탈(seq_run) / 앞부분 집중(seq_front_heavy)
+    #   "모두 측정순서에 따른 이상"은 logic(모두) + seq_run으로 각 항목 전부 검사된다.
+    if re.search(r'측정\s*순서', line):
+        m = re.search(r'연속\s*([\d]+)\s*(?:개|점)?', line)
+        if re.search(r'(앞부분|앞쪽|앞).{0,6}(집중|몰려|몰리)', line):
+            cond['seq_front_heavy'] = True
+        else:
+            cond['seq_run'] = f'>={m.group(1)}' if m else '>=3'
+        # 측정순서 규칙은 seq 지표 자체가 spec-out 기반 → grade 기본값을 강제하지 않는다
+        cond.setdefault('grade', '>=info')
 
     if not cond.get('grade'):
         cond['grade'] = '>=caution'
@@ -1572,6 +1607,23 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
                     if not ok:
                         return False
 
+        # ── 측정순서(seq) 조건 — chip_x_adj 먼저 증가 → chip_y_adj 증가
+        #    ((1,1)→(2,1)→(3,1)… = WF MAP 좌상단부터 한 줄씩 우측 진행) 순서의 시퀀스 지표.
+        #    logic:"all" + items 여러 개와 조합하면 "A,B,C,D 모두 측정순서 이상" 판정이 된다.
+        _seq = c.get('seq') or {}
+        for cond_key, seq_key in (('seq_run', 'run'), ('seq_dead', 'dead')):
+            expr = cond.get(cond_key)
+            if not expr:
+                continue
+            for _e in (expr if isinstance(expr, (list, tuple)) else [expr]):
+                ok = _num_ok(_e, _seq.get(seq_key), c)
+                if ok is False:
+                    return False
+        if cond.get('seq_front_heavy'):
+            if not (float(_seq.get('front', 0.0)) >= 0.6
+                    and float(_seq.get('back', 1.0)) <= 0.2):
+                return False
+
         return True
 
     # ── 근거 자연어화: 왜 이 규칙이 매칭됐는지 조건을 사람이 읽는 문장으로 구성 ──
@@ -1595,8 +1647,9 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
 
     def _num_clause(field, expr):
         nm = {'median': 'median', 'stddev': 'stddev', 'disp_ratio': '산포',
-              'spec_out': 'spec-out point'}.get(field, field)
-        unit = {'disp_ratio': '배', 'spec_out': '개'}.get(field, '')
+              'spec_out': 'spec-out point', 'seq_run': '측정순서 연속 spec-out',
+              'seq_dead': '측정순서 spec-out 비율'}.get(field, field)
+        unit = {'disp_ratio': '배', 'spec_out': '개', 'seq_run': '개'}.get(field, '')
         exprs = expr if isinstance(expr, list) else [expr]
         parts = []
         for e in exprs:
@@ -1625,11 +1678,13 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
                 gw = _grade_word(lv) if has_grade else '조건 충족'
                 item_parts.append((f"{_disp(rk)}가 " if i == 0 else f"{_disp(rk)}도 ") + gw)
             clauses.append('이고 '.join(item_parts))
-        for _f in ('median', 'stddev', 'disp_ratio', 'spec_out'):
+        for _f in ('median', 'stddev', 'disp_ratio', 'spec_out', 'seq_run', 'seq_dead'):
             if cond.get(_f) is not None:
                 _nc = _num_clause(_f, cond.get(_f))
                 if _nc:
                     clauses.append(_nc)
+        if cond.get('seq_front_heavy'):
+            clauses.append('측정 앞부분(측정순서 앞 절반)에 이탈 집중')
         if tr_raw and tr_ok:
             tdisp = ' → '.join(_disp(_resolve_item(nm, item_ctx) or nm) for nm in tr_raw)
             clauses.append(f"{tdisp} 순으로 산포가 점점 {'커지는' if dirn != 'desc' else '작아지는'} 추세")
@@ -1753,7 +1808,7 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
                 _fd['rule_basis_nl'] = _basis_reason
                 _fd['rule_not_note'] = _basis_notsfx
                 # trigger item의 spec-out wafer 번호 목록 — interpret_with_ai에서 Anomaly Summary 표시용
-                _fd['so_wafer_ids'] = (_item_ctx.get(_item0) or {}).get('so_wafer_ids', [])
+                _fd['so_wafer_ids'] = (item_ctx.get(_item0) or {}).get('so_wafer_ids', [])
                 findings.append(_fd)
 
             rule_trace.append({
@@ -1871,12 +1926,9 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     list[dict] : Finding 목록 (severity 순 정렬). 각 항목
         {severity, type, item, title, detail}
     """
-    import numpy as np
-
     def cfg(k, d):
         return getattr(config, k, d) if config else d
 
-    sigma_med = cfg('anomaly_lot_median_sigma', 2.0)
     disp_ratio = cfg('anomaly_lot_dispersion_ratio', 1.5)
 
     # radius zone 경계(Center ≤ r_center_max, Middle ≤ r_middle_max, 그 외 Edge).
@@ -1984,8 +2036,6 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                            float(hi) if pd.notna(hi) else None)
     except Exception as e:
         print(f"[anomaly] spec dict 구성 실패: {e}")
-
-    spec_out_items = [it for it in items if metrics_dict.get(it, {}).get('spec_out_count', 0) > 0]
 
     # REPORT ORDER (spec-out 동순위 최종 tie-break용). spec_data는 ALIAS 인덱스.
     report_order = {}
@@ -2234,8 +2284,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 _c2 = r.get('CAT2')
                 if pd.notna(_c2) and str(_c2).strip():
                     cat2_map[a] = str(_c2).strip()
+                # PCHK 인식 = CAT2가 'PCHK'이거나 ALIAS에 'PCHK' 포함(부분일치 —
+                # Main.py의 pchk_keep 컬럼 보존 규칙과 동일 기준. 예: RMAX_PCHK_LKG도 인식)
                 cat2 = str(r.get('CAT2', '')).upper()
-                if (cat2 == 'PCHK' or str(a).upper().startswith('PCHK')) \
+                if (cat2 == 'PCHK' or 'PCHK' in str(a).upper()) \
                         and a in merged_df.columns and a not in items:
                     pchk_aliases.append(a)
     except Exception as e:
@@ -2437,7 +2489,11 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     _item_stats = {} # AI 해석용 항목별 통계 요약(전 항목) — item_stats_out으로 반환
 
     def _seq_metrics(it, lo, hi):
-        """항목의 wafer별 측정순서(chip_y,chip_x) spec-out 시퀀스 집계 지표(seq_* 규칙 함수용).
+        """항목의 wafer별 측정순서 spec-out 시퀀스 집계 지표(seq_* 규칙 함수용).
+
+        측정순서 = (chip_y_adj, chip_x_adj) 오름차순 정렬 → chip_x_adj가 먼저 증가:
+        (1,1)→(2,1)→(3,1)→… — WF MAP 기준 좌상단부터 한 줄씩 우측으로 진행하는
+        실제 측정(터치다운) 순서와 동일하다.
         반환 {run: 최대 연속 spec-out 길이(전 wafer 최댓값), dead: 최대 spec-out 비율,
               front: 앞 절반 spec-out 비율 최댓값, back: 뒤 절반 spec-out 비율 최솟값}."""
         _m = {'run': 0, 'dead': 0.0, 'front': 0.0, 'back': 1.0}
@@ -2489,7 +2545,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         #   median 이탈 σ = |wafer median − 제품 wafer median 중심| / 제품 wafer median 산포(wafer간 변동)
         #   산포 배수     = wafer 내부 robust 산포 / 보통 wafer 산포
         #   항목 대표값 = target lot wafer 중 '가장 심한' wafer(worst).
-        dev_txt, disp_txt = '', ''
+        disp_txt = ''
         worst_med_dev, worst_med_w, worst_med_val = 0.0, None, None
         worst_disp_ratio, worst_disp_w = 0.0, None
         _wstats = {}    # wafer별 {median, std, n} — 이상/주의 항목의 wafer 통계(요청: findings·AI·룰에 포함)
@@ -2519,8 +2575,6 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         _wi = _waf_int(w)
                         worst_disp_ratio = r
                         worst_disp_w = _wi if _wi is not None else w
-            if worst_med_dev > 0 and worst_med_w is not None:
-                dev_txt = f"#{worst_med_w} median {worst_med_dev:.1f}σ 이탈(제품 wafer 기준)"
             if worst_disp_ratio >= 1.3 and worst_disp_w is not None:
                 disp_txt = f"#{worst_disp_w} 산포 {worst_disp_ratio:.1f}배"
 
@@ -2567,7 +2621,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         if so_commonality:
             _bits.append(so_commonality)
         # radius zone 분포(위치: Center N ...)는 표시하지 않음(요청). so_zones는 basis에만 기록.
-        # median 이탈(dev_txt)은 판정 기준에서 제외됨 → 상세에도 표시하지 않음. 산포(disp_txt)만.
+        # median 이탈은 판정 기준에서 제외됨 → 상세에도 표시하지 않음. 산포(disp_txt)만.
         if disp_txt:
             _bits.append(disp_txt)
         detail = '. '.join(_bits)
@@ -2986,6 +3040,44 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                     _need = _LVL_KW[m.group(1).lower()]
                     _n = sum(1 for _cx in _item_ctx.values() if _cx.get('level', 0) >= _need)
                     return _cmp(_n, m.group(2), m.group(3))
+                # ── 측정순서(chip_x_adj 먼저 증가 → chip_y_adj 증가 = WF MAP 좌상단부터
+                #    한 줄씩 우측 진행) 시퀀스 원자 — 지정 항목/다중 항목용 ──
+                def _seq_of(name):
+                    c = _find_ctx(name)
+                    return (c or {}).get('seq') or {}
+
+                def _seq_front(sq):
+                    return (float(sq.get('front', 0.0)) >= 0.6
+                            and float(sq.get('back', 1.0)) <= 0.2)
+                # seq_out(ITEM, n) : 지정 항목의 측정순서 연속 spec-out ≥ n (trigger 무관)
+                m = re.match(r'seq_out\(([^,()]+),\s*([\d.]+)\s*\)$', atom)
+                if m:
+                    return float(_seq_of(m.group(1).strip()).get('run', 0)) >= float(m.group(2))
+                # seq_mostly_dead(ITEM, f) : 지정 항목의 측정순서 spec-out 비율 ≥ f
+                m = re.match(r'seq_mostly_dead\(([^,()]+),\s*([\d.]+)\s*\)$', atom)
+                if m:
+                    return float(_seq_of(m.group(1).strip()).get('dead', 0.0)) >= float(m.group(2))
+                # seq_front_heavy(ITEM) : 지정 항목의 측정 앞부분 이탈 집중(앞≥0.6·뒤≤0.2)
+                m = re.match(r'seq_front_heavy\(([^,()]+)\)$', atom)
+                if m:
+                    return _seq_front(_seq_of(m.group(1).strip()))
+                # all_seq_out(A, B, ..., n) : 나열 항목 '모두' 측정순서 연속 spec-out ≥ n
+                #   ("A,B,C,D 모두에서 측정순서에 따른 이상이 보이면" 판정용)
+                m = re.match(r'all_seq_out\(([^()]+)\)$', atom)
+                if m:
+                    _args = [t.strip() for t in m.group(1).split(',') if t.strip()]
+                    try:
+                        _n = float(_args[-1])
+                    except (ValueError, IndexError):
+                        return False
+                    _names = _args[:-1]
+                    return bool(_names) and all(
+                        float(_seq_of(nm).get('run', 0)) >= _n for nm in _names)
+                # all_seq_front_heavy(A, B, ...) : 나열 항목 '모두' 측정 앞부분 이탈 집중
+                m = re.match(r'all_seq_front_heavy\(([^()]+)\)$', atom)
+                if m:
+                    _names = [t.strip() for t in m.group(1).split(',') if t.strip()]
+                    return bool(_names) and all(_seq_front(_seq_of(nm)) for nm in _names)
                 # rstd_asc/desc(A,B,C,...) : robust std 수준(보통 wafer 산포 대비 배수)이
                 #   나열 순서대로 '점점 커짐(asc)/작아짐(desc)' — "산포가 벌어지는 방향" 판정
                 m = re.match(r'rstd_(asc|desc)\(([^()]+)\)$', atom)
@@ -3025,13 +3117,6 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         except ValueError:
                             t = None
                     return v is not None and t is not None and _cmp(v, m.group(3), t)
-                return False
-
-            def _eval_when(expr):
-                for _grp in re.split(r'(?i)\s+OR\s+', expr):
-                    _atoms = [a for a in re.split(r'(?i)\s+AND\s+', _grp) if a.strip()]
-                    if _atoms and all(_eval_atom(a) for a in _atoms):
-                        return True
                 return False
 
             # ── 통합 [RULE] 체이닝용 원자 평가 (측정순서 함수·spec_out·all_sev(그룹,level) 등) ──

@@ -552,7 +552,6 @@ class Config:
         # AI 없이도 코드로 동작하는 1차 자동 해석의 임계값들.
         # 모두 이 파일에서 조정 → README "Anomaly Trend Chart 우선순위" 참고
         # ──────────────────────────────────────────────────────
-        self.anomaly_lot_median_sigma = 2.0      # 주의(median): target wafer median이 '제품 wafer median 분포'에서 이 σ 초과 이탈 시 주의
         self.anomaly_lot_dispersion_ratio = 2.0  # 주의(산포): target wafer 내부 산포가 '보통 wafer 산포'의 이 배수 초과 시 주의
         self.anomaly_median_low_sigma = 2.0      # 지식규칙 median_low(): target median이 제품 median 대비 이 σ 이상 낮으면 True
         # ── 통계 자동분석 제외 항목 ──

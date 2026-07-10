@@ -19,7 +19,7 @@ import gc
 import glob
 import time
 import traceback
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 
 # ===================================================================
 #  서드파티 라이브러리 (Third-party Imports)
@@ -641,7 +641,6 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
     NAVY = RGBColor(*GLOBAL_CONFIG.theme_title_color)
     FONT = GLOBAL_CONFIG.theme_font_family
     LOTBG = RGBColor(0xD9, 0xE1, 0xF2)
-    WAFBG = RGBColor(0xF0, 0xF0, 0xF0)
     WHITE = RGBColor(255, 255, 255)
     BLACK = RGBColor(0, 0, 0)
 
@@ -1415,7 +1414,7 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     plt.rcParams['axes.unicode_minus'] = False
-    import base64, io
+    import base64
 
     if dpi is None:   # HTML용 WF MAP 해상도는 My_config.html_wfmap_dpi로 관리
         dpi = getattr(GLOBAL_CONFIG, 'html_wfmap_dpi', 110)
@@ -1528,7 +1527,7 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
     import matplotlib.pyplot as plt
     plt.rcParams['axes.unicode_minus'] = False
     import numpy as np
-    import base64, io
+    import base64
 
     if dpi is None:   # HTML용 WF MAP 해상도는 My_config.html_wfmap_dpi로 관리
         dpi = getattr(GLOBAL_CONFIG, 'html_wfmap_dpi', 110)
@@ -1697,7 +1696,7 @@ def render_index_wfmap_b64(df, item, min_pts=50, lot_prefix=None,
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     plt.rcParams['axes.unicode_minus'] = False
-    import base64, io
+    import base64
 
     if dpi is None:   # HTML용 WF MAP 해상도는 My_config.html_wfmap_dpi로 관리
         dpi = getattr(GLOBAL_CONFIG, 'html_wfmap_dpi', 120)
@@ -2217,10 +2216,10 @@ def _render_item_charts(task):
     log_scale = sp['log_scale']
     y_label = sp['y_label']
 
-    dpi = cfg['dpi']; jpg_q = cfg['jpg_q']; map_q = cfg['map_q']
+    dpi = cfg['dpi']; jpg_q = cfg['jpg_q']
     C_NAVY = cfg['C_NAVY']; C_ACCENT = cfg['C_ACCENT']; C_NEUTRAL = cfg['C_NEUTRAL']
     C_GRID = cfg['C_GRID']; C_SPINE = cfg['C_SPINE']; C_VEHICLE = cfg['C_VEHICLE']
-    C_BAND = cfg['C_BAND']; C_WV = cfg['C_WV']; WV_PALETTE = cfg['WV_PALETTE']; FONT = cfg['FONT']
+    C_BAND = cfg['C_BAND']; C_WV = cfg['C_WV']; FONT = cfg['FONT']
     main_vehicle = cfg['main_vehicle']
 
     w_colors = {str(i): _WAFER_PALETTE[(i - 1) % len(_WAFER_PALETTE)] for i in range(1, 26)}
@@ -2300,9 +2299,7 @@ def _render_item_charts(task):
         target_lots = (sorted(item_df[lot_col].astype(str).unique()) if lot_col else [])
         multi_lot = len(target_lots) > 1
         LOT_MARKERS = ['o', '^', 's', 'D', 'v', 'P', 'X', '*']
-        LOT_LINE_COLORS = ['#d62728', '#1f77b4', '#2ca02c', '#9467bd', '#ff7f0e', '#8c564b', '#e377c2', '#17becf']
         lot_marker = {lot: LOT_MARKERS[i % len(LOT_MARKERS)] for i, lot in enumerate(target_lots)}
-        lot_color = {lot: LOT_LINE_COLORS[i % len(LOT_LINE_COLORS)] for i, lot in enumerate(target_lots)}
 
         # ---- Index Aggregation Table용 (lot, wafer)별 집계값 ----
         # REPORT DIRECTION → BOTH=Median / UPPER=P90 / LOWER=P10. lot_id별 분리해 wafer별 1값.
@@ -3139,10 +3136,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
     from pptx.util import Inches, Pt
     from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
     from pptx.dml.color import RGBColor
-    from pptx.enum.shapes import MSO_SHAPE
     import io as _io
-    import gc
-    import numpy as np
     import re
 
     # ---- 차트 해상도/압축 품질 설정 (My_config.py에서 조정) ----
@@ -3249,13 +3243,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
         print(f"[insert_plots] REPORT ORDER 없는 ALIAS 소유 컬럼 {len(_no_page)}개 → 페이지 미생성(비차트): {_no_page}")
 
     # ── ADDP 파생 index 제목 옆 'real 항목' 표시용 준비 ──
-    # (1) 대상 lot에서 실제로 데이터가 있는(비어있지 않은) 항목 컬럼 집합
-    try:
-        _tl_df = _select_target_lot_frame(merged_df, target_lot_id, target_root_lot_id, target_DC_step_id)
-        _lot_present_cols = {c for c in _tl_df.columns if _tl_df[c].notna().any()}
-    except Exception:
-        _lot_present_cols = set(merged_df.columns)
-    # (2) reformatter ALIAS → (CATEGORY, ADDP FORM, ITEMID) 맵 (ADDP 재귀 해소·real item 표시용)
+    # reformatter ALIAS → (CATEGORY, ADDP FORM, ITEMID) 맵 (ADDP 재귀 해소·real item 표시용)
     _ref_cat, _ref_formula, _ref_itemid = {}, {}, {}
     if reformatter is not None and 'ALIAS' in getattr(reformatter, 'columns', []):
         for _, _rr in reformatter.iterrows():
@@ -3955,10 +3943,6 @@ def etdata_query():
         if not os.path.exists(GLOBAL_CONFIG.get("DB_et_daily")):
             os.makedirs(GLOBAL_CONFIG.get("DB_et_daily"))
 
-        current_time = datetime.now()
-        formatted_time = current_time.strftime("%Y-%m-%d %H:%M")
-
-
         sub_datetime_now = datetime.now()
         if GLOBAL_CONFIG.get("now_minus") :
             sub_to_date_time = sub_datetime_now - timedelta(days = GLOBAL_CONFIG.get("now_minus"))
@@ -4000,9 +3984,6 @@ def etdata_query():
             real = real.loc[:,['ITEMID', 'ALIAS', 'SCALE FACTOR','ABSOLUTE']]
             ITEMID_List=real.ITEMID.tolist()
             addp = addp.loc[:,['ALIAS', 'ADDP FORM','SCALE FACTOR']]
-            addp['addpscale'] = addp['SCALE FACTOR'].astype(str) + '*(' + addp['ADDP FORM'] + ')'
-            ALIAS = list(map(str,addp.ALIAS)) #ADDP FORM ALIAS
-            FORMULA = list(map(str,addp.addpscale)) #ADDP FORM FOMULA
 
             start_time = time.time()
 
