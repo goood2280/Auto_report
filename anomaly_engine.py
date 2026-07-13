@@ -2774,6 +2774,14 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             if worst_disp_ratio >= 1.3 and worst_disp_w is not None:
                 disp_txt = f"#{worst_disp_w} 산포 {worst_disp_ratio:.1f}배"
 
+        # ── agg(trend_tkout_agg 집계 판정) 항목은 '산포(wafer 내부 분산)' 기준 주의를 띄우지 않는다 ──
+        #   agg 항목은 판정 자체가 집계값(P10/MEDIAN 등) 기준이라 raw 측정치의 wafer 내부 산포는
+        #   의미가 다르다(집계로 이미 대표값 1개로 축약됨). 산포배수·산포 코멘트를 여기서 무효화해
+        #   built-in WARNING(severity)·DISPERSION finding·산포 규칙(disp/disp_ratio atom)·순위/metrics
+        #   에서 모두 제외한다. spec-out(CRITICAL) 판정은 agg 집계값 기준으로 그대로 유지된다.
+        if it in _agg_item_set:
+            worst_disp_ratio, worst_disp_w, disp_txt = 0.0, None, ''
+
         # spec-out을 wafer별 pt개수로 그룹 + 순위지표(최고 wafer 비율/spec-out wafer 수) + PGM(pt)/zone
         specout_txt, n_out, specout_map = ('', 0, {})
         so_max_ratio, so_n_wafers = 0.0, 0
@@ -2862,6 +2870,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         _rep_rstd = (float(pd.Series(_rws).median()) if _rws else None)
         _rstd_ratio = (float(_rep_rstd / typ_wspread)
                        if (_rep_rstd is not None and typ_wspread) else 0.0)
+        # agg 항목은 robust 산포(rstd)도 '산포 기준'이므로 규칙(rstd/rstd_asc/desc)에서 제외
+        #   — disp와 동일 취지(위 worst_disp_ratio 무효화 참조). 배수 원자를 0/None으로.
+        if it in _agg_item_set:
+            _rep_rstd, _rstd_ratio = None, 0.0
         _item_ctx[it] = {
             'level': 2 if _sev == 'CRITICAL' else (1 if _sev == 'WARNING' else 0),
             'disp': float(worst_disp_ratio) if worst_disp_ratio else 0.0,
