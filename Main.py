@@ -991,6 +991,22 @@ def main():
                             log_to_file(f"{search_key}에서 HOL DATA가 측정되지 않아 Report 발행되지 않았습니다.", error_log)
                             continue
 
+                        # 이 step_id에서 측정된 게 PCHK(측정 신뢰성) 항목뿐이고 실제 device
+                        # 측정 item이 하나도 없으면 "측정 안 됨"으로 간주 → mail/report 미발행.
+                        #  · device item = REPORT ORDER 보유 ALIAS(columns_to_include_1) + ADDP 파생
+                        #    (derived_addp) 중 PCHK 계열(pchk_keep / 이름에 'PCHK')을 제외한 컬럼.
+                        #  · 판정 기준 = target lot의 이 step 행(search_key_rows)에 실측값 존재 여부.
+                        #    (empty_cols 판정과 동일 스코프 → 리포트 내용 항목과 일치)
+                        _pchk_col_set = set(pchk_keep)
+                        _device_item_cols = [c for c in (columns_to_include_1 + derived_addp)
+                                             if c in search_key_rows.columns
+                                             and c not in _pchk_col_set
+                                             and 'PCHK' not in str(c).upper()]
+                        if not any(search_key_rows[c].notna().any() for c in _device_item_cols):
+                            print(f"{search_key}에서 PCHK 항목만 측정되어 Report가 발행되지 않았습니다.")
+                            log_to_file(f"{search_key}에서 device 측정 item 없이 PCHK 항목만 측정되어 Report 발행되지 않았습니다.", error_log)
+                            continue
+
 
                         target_wafer_id_list = sorted(df['WAFER_ID'].unique().tolist())
                         print(f'[INFO] 대상 Wafer 목록: {target_wafer_id_list}')
@@ -1128,9 +1144,20 @@ def main():
                         code_findings = []
                         anomaly_item_stats = {}   # 항목별 통계 요약 — AI 해석 [항목 통계] 입력
                         anomaly_rule_trace = []   # 전체 anomaly rule 체크 결과(매칭/해당없음) — RUN/AI 저장·PPT 반영
+                        # anomaly 분석 입력을 '현재 step_id'로 한정 — 다른 step에서 측정된 항목의
+                        # 이상이 이 리포트(키=lot+step)의 finding/Anomaly 차트에 섞이지 않게 한다.
+                        #  (insert_plots는 이미 match_key(root+step)로 step을 스코프 → metrics_dict·
+                        #   Trend PNG는 step 한정. analyze_commonality만 lot 단위라 cross-step 이상이
+                        #   섞이던 문제. STEP_ID 값 == target_DC_step_id 는 search_key 매칭으로 보장.)
+                        _anom_df = merged_df
+                        _step_col = next((c for c in ('STEP_ID', 'step_id') if c in merged_df.columns), None)
+                        if _step_col is not None:
+                            _sd = merged_df[merged_df[_step_col].astype(str) == str(target_DC_step_id)]
+                            if not _sd.empty:
+                                _anom_df = _sd
                         try:
                             code_findings = analyze_commonality(
-                                merged_df, target_lot_id, metrics_dict, spec_data,
+                                _anom_df, target_lot_id, metrics_dict, spec_data,
                                 main_vehicle=vehicle, config=GLOBAL_CONFIG, reformatter=reformatter,
                                 knowledge_text=_ANOMALY_KNOWLEDGE_TEXT,
                                 item_stats_out=anomaly_item_stats,
