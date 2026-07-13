@@ -2152,4 +2152,27 @@ def main():
                         gc.collect()
 
             else:
-                print("[INFO] dc_done_l
+                print("[INFO] dc_done_list가 비어있습니다. Report 발행 대상 없음")
+
+        else:
+            print(f"[INFO] DB_Setting_mode = {DB_Setting_mode}, report_making = {report_making}")
+            print("[INFO] Report 미발행 모드")
+
+        conn.close()
+
+        # ── 규칙 제안 다이제스트(1일 1회) — 규칙 현황·불량모드 통계·미매칭 패턴 제안을
+        #    RUN/AI에 저장하고, 메일링 xlsx에 POWER_USER 시트가 있으면 발송(반영 전까지 매일 반복 제안).
+        try:
+            _maybe_send_rule_digest(_json_rules, _LLM_FN)
+        except Exception as _dge:
+            print(f"[WARN] 규칙 다이제스트 스킵 (오류): {_dge}")
+
+        shutdown_chart_pool()   # 병렬 렌더링 워커 풀 정리 (atexit에도 등록되어 있으나 명시 종료)
+        print(f'[INFO] ============== {vehicle} 전체 프로세스 완료 ==============')
+
+    else:
+        print("[ERROR] reformatter 검증 실패. 프로그램 종료.")
+
+
+if __name__ == "__main__":
+    main()
