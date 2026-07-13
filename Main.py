@@ -1652,7 +1652,9 @@ def main():
                         # 메일 클라이언트용 inline style (셀 구분선 + 가운데 정렬 + 줄바꿈 방지)
                         _IT_BD = 'border:1px solid #2c2c2c;'
                         _IT_CTR = 'text-align:center !important; white-space:nowrap;'   # 헤더 CSS(left) override + nowrap
-                        _IT_WAF = 'width:56px; min-width:56px; max-width:56px; padding:4px 6px;'
+                        # wafer 열: 고정 56px min-width(빈 여백 큼) 제거 → 셀이 내용(#번호/측정값)에 딱 맞게 줄어들고
+                        # 좌우 padding(=여백)만 숫자 ~1.5자(≈8px)씩 남겨 컴팩트하게. (auto-layout이라 긴 값은 알아서 확장)
+                        _IT_WAF = 'min-width:22px; padding:4px 8px;'
                         _IT_PAD = 'padding:4px 10px;'   # Module~LCL 열 좌우 여백(약 1.5자)
 
                         it_html = '<table class="inline-table" style="border-collapse:collapse; font-size:11px;">\n'
@@ -1922,7 +1924,7 @@ def main():
                                         except Exception:
                                             return target_w, round(target_w * 0.44)
 
-                                    _spec_rows, _warn_blocks = [], []
+                                    _spec_rows, _warn_items = [], []
                                     for item in top_item_names:
                                         safe_item = re.sub(r'[\\/:*?"<>|]', '_', str(item))
                                         img_path = f"RUN/TEMP/{safe_item}.png"
@@ -1933,7 +1935,9 @@ def main():
                                         _tw, _th = _img_px(img_path, 380)   # 포워딩용 고정 px(가로 380)
                                         _is_spec = metrics_dict.get(item, {}).get('spec_out_count', 0) > 0
                                         if not _is_spec:
-                                            _warn_blocks.append(_trend_block(item, False, img_b64, _tw, _th))
+                                            # 주의 항목은 블록 생성을 미룬다 — 이상 유무(=_spec_rows)에 따라
+                                            # 항목명 헤더를 붙일지 결정(요청: 이상 없이 주의만일 때 항목명 표기).
+                                            _warn_items.append((item, img_b64, _tw, _th))
                                             continue
                                         # 이상(SPEC OUT) — 우측에 spec-out WF MAP을 PIL로 1장 합성
                                         # Trend(좌) 1장 + WF MAP 합성(우) 1장 = 아이템당 img 태그 2개
@@ -2013,6 +2017,20 @@ def main():
                                             '<table cellpadding="0" cellspacing="0" style="border-collapse:collapse; border:none;">'
                                             f'<tr><td style="border:none; vertical-align:top; padding-right:12px;">{_trend_block(item, True, img_b64, _tw, _th)}</td>'
                                             f'<td style="border:none; vertical-align:top;">{_wf_block}</td></tr></table></div>')
+
+                                    # 주의 블록 조립 — 이상 항목이 하나도 없으면(주의만 있을 때) 각 주의
+                                    # 항목도 이상 항목처럼 '항목명 헤더'를 위에 붙여 무엇이 주의인지 식별 가능하게 한다.
+                                    _warn_named = not _spec_rows
+                                    _warn_blocks = []
+                                    for _wit, _wb64, _ww, _wh in _warn_items:
+                                        _blk = _trend_block(_wit, False, _wb64, _ww, _wh)
+                                        if _warn_named:
+                                            _warn_hdr = (
+                                                '<div style="font-size:13px; font-weight:bold; color:#1f4e79; '
+                                                'margin:2px 0 3px 2px; border-left:4px solid #f9a825; padding-left:7px;">'
+                                                f'{display_name(_wit)}</div>')
+                                            _blk = '<div>' + _warn_hdr + _blk + '</div>'
+                                        _warn_blocks.append(_blk)
 
                                     # '이상'/'주의' 탭 라벨은 표시하지 않는다. 각 차트 좌상단의
                                     # SPEC OUT / WARNING 스티커가 상태 식별 역할을 대신한다.

@@ -434,7 +434,7 @@ def _assemble_final_html(final_text, modes, rule_modes=None):
                 p += '.'
             paras.append(p)
         if not paras:   # rule_modes가 모두 빈 모드명 → 안내로 폴백
-            paras.append('지식 규칙(ANOMALY_KNOWLEDGE.md)에 매칭되는 불량 모드가 없어 <b>수동 검토가 필요</b>합니다.')
+            paras.append('불량모드 판정로직에 매칭된게 별도로 없습니다. <b>수동 검토 필요</b>합니다.')
     elif entry:
         p = f'<b style="color:#0000FF;">{_esc(entry["mode"])}</b>(이)가 추정됩니다'
         p += f' (근거: <b>{basis_txt}</b>).' if basis_txt else '.'
@@ -442,7 +442,7 @@ def _assemble_final_html(final_text, modes, rule_modes=None):
             p += f' <a href="{_html.escape(entry["link"], quote=True)}" target="_blank">관련 링크</a>'
         paras.append(p)
     else:
-        p = '지식 규칙(ANOMALY_KNOWLEDGE.md)에 매칭되는 불량 모드가 없어 <b>수동 검토가 필요</b>합니다'
+        p = '불량모드 판정로직에 매칭된게 별도로 없습니다. <b>수동 검토 필요</b>합니다'
         p += f' (이상 항목: <b>{basis_txt}</b>).' if basis_txt else '.'
         paras.append(p)
 
