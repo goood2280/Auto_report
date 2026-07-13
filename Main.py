@@ -2186,7 +2186,6 @@ def main():
                         # My_config.use_email_send 로 on/off. 생성된 HTML(html_content)은 본문으로,
                         # 첨부파일은 '저화질 PPT 1개만' 전송한다(HTML 파일 첨부 없음).
                         if getattr(GLOBAL_CONFIG, 'use_email_send', False):
-                            _mail_fh = None
                             try:
                                 html_code_final = html_content   # 생성된 HTML 코드 문자열
 
@@ -2202,55 +2201,64 @@ def main():
                                 print(f"[INFO] 메일 본문 인라인 이미지 {len(_imgs)}개 "
                                       f"(PNG {_png_n} · JPEG {_jpg_n}, 각 ≤{getattr(GLOBAL_CONFIG, 'html_inline_img_max_kb', 100)}KB)")
 
-                                # 수신 그룹(=메일링 xlsx의 시트명). config email_receiver가 리스트면 첫 항목 사용.
-                                email_receiver_now = (email_receiver[0]
-                                                      if isinstance(email_receiver, (list, tuple)) and email_receiver
-                                                      else email_receiver)
+                                # 수신 그룹(=메일링 xlsx의 시트명). config email_receiver가
+                                # 리스트면 리스트의 모든 그룹(시트)에 각각 발송한다.
+                                # (기존엔 email_receiver[0] 첫 항목에만 발송해 나머지 시트가 누락됐음)
+                                if isinstance(email_receiver, (list, tuple)):
+                                    _receiver_groups = [g for g in email_receiver if g]
+                                elif email_receiver:
+                                    _receiver_groups = [email_receiver]
+                                else:
+                                    _receiver_groups = []
+
                                 title = f'[HOL] {vehicle} {target_lot_id} {target_step_merged} HOL AUTO REPORT'
 
-                                email_list = get_email_list(email_list_path, email_receiver_now)
-
-                                payload_content = {
-                                    "content": f'{html_code_final}',
-                                    "receiverList": email_list,
-                                    "senderMailAddress": f"{KNOXID}@samsung.com",
-                                    "statusCode": "SENT",
-                                    "title": f'{title}',
-                                }
-                                payload = {'mailSendString': f'{payload_content}'}
-
-                                # 첨부파일은 PPT 1개만 (HTML은 본문 전용 — 파일 첨부하지 않음)
+                                # 첨부파일은 PPT 1개만 (HTML은 본문 전용 — 파일 첨부하지 않음).
+                                # 여러 그룹에 반복 발송하므로 바이트를 한 번만 읽어 재사용한다.
                                 _ppt_full = os.path.join(low_qual_ppt_save_path, final_ppt_file_name_DX)
-                                _mail_fh = open(_ppt_full, 'rb')
-                                files = [
-                                    ('file', (final_ppt_file_name_DX, _mail_fh, 'application/vnd.ms-powerpoint'))
-                                ]
+                                with open(_ppt_full, 'rb') as _pf:
+                                    _ppt_bytes = _pf.read()
                                 headers = {'x-dep-ticket': GLOBAL_CONFIG.get("TICKET")}
 
-                                response = requests.request(
-                                    "POST", GLOBAL_CONFIG.get("url"),
-                                    headers=headers, data=payload, files=files)
-                                _sc = getattr(response, 'status_code', None)
-                                if _sc == 200:
-                                    print_status("메일 발송", "ok",
-                                                 f"{target_lot_id}_{target_DC_step} 완료 (수신 {len(email_list)}명, HTTP {_sc})")
-                                else:
-                                    # 200이 아니면 상세 에러 내용을 터미널에 출력
-                                    try:
-                                        _body = response.text
-                                    except Exception:
-                                        _body = '(응답 본문 읽기 실패)'
-                                    print_status("메일 발송", "fail",
-                                                 f"{target_lot_id}_{target_DC_step} — HTTP {_sc}")
-                                    print(f"[ERROR] 메일 발송 응답 오류 (HTTP {_sc}) 상세: {_body}")
+                                if not _receiver_groups:
+                                    print_status("메일 발송", "off",
+                                                 f"{target_lot_id}_{target_DC_step} — email_receiver 비어있음 → 발송 대상 없음")
+
+                                for email_receiver_now in _receiver_groups:
+                                    email_list = get_email_list(email_list_path, email_receiver_now)
+
+                                    payload_content = {
+                                        "content": f'{html_code_final}',
+                                        "receiverList": email_list,
+                                        "senderMailAddress": f"{KNOXID}@samsung.com",
+                                        "statusCode": "SENT",
+                                        "title": f'{title}',
+                                    }
+                                    payload = {'mailSendString': f'{payload_content}'}
+                                    files = [
+                                        ('file', (final_ppt_file_name_DX, _ppt_bytes,
+                                                  'application/vnd.ms-powerpoint'))
+                                    ]
+
+                                    response = requests.request(
+                                        "POST", GLOBAL_CONFIG.get("url"),
+                                        headers=headers, data=payload, files=files)
+                                    _sc = getattr(response, 'status_code', None)
+                                    if _sc == 200:
+                                        print_status("메일 발송", "ok",
+                                                     f"{target_lot_id}_{target_DC_step} [{email_receiver_now}] "
+                                                     f"완료 (수신 {len(email_list)}명, HTTP {_sc})")
+                                    else:
+                                        # 200이 아니면 상세 에러 내용을 터미널에 출력
+                                        try:
+                                            _body = response.text
+                                        except Exception:
+                                            _body = '(응답 본문 읽기 실패)'
+                                        print_status("메일 발송", "fail",
+                                                     f"{target_lot_id}_{target_DC_step} [{email_receiver_now}] — HTTP {_sc}")
+                                        print(f"[ERROR] 메일 발송 응답 오류 (HTTP {_sc}) 상세: {_body}")
                             except Exception as _me:
                                 print_status("메일 발송", "fail", f"{target_lot_id}_{target_DC_step}: {_me}")
-                            finally:
-                                try:
-                                    if _mail_fh is not None:
-                                        _mail_fh.close()
-                                except Exception:
-                                    pass
                         else:
                             print_status("메일 발송", "off", "use_email_send=False → 스킵")
 
