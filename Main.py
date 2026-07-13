@@ -45,6 +45,12 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 warnings.filterwarnings("ignore", message=".*Conditional Formatting extension is not supported.*")
 warnings.filterwarnings("ignore", message=".*extension is not supported and will be removed.*")
+# matplotlib: 기본 폰트(DejaVu Sans)가 U+2212(minus sign) 등 일부 글리프를 못 그릴 때 나오는
+#   "Glyph ... missing from font(s)" 경고 억제. (warn_on_missing_glyph → warnings.warn(UserWarning))
+#   각 차트 함수에서 axes.unicode_minus=False를 이미 설정하지만, 렌더 텍스트에 실제 U+2212가 섞이면
+#   경고가 계속 나므로 메시지 패턴으로 무음 처리. Windows spawn 워커는 __main__(Main)을 재import하므로
+#   이 필터가 렌더링 워커 프로세스에도 그대로 적용된다.
+warnings.filterwarnings("ignore", message=".*Glyph.*")
 
 
 # ==================================================================================================================================
