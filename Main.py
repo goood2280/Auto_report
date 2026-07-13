@@ -981,6 +981,18 @@ def main():
                         df = merged_df[merged_df['match_key'] == match_key].copy()
 
                         search_key_rows = df[df['search_key'] == search_key]
+
+                        # 이 step_id에 target lot의 실제 측정 행이 있어야만 발행한다.
+                        # search_key = fab_lot_id + step_id. lot_id만 match_key(root+step)로
+                        # 잡히고(형제 lot이 이 step을 측정) 정작 target lot 자신은 이 step에
+                        # 측정 데이터가 없으면 — lot_id만 매칭된 것이므로 — 리포트/메일을 만들지 않는다.
+                        # (empty_cols→df.drop 경유 df.empty로도 걸러지지만, 여기서 명시적으로
+                        #  '측정 데이터 없음'을 정확한 메시지로 조기 skip한다.)
+                        if search_key_rows.empty:
+                            print(f"{search_key}에 해당 step 측정 데이터가 없어 Report가 발행되지 않았습니다.")
+                            log_to_file(f"{search_key}에서 해당 step_id에 측정 데이터가 없어(lot_id만 매칭) Report 발행되지 않았습니다.", error_log)
+                            continue
+
                         df['WAFER_ID'] = df['WAFER_ID'].astype(int)
                         empty_cols = search_key_rows.columns[search_key_rows.isna().all()]
 

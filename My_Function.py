@@ -2129,16 +2129,21 @@ _atexit.register(shutdown_chart_pool)
 
 
 def _select_target_lot_frame(frame, target_lot_id, target_root_lot_id, target_DC_step_id):
-    """대상 lot 선택: match_key(root+step) → fab_lot_id 정확일치 → root prefix 순.
+    """대상 lot 선택: match_key(root+step) 우선. match_key를 쓸 수 없을 때만 fab_lot_id.
 
     (insert_plots 내부 closure였던 _select_target_lot을 워커에서도 쓰도록 모듈화.
      리포트 단위 = root_lot_id + step. 같은 root의 형제 lot_id를 모두 포함한다.)
+
+    ⚠️ step 엄격 매칭: match_key(root+step)를 쓸 수 있으면 그 결과를 '그대로'(0행이어도)
+    반환한다. 0행이면 이 항목/데이터는 해당 step에서 측정되지 않은 것 → 다른 step의
+    데이터로 fallback하지 않는다. (예전엔 0행이면 fab_lot_id 전체 step으로 fallback해,
+    이 step에 측정값이 없는 item이 lot_id만 맞아 차트/통계/metrics에 섞였다.)
+    fab_lot_id fallback은 match_key 컬럼이 없거나 root/step 정보가 없는 경우(단독 테스트
+    등)에만 쓴다.
     """
     if 'match_key' in frame.columns and target_root_lot_id and target_DC_step_id:
         mk = f"{target_root_lot_id}_{target_DC_step_id}"
-        sel = frame[frame['match_key'].astype(str) == mk]
-        if len(sel) > 0:
-            return sel
+        return frame[frame['match_key'].astype(str) == mk]
     if 'fab_lot_id' not in frame.columns:
         return frame
     flid = frame['fab_lot_id'].astype(str)
