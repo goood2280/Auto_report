@@ -142,12 +142,13 @@ def _slide_title(slide):
     return ""
 
 
-def _save_rule_check_log(ai_dir, lot_id, dc_step, rule_trace, findings):
+def _save_rule_check_log(ai_dir, lot_id, step_id, rule_trace, findings):
     """전체 anomaly rule 체크 결과를 RUN/AI 폴더에 파일로 저장.
 
     모든 [RULE] 규칙(체이닝/산포억제/산포비교)을 순회한 매칭/해당없음 전량을 기록하고,
     사람이 읽는 .txt(요약+표)와 기계용 .json(rule_trace 원본) 2개를 남긴다.
-    파일명: anomaly_rule_check_{lot}_{step}.(txt|json)  (AI 인풋 폴더 = 사이클 정리 대상 아님).
+    파일명: anomaly_rule_check_{lot}_{step_id}.(txt|json) — 리포트 키({lot}_{step_id},
+    원본 step_id 기준)와 동일 체계. (AI 인풋 폴더 = 사이클 정리 대상 아님)
     """
     import json as _json
     try:
@@ -155,7 +156,7 @@ def _save_rule_check_log(ai_dir, lot_id, dc_step, rule_trace, findings):
     except Exception:
         pass
     _safe = lambda s: re.sub(r'[^0-9A-Za-z가-힣._-]+', '_', str(s or 'NA'))
-    base = f"anomaly_rule_check_{_safe(lot_id)}_{_safe(dc_step)}"
+    base = f"anomaly_rule_check_{_safe(lot_id)}_{_safe(step_id)}"
     trace = rule_trace or []
     n_all = len(trace)
     n_hit = sum(1 for t in trace if t.get('matched'))
@@ -163,7 +164,7 @@ def _save_rule_check_log(ai_dir, lot_id, dc_step, rule_trace, findings):
 
     lines = []
     lines.append("=" * 78)
-    lines.append(f"Anomaly Rule Check 결과  (LOT={lot_id}  STEP={dc_step})")
+    lines.append(f"Anomaly Rule Check 결과  (LOT={lot_id}  STEP_ID={step_id})")
     lines.append(f"생성시각: {ts}")
     lines.append(f"전체 규칙 {n_all}개 체크 — 매칭 {n_hit}건 / 해당없음 {n_all - n_hit}건")
     lines.append("=" * 78)
@@ -203,13 +204,106 @@ def _save_rule_check_log(ai_dir, lot_id, dc_step, rule_trace, findings):
     with open(txt_path, 'w', encoding='utf-8') as fh:
         fh.write("\n".join(lines) + "\n")
     with open(json_path, 'w', encoding='utf-8') as jf:
-        _json.dump({'lot_id': lot_id, 'dc_step': dc_step, 'generated': ts,
+        _json.dump({'lot_id': lot_id, 'step_id': step_id, 'generated': ts,
                     'n_rules': n_all, 'n_matched': n_hit, 'rule_trace': trace,
                     'findings': [{'severity': f.get('severity'), 'type': f.get('type'),
                                   'title': f.get('title'), 'item': f.get('item')}
                                  for f in (findings or [])]},
                    jf, ensure_ascii=False, indent=2)
     print(f"[RULE CHECK] 결과 저장: RUN/AI/{base}.txt (+.json) — 규칙 {n_all}개(매칭 {n_hit})")
+
+
+def _save_archive_snapshot(report_key, meta, findings, item_stats, rule_trace,
+                           target_rows=None, index_items=None):
+    """발행 스냅샷을 RUN/ARCHIVE/<report_key>/에 저장 — 규칙 제안 다이제스트·확정 사례 아카이브 입력.
+
+    - summary.json        : 발행 메타(generated_at 포함) + findings + item_stats + rule_trace.
+    - target_rows.parquet : target lot 측정 rows 중 '발행 당시 REPORT ORDER index' 컬럼만(+좌표 메타)
+                            — 이후 reformatter/ADDP가 바뀌어도 당시 값이 고정 보존.
+    스냅샷은 부가 산출물: 읽는 기능은 파일이 지워져 있어도 동작해야 하고, 저장 실패도
+    리포트 발행에 영향을 주지 않는다(호출부 try/except).
+    """
+    import json as _json
+    _dir = os.path.join('RUN', 'ARCHIVE', re.sub(r'[^0-9A-Za-z가-힣._-]+', '_', str(report_key)))
+    os.makedirs(_dir, exist_ok=True)
+    with open(os.path.join(_dir, 'summary.json'), 'w', encoding='utf-8') as f:
+        _json.dump({**meta, 'findings': findings, 'item_stats': item_stats,
+                    'rule_trace': rule_trace}, f, ensure_ascii=False, indent=2, default=str)
+    n_rows = 0
+    if target_rows is not None and len(target_rows) > 0 and index_items:
+        _meta_cols = [c for c in ('FAB_LOT_ID', 'WAFER_ID', 'CHIP_X_ADJ', 'CHIP_Y_ADJ',
+                                  'TKOUT_TIME', 'PGM(pt)') if c in target_rows.columns]
+        _item_cols = [c for c in target_rows.columns if c in set(index_items)]
+        if _item_cols:
+            _snap = target_rows[_meta_cols + _item_cols]
+            _snap.to_parquet(os.path.join(_dir, 'target_rows.parquet'), index=False)
+            n_rows = len(_snap)
+    print(f"[archive] 발행 스냅샷 저장: {_dir} (summary.json + rows {n_rows})")
+
+
+def _maybe_send_rule_digest(json_rules, llm_fn, force=False):
+    """규칙 제안 다이제스트를 1일 1회 생성/발송 — POWER_USER 대상, 승인 여부와 무관하게 매일 반복 제안.
+
+    - 생성: anomaly_engine.build_rule_digest(RUN/ARCHIVE 집계) → RUN/AI/rule_digest_<날짜>.txt 저장.
+    - 발송: 메일링 xlsx에 'POWER_USER' 시트가 있고 use_email_send=True일 때만
+      (시트 존재를 직접 확인 — get_email_list의 기본 그룹 fallback으로 전체 오발송하지 않도록).
+    - 상태: RUN/AI/rule_digest_state.json(last_sent)으로 1일 1회 보장(force=True는 재발송).
+    스냅샷/규칙/수신처가 없어도 파일 저장까지는 정상 동작. 예외는 호출부에서 무시(발행 무영향).
+    """
+    import json as _json
+    import html as _html
+    from anomaly_engine import build_rule_digest
+    if not getattr(GLOBAL_CONFIG, 'rule_digest_enabled', False):
+        return
+    _ai_dir = os.path.join('RUN', 'AI')
+    os.makedirs(_ai_dir, exist_ok=True)
+    _state_p = os.path.join(_ai_dir, 'rule_digest_state.json')
+    _today = datetime.now().strftime('%Y-%m-%d')
+    if not force:
+        try:
+            with open(_state_p, encoding='utf-8') as f:
+                if _json.load(f).get('last_sent') == _today:
+                    return
+        except Exception:
+            pass   # 상태 파일 없음/손상 → 오늘 미발송으로 간주
+    d = build_rule_digest(json_rules=json_rules, llm_fn=llm_fn,
+                          window_days=getattr(GLOBAL_CONFIG, 'rule_digest_window_days', 14),
+                          min_repeat=getattr(GLOBAL_CONFIG, 'rule_digest_min_repeat', 3))
+    _out = os.path.join(_ai_dir, f"rule_digest_{_today.replace('-', '')}.txt")
+    with open(_out, 'w', encoding='utf-8') as f:
+        f.write(d['text'])
+    print(f"[digest] 규칙 다이제스트 저장: {_out} (리포트 {d['n_reports']}건 집계 · "
+          f"규칙 {d['n_rules']}개 · 제안 {d['n_proposals']}건 · 좌표재발 {d.get('n_coord', 0)}건)")
+    _sent_note = ''
+    try:
+        _elp = GLOBAL_CONFIG.get('email_list_path')
+        if not getattr(GLOBAL_CONFIG, 'use_email_send', False):
+            _sent_note = 'use_email_send=False → 파일만 저장'
+        elif not (_elp and os.path.exists(_elp) and 'POWER_USER' in pd.ExcelFile(_elp).sheet_names):
+            _sent_note = '메일링 xlsx에 POWER_USER 시트 없음 → 파일만 저장'
+        else:
+            _rcv = get_email_list(_elp, 'POWER_USER')
+            _payload_content = {
+                'content': ('<pre style="font-family:Consolas,Menlo,monospace; font-size:13px;">'
+                            + _html.escape(d['text']) + '</pre>'),
+                'receiverList': _rcv,
+                'senderMailAddress': f"{GLOBAL_CONFIG.get('KNOXID')}@samsung.com",
+                'statusCode': 'SENT',
+                'title': (f"[HOL] 규칙 제안 다이제스트 {_today} "
+                          f"(리포트 {d['n_reports']}건 · 제안 {d['n_proposals']}건)"),
+            }
+            _resp = requests.request('POST', GLOBAL_CONFIG.get('url'),
+                                     headers={'x-dep-ticket': GLOBAL_CONFIG.get('TICKET')},
+                                     data={'mailSendString': f'{_payload_content}'})
+            _sc = getattr(_resp, 'status_code', None)
+            _sent_note = f"POWER_USER {len(_rcv)}명 발송(HTTP {_sc})"
+            if _sc != 200:
+                print(f"[ERROR] 다이제스트 발송 응답 오류 (HTTP {_sc}) 상세: {getattr(_resp, 'text', '')}")
+    except Exception as _me:
+        _sent_note = f'발송 실패: {_me}'
+    print(f"[digest] {_sent_note}")
+    with open(_state_p, 'w', encoding='utf-8') as f:
+        _json.dump({'last_sent': _today, 'note': _sent_note}, f, ensure_ascii=False)
 
 
 def _move_aggregation_after_scoreboard(prs):
@@ -325,6 +419,25 @@ def main():
     #   python Main.py --convert-nl-rules      : 변환 결과(자연어→when) 미리보기 + 매핑 캐시 갱신(발행/MD 변경 없음)
     #   python Main.py --convert-nl-rules-md   : 변환해서 '바로' MD의 ANOMALY_RULES에 [RULE]로 적용(확인 없음)
     #   AI(GPT OSS 120B) 연결 시 AI 변환, 미연결 시 키워드 fallback. 같은 문구는 캐시로 항상 같은 코드.
+    # ── CLI: 규칙 제안 다이제스트 미리보기 (리포트 발행과 별개, 상태 파일/메일 발송 없음) ──
+    #   RUN/ARCHIVE 스냅샷을 집계해 터미널에 출력. 실제 저장/발송은 발행 루프 말미에 1일 1회 자동.
+    if raw_arg == '--rule-digest':
+        from anomaly_engine import build_rule_digest
+        _llm = _gpt_chat if (GPT_CONNECT and gpt_client is not None) else None
+        _kp = GLOBAL_CONFIG.get("anomaly_knowledge_path")
+        _kt = ''
+        if _kp and os.path.exists(_kp):
+            with open(_kp, encoding='utf-8') as _kf:
+                _kt = _kf.read()
+        _rules = compile_nl_to_json(_kt, _llm, cache_dir=os.path.join('RUN', 'AI')) if _kt else []
+        _d = build_rule_digest(json_rules=_rules, llm_fn=_llm,
+                               window_days=getattr(GLOBAL_CONFIG, 'rule_digest_window_days', 14),
+                               min_repeat=getattr(GLOBAL_CONFIG, 'rule_digest_min_repeat', 3))
+        # 콘솔 인코딩(cp949 등)에 없는 문자는 ?로 치환해 출력(통합 print 훅 설치 전 단계)
+        _enc = getattr(sys.stdout, 'encoding', None) or 'utf-8'
+        print(_d['text'].encode(_enc, errors='replace').decode(_enc))
+        sys.exit(0)
+
     if raw_arg in ('--convert-nl-rules', '--convert-nl-rules-md'):
         from anomaly_engine import preview_nl_rules, apply_nl_rules_to_md
 
@@ -858,6 +971,9 @@ def main():
                         target_step_merged = target_DC_step + "(" + target_DC_step_id + ")" #{DC_step_id}({DC_step})
 
                         match_key = target_root_lot_id + "_" + target_DC_step_id #match_key = {root_lot_id}_{DC_step_id}
+                        # 리포트 키 = {fab_lot_id}_{step_id}(원본 키) — anomaly_basis/ai_input/
+                        # rule_check/ARCHIVE 산출물 파일명이 전부 이 키를 공유(step별 덮어쓰기 방지)
+                        report_key = f"{target_lot_id}_{target_DC_step_id}"
 
                         # print('***** fab_lot_id + step_id : ', search_key)
                         # print('***** root_lot_id + step_id : ', match_key)
@@ -933,11 +1049,15 @@ def main():
                         # print('wf_matching_list : ',wf_matching_list)
 
                         # VIP_group_raw 생성
-                        selected_columns = ['WAFER_ID'] + [col for col in df.columns if 'pass' in col]
+                        selected_columns = ['WAFER_ID'] + [col for col in df.columns if col.startswith('pass_rate_')]
                         pivot_group = df[selected_columns]
                         pivot_group = pivot_group.groupby('WAFER_ID').mean()*100
                         pivot_group = pivot_group.T
                         VIP_group_raw = pd.merge(pivot_group, reformatter[['REPORT ORDER','PPT_ONLY']], right_index=True, left_index=True, how='right').sort_values('REPORT ORDER').dropna(subset=['REPORT ORDER'])
+                        # RIGHT join으로 reformatter 전체 항목이 들어오므로, 실제 pass_rate 컬럼이
+                        # df에 존재하는(=측정 데이터가 있는) 항목만 유지 — 미측정 항목 제거
+                        _existing_pr = {c for c in df.columns if c.startswith('pass_rate_')}
+                        VIP_group_raw = VIP_group_raw[VIP_group_raw.index.isin(_existing_pr)]
                         VIP_group = VIP_group_raw.drop(['REPORT ORDER', 'PPT_ONLY'], axis=1, errors='ignore').dropna(how='all')
                         # PPT_ONLY=True 항목은 HTML score board에서 제외(PPT에만 표시).
                         # 값이 bool/1.0/"True"/"1"/"Y" 등 어떤 형태여도 truthy로 인식하도록 처리.
@@ -958,7 +1078,7 @@ def main():
                         VIP_group.index = VIP_group.index.str.replace('pass_rate_', '')
 
                         # PPT Score Board용 (lot, wafer) 분리 pivot — VIP_group과 같은 행순서, 컬럼만 lot별 분리
-                        _sb_pass = [c for c in df.columns if 'pass' in c]
+                        _sb_pass = [c for c in df.columns if c.startswith('pass_rate_')]
                         _sb_lw = (df[['FAB_LOT_ID', 'WAFER_ID'] + _sb_pass]
                                   .groupby(['FAB_LOT_ID', 'WAFER_ID']).mean() * 100).T
                         _sb_lw.index = _sb_lw.index.str.replace('pass_rate_', '')
@@ -1015,16 +1135,34 @@ def main():
                                 knowledge_text=_ANOMALY_KNOWLEDGE_TEXT,
                                 item_stats_out=anomaly_item_stats,
                                 rule_trace_out=anomaly_rule_trace,
-                                json_rules=(_json_rules if _ai_on else None))
+                                json_rules=(_json_rules if _ai_on else None),
+                                report_key=report_key)
                             print(f"[INFO] commonality 분석: {len(code_findings)}건 finding")
                         except Exception as ce:
                             print(f"[WARN] commonality 분석 스킵 (오류): {ce}")
                         # 전체 anomaly rule 체크 결과를 RUN/AI 폴더에 파일로 저장(매칭·해당없음 전량 기록)
                         try:
-                            _save_rule_check_log(_ai_dir, target_lot_id, target_DC_step,
+                            _save_rule_check_log(_ai_dir, target_lot_id, target_DC_step_id,
                                                  anomaly_rule_trace, code_findings)
                         except Exception as _rce:
                             print(f"[WARN] rule 체크 결과 저장 스킵 (오류): {_rce}")
+                        # 발행 스냅샷(RUN/ARCHIVE/<key>/) — 규칙 제안 다이제스트·사례 아카이브 입력.
+                        #   부가 산출물: 지워지거나 없어도 리포트 발행/판정에 영향 없음(저장 실패도 무시).
+                        if getattr(GLOBAL_CONFIG, 'use_archive_snapshot', True):
+                            try:
+                                _save_archive_snapshot(
+                                    report_key,
+                                    {'report_key': report_key, 'target_lot_id': target_lot_id,
+                                     'step_id': target_DC_step_id, 'dc_step': target_DC_step,
+                                     'vehicle': vehicle, 'wafers': target_wafer_id_list,
+                                     'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')},
+                                    code_findings, anomaly_item_stats, anomaly_rule_trace,
+                                    target_rows=search_key_rows,
+                                    # 당시 index = REPORT ORDER 보유 항목 그대로(사내 reformatter는
+                                    # PCHK_LKG/PCHK_RES에도 REPORT ORDER가 있어 자연히 포함됨)
+                                    index_items=list(spec_data.index))
+                            except Exception as _ase:
+                                print(f"[WARN] 발행 스냅샷 저장 스킵 (오류): {_ase}")
                         # Score Board 바로 뒤에 'Anomaly 상세(통계)' 페이지 삽입
                         try:
                             _sb_pages = (len(VIP_group) - 1) // 30 + 1
@@ -1146,7 +1284,7 @@ def main():
                         # HTML 생성부분 - Mail body
                         # ===== Score Board 컬럼을 (FAB_LOT_ID, WAFER_ID)로 구성 =====
                         # 같은 root_lot_id의 형제 lot을 wafer 평균으로 합치지 않고 lot별로 분리 표시.
-                        _pass_cols = [c for c in df.columns if 'pass' in c]
+                        _pass_cols = [c for c in df.columns if c.startswith('pass_rate_')]
                         _pivot_lw = (df[['FAB_LOT_ID', 'WAFER_ID'] + _pass_cols]
                                      .groupby(['FAB_LOT_ID', 'WAFER_ID']).mean() * 100).T
                         _pivot_lw.index = _pivot_lw.index.str.replace('pass_rate_', '')
@@ -1184,8 +1322,13 @@ def main():
                         VIP_group_HTML.index.names = ['category', 'Item']
                         print("score board lots :", _lots_sorted)
 
-                        # 측정값이 전혀 없는 행만 제거(형제 lot 일부 미측정 셀은 회색으로 표기)
-                        VIP_group_HTML = VIP_group_HTML.dropna(how='all')
+                        # 측정값이 전혀 없는 행 제거 — PPT와 동일하게 lot-wafer reindex 후에도
+                        # 첫 번째 dropna(VIP_group_HTML 초기 생성 시)를 통과한 항목은 유지.
+                        # _existing_pr 필터(VIP_group_raw 생성 직후)로 미측정 항목은 이미 제거됨.
+                        # 여기서 다시 dropna 하면 lot-wafer 분리 시 일부 lot에만 데이터가 있는
+                        # 항목이 잘못 제거되어 "HTML에 2개만 표시"되는 버그 발생.
+                        # (NaN 셀은 HTML 렌더러가 회색으로 표기 — line 1440 참조)
+                        # VIP_group_HTML = VIP_group_HTML.dropna(how='all')  # 제거: PPT와 일관성 유지
 
                         # ==================== Score Board HTML 렌더링 (Manual) ====================
                         # Pandas의 to_html()이 만드는 불안정한 멀티인덱스 태그를 방지하기 위해 HTML 태그를 한 땀 한 땀 생성
@@ -1838,7 +1981,8 @@ def main():
                                 ai_html = interpret_with_ai(
                                     code_findings, metrics_dict, _ANOMALY_KNOWLEDGE_TEXT,
                                     _LLM_FN, config=GLOBAL_CONFIG, target_lot_id=target_lot_id,
-                                    item_stats=anomaly_item_stats, defect_modes=_defect_modes)
+                                    item_stats=anomaly_item_stats, defect_modes=_defect_modes,
+                                    report_key=report_key)
                                 print("[INFO] AI 다단계 해석 적용" if ai_html else "[INFO] AI 다단계 해석 결과 없음")
                             except Exception as ae:
                                 print(f"[WARN] AI 다단계 해석 스킵 (오류): {ae}")
@@ -2008,19 +2152,4 @@ def main():
                         gc.collect()
 
             else:
-                print("[INFO] dc_done_list가 비어있습니다. Report 발행 대상 없음")
-
-        else:
-            print(f"[INFO] DB_Setting_mode = {DB_Setting_mode}, report_making = {report_making}")
-            print("[INFO] Report 미발행 모드")
-
-        conn.close()
-        shutdown_chart_pool()   # 병렬 렌더링 워커 풀 정리 (atexit에도 등록되어 있으나 명시 종료)
-        print(f'[INFO] ============== {vehicle} 전체 프로세스 완료 ==============')
-
-    else:
-        print("[ERROR] reformatter 검증 실패. 프로그램 종료.")
-
-
-if __name__ == "__main__":
-    main()
+                print("[INFO] dc_done_l

@@ -146,7 +146,7 @@ def _convert_name(x, prefixes=None, suffixes=None, repl=None):
 #   - anomaly_pattern_rules 가 None/빈 리스트면 **특이맵(공간 패턴) 판정을 아예 하지 않는다**
 #     (spec_out_pattern 라벨 미생성). 전역 옵션은 anomaly_pattern_thresholds(dict).
 #   - 어떤 규칙이 어떤 값으로 평가·통과했는지는 stats['rules'] trace로 남는다
-#     (anomaly_basis_<lot>.json의 spec_out_pattern_stats — "왜 이 특이맵인지" 근거).
+#     (anomaly_basis_<lot>_<step_id>.json의 spec_out_pattern_stats — "왜 이 특이맵인지" 근거).
 #   - 판정식 상세·규칙 type별 파라미터는 README '특이맵(공간 패턴) 판정 기준' 참조.
 # ──────────────────────────────────────────────────────────────────────
 _PATTERN_OPT_DEFAULT = {
@@ -1898,10 +1898,200 @@ def _mark_nl_converted(md, mappings):
     return md[:s] + seg + md[e:]
 
 
+def build_rule_digest(json_rules=None, llm_fn=None, archive_dir=None,
+                      window_days=14, min_repeat=3):
+    """RUN/ARCHIVE 발행 스냅샷을 집계해 POWER_USER용 '규칙 현황 + 제안' 다이제스트 텍스트 생성.
+
+    구성(집계·패턴·제안 문장 전부 코드 결정론 — LLM은 [4] 총평 한 단락만, 미연결 시 생략):
+      [1] 규칙 현황            : 설정된 [RULE]별 최근 N일 매칭 건수/리포트 (rule_trace 집계)
+      [2] 불량 모드 매칭 통계   : DEFECT_MODE finding의 모드별 건수 + 발생 리포트
+      [3] 미매칭 반복 패턴/제안 : CRITICAL spec-out '항목 조합(시그니처)'이 min_repeat개 리포트에서
+                                반복되는데 기존 규칙이 미커버 → 복붙용 [RULE] 자연어 후보(템플릿 생성
+                                — 모드명은 "OOO(모드명 기입)" 플레이스홀더, 명명은 사람 몫)
+      [4] 좌표 재발 확인 요청   : 같은 index의 '동일 chip 좌표' spec-out이 min_repeat개 리포트에서
+                                반복(findings의 spec_out_positions 집계 — 특이맵 판정 OFF여도 동작).
+                                불량 모드와 연결되지 않아도 '확인 요청' 안내로만 발송(룰 판정과 별개
+                                — 레티클/프로브핀/척 등 systematic 원인 후보 인사이트).
+    승인 여부와 무관하게 매일 반복 제안된다(반영되면 [1] 매칭 통계로 자연 이동).
+    스냅샷 폴더가 없거나 비어 있어도 빈 다이제스트로 정상 동작(부가 기능 — 발행 무영향).
+    반환 {'text', 'n_reports', 'n_rules', 'n_proposals', 'n_coord'}.
+    """
+    import os, json, glob, re as _re
+    from datetime import datetime, timedelta
+    from collections import defaultdict
+
+    archive_dir = archive_dir or os.path.join('RUN', 'ARCHIVE')
+    cutoff = datetime.now() - timedelta(days=float(window_days))
+    summaries = []
+    for p in sorted(glob.glob(os.path.join(archive_dir, '*', 'summary.json'))):
+        try:
+            # 성능 가드: 아카이브가 수년치로 쌓여도 느려지지 않도록, 윈도우 밖(파일 수정시각
+            # 기준 +1일 여유)의 스냅샷은 파일을 열지 않고 건너뛴다(1일 1회 실행이지만 IO 최소화).
+            if os.path.getmtime(p) < (cutoff - timedelta(days=1)).timestamp():
+                continue
+            with open(p, encoding='utf-8') as f:
+                s = json.load(f)
+            ts = datetime.strptime(str(s.get('generated_at', '')), '%Y-%m-%d %H:%M:%S')
+            if ts >= cutoff:
+                s['_ts'] = ts
+                summaries.append(s)
+        except Exception:
+            continue   # 손상/구버전 스냅샷은 무시(삭제돼도 무영향 원칙)
+
+    def _key(s):
+        return s.get('report_key', '?')
+
+    # [1] 규칙 현황 — rule_trace의 JSON_RULE 항목을 라벨(판정명)별 집계
+    rule_hits = defaultdict(list)     # label -> [report_key, ...]
+    for s in summaries:
+        for t in s.get('rule_trace', []):
+            if t.get('kind') == 'JSON_RULE' and t.get('matched'):
+                lbl = _re.sub(r'^JSON#\d+\s*', '', str(t.get('name', ''))).strip() or '(이름 없음)'
+                rule_hits[lbl].append(_key(s))
+    rule_labels = [str(r.get('comment') or '').strip() or f"(판정명 없음 #{i+1})"
+                   for i, r in enumerate(json_rules or [])]
+
+    # [2] 불량 모드 통계 + 측정이상 신호
+    mode_hits = defaultdict(list)
+    n_meas = 0
+    for s in summaries:
+        _modes = set()
+        _has_meas = False
+        for f in s.get('findings', []):
+            if f.get('type') == 'DEFECT_MODE':
+                _modes.add(str(f.get('title', '')).replace('[불량 모드]', '').strip())
+            if f.get('type') == 'MEAS_SUSPECT' or (f.get('is_pchk') and f.get('meas_overlap_shot_count', 0)):
+                _has_meas = True
+        for m in _modes:
+            mode_hits[m].append(_key(s))
+        n_meas += 1 if _has_meas else 0
+
+    # [3] 미매칭 반복 패턴 — '항목 집합을 모두 포함하는 리포트 수(지지도)' 기준(부분집합 허용).
+    #   pair에서 출발해 지지도 ≥ min_repeat가 유지되는 한 항목을 추가(greedy 확장)해 최대 조합으로
+    #   승격하고, 조합에 못 들어간 단독 반복 항목은 단독 제안. 기존 규칙이 커버하는 집합은 제외.
+    from itertools import combinations
+    crit_sets = []   # [(report_key, {CRITICAL spec-out 표시명 집합}), ...]
+    for s in summaries:
+        crit = {str(f.get('display_name') or f.get('item') or '')
+                for f in s.get('findings', [])
+                if f.get('type') == 'SPEC_OUT' and f.get('severity') == 'CRITICAL'} - {''}
+        if crit:
+            crit_sets.append((_key(s), crit))
+
+    def _support(items):
+        return [k for k, cs in crit_sets if items <= cs]
+
+    _all_items = sorted({i for _, cs in crit_sets for i in cs})
+    _rule_item_sets = [{str(x).lower() for x in (r.get('items') or [])} for r in (json_rules or [])]
+
+    def _covered(items):
+        _low = {str(x).lower() for x in items}
+        return any(_low <= rs for rs in _rule_item_sets)
+
+    proposals = []   # (제안 문장, 근거줄)
+    _done, _in_grp = [], set()
+    _cands = sorted(((frozenset(p), _support(set(p))) for p in combinations(_all_items, 2)),
+                    key=lambda z: -len(z[1]))
+    for base, sup in _cands:
+        if len(sup) < min_repeat or any(base <= d for d in _done):
+            continue
+        grp = set(base)
+        for it in _all_items:
+            if it not in grp and len(_support(grp | {it})) >= min_repeat:
+                grp.add(it)
+        _done.append(frozenset(grp))
+        if _covered(grp):
+            continue
+        sup = _support(grp)
+        _items = ','.join(f'[{x}]' for x in sorted(grp))
+        proposals.append((f'[RULE] {_items}가 모두 이상이면 "OOO(모드명 기입)" 임을 밝힌다',
+                          f'{_items} index에서 동시 spec-out이 지속 발생 중 - 확인 요청'
+                          f' ({len(sup)}개 리포트: {", ".join(sup)})'))
+        _in_grp |= grp
+    for it in _all_items:
+        sup = _support({it})
+        if len(sup) >= min_repeat and it not in _in_grp and not _covered([it]):
+            proposals.append((f'[RULE] [{it}]가 이상 수준이면 "OOO(모드명 기입)"을 밝힌다',
+                              f'[{it}] index에서 spec-out이 지속 발생 중 - 확인 요청'
+                              f' ({len(sup)}개 리포트: {", ".join(sup)})'))
+
+    # [4] 좌표 재발(공간) 신호 — 같은 index의 '동일 chip 좌표' spec-out이 여러 리포트에서 반복.
+    #   findings의 spec_out_positions(리포트당 상한 20pt 표본) 집계 — 특이맵 판정 OFF여도 동작.
+    #   룰 판정과 무관한 '확인 요청' 안내(불량 모드 미연결 인사이트도 POWER_USER에게 전달).
+    coord_hits = defaultdict(set)   # (item, x, y) -> {report_key}
+    for s in summaries:
+        for f in s.get('findings', []):
+            if f.get('type') != 'SPEC_OUT':
+                continue
+            it = str(f.get('display_name') or f.get('item') or '')
+            for p in f.get('spec_out_positions', []):
+                if isinstance(p, dict) and 'x' in p and 'y' in p:
+                    try:
+                        coord_hits[(it, float(p['x']), float(p['y']))].add(_key(s))
+                    except (TypeError, ValueError):
+                        continue
+    coord_notes = sorted(((it, x, y, sorted(ks)) for (it, x, y), ks in coord_hits.items()
+                          if len(ks) >= min_repeat), key=lambda z: -len(z[3]))
+
+    # ── 텍스트 조립 ──
+    _today = datetime.now().strftime('%Y-%m-%d')
+    L = ["=" * 72,
+         f"HOL 규칙 제안 다이제스트 ({_today}) - 최근 {window_days}일 리포트 {len(summaries)}건 집계",
+         "=" * 72, "",
+         f"[1] 규칙 현황 (설정 [RULE] {len(rule_labels)}개)"]
+    for lbl in rule_labels:
+        ks = rule_hits.get(lbl, [])
+        L.append(f"  {'●' if ks else '·'} \"{lbl}\": 매칭 {len(ks)}건"
+                 + (f" - {', '.join(sorted(set(ks)))}" if ks else ""))
+    if not rule_labels:
+        L.append("  (설정된 [RULE] 없음)")
+    L += ["", f"[2] 불량 모드 매칭 통계 (최근 {window_days}일)"]
+    for m, ks in sorted(mode_hits.items(), key=lambda z: -len(z[1])):
+        L.append(f"  ● {m}: {len(ks)}건 - {', '.join(sorted(set(ks)))}")
+    if not mode_hits:
+        L.append("  (매칭된 불량 모드 없음)")
+    L.append(f"  · 측정이상 추정(PCHK 겹침) 신호 리포트: {n_meas}건")
+    L += ["", f"[3] 미매칭 반복 패턴 → [RULE] 제안 (규칙 미커버 · {min_repeat}회 이상 반복)"]
+    for line, why in proposals:
+        L += [f"  ● {why}", f"    제안: {line}"]
+    if not proposals:
+        L.append("  (반복 패턴 없음)")
+    L += ["", f"[4] 좌표 재발 확인 요청 (같은 index의 동일 chip 좌표 spec-out이 {min_repeat}개 리포트 이상 반복)"]
+    for it, x, y, ks in coord_notes[:10]:
+        L.append(f"  ● [{it}] ({x:g},{y:g}) 좌표에서 spec-out 반복 - 확인 요청"
+                 f" ({len(ks)}개 리포트: {', '.join(ks)})")
+    if len(coord_notes) > 10:
+        L.append(f"  … 외 {len(coord_notes) - 10}건")
+    if coord_notes:
+        L.append("  ※ 반복 위치는 레티클/프로브카드 핀/척 등 systematic 원인 후보입니다."
+                 " (좌표 표본 = 리포트당 spec-out 위치 상한 20pt, 전체는 스냅샷 target_rows.parquet)")
+    else:
+        L.append("  (좌표 반복 신호 없음)")
+
+    # [5] AI 총평 — 선택(LLM 연결 시 한 단락). 실패해도 다이제스트는 그대로.
+    if llm_fn is not None and summaries:
+        try:
+            _c = llm_fn("당신은 반도체 ET 데이터 규칙 관리 보조자입니다. 아래 다이제스트를 보고 "
+                        "규칙 관리 관점의 총평을 한국어 3문장 이내로 쓰세요(수치/모드명은 본문에 있는 "
+                        "것만 언급, 새 사실 생성 금지).", "\n".join(L))
+            if str(_c or '').strip():
+                L += ["", "[5] AI 총평", "  " + str(_c).strip().replace("\n", "\n  ")]
+        except Exception:
+            pass
+
+    L += ["", "-" * 72,
+          "※ 제안 반영: ANOMALY_KNOWLEDGE.md의 '수정 영역 ①'(NL_RULES 마커)에 제안 줄을 붙여넣고",
+          "  \"OOO\"를 실제 불량 모드명으로 바꾸면 다음 발행부터 적용됩니다.",
+          "  반영/삭제 전까지 같은 제안이 매일 반복됩니다."]
+    return {'text': "\n".join(L), 'n_reports': len(summaries),
+            'n_rules': len(rule_labels), 'n_proposals': len(proposals),
+            'n_coord': len(coord_notes)}
+
+
 def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         main_vehicle=None, config=None, reformatter=None,
                         knowledge_text="", item_stats_out=None, rule_trace_out=None,
-                        json_rules=None):
+                        json_rules=None, report_key=None):
     """코드 기반 다중 detector로 이상/commonality Finding 리스트를 산출.
 
     AI 사용 여부와 무관하게 항상 코드로 동작합니다. 각 detector는 독립적으로
@@ -1920,6 +2110,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     rule_trace_out : list|None  전달 시 '전체 anomaly rule 체크 결과' 추적 리스트를 채워 반환.
                                 각 원소 {kind, name, cond, matched(bool), result, note} —
                                 모든 규칙(지식/불량모드/[RULE] 체이닝)을 순회한 매칭/해당없음 기록.
+    report_key : str|None       산출물 파일 키 "{lot}_{step_id}"(원본 step_id) — anomaly_basis
+                                파일명에 사용. None이면 target_lot_id만(단독 테스트용).
 
     Returns
     -------
@@ -2826,7 +3018,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         import os, json
         _outdir = os.path.join('RUN', 'TEMP')
         os.makedirs(_outdir, exist_ok=True)
-        _safe_lot = str(target_lot_id).replace('/', '_').replace('\\', '_')
+        _safe_lot = str(report_key or target_lot_id).replace('/', '_').replace('\\', '_')
         _base = os.path.join(_outdir, f"anomaly_basis_{_safe_lot}")
         with open(_base + '.json', 'w', encoding='utf-8') as _jf:
             json.dump(_basis, _jf, ensure_ascii=False, indent=2, default=str)
@@ -3457,7 +3649,8 @@ def render_findings_count_html(findings):
 
 
 def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
-                      config=None, target_lot_id="", item_stats=None, defect_modes=None):
+                      config=None, target_lot_id="", item_stats=None, defect_modes=None,
+                      report_key=""):
     """AI 다단계 해석: 각 단계의 판단을 다음 단계 입력으로 넘겨 최종 판단 생성.
 
     단계
@@ -3478,6 +3671,8 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
     config, target_lot_id : 메타
     item_stats : dict|None   analyze_commonality(item_stats_out=)가 채운 항목별 통계 요약
                              — [항목 통계] 블록으로 Triage/Final에 전달
+    report_key : str         산출물 파일 키 "{lot}_{step_id}" — ai_input 덤프 파일명에 사용
+                             (빈 값이면 target_lot_id — 프롬프트의 lot 표기와는 무관)
 
     참고: RUN/EXAMPLE/*.md 가 있으면 '판정 예시(few-shot)'로 Final 프롬프트에 포함
     (없어도 동작. 파일명 '_' 시작은 템플릿으로 간주하고 스킵. 작성법은 README 참조).
@@ -3567,15 +3762,19 @@ def interpret_with_ai(findings, metrics_dict, knowledge_text, llm_fn,
     def _dump_ai_input():
         try:
             import os
+            from datetime import datetime as _dt
             _outdir = os.path.join('RUN', 'AI')   # AI 인풋파일 보관 폴더(사이클 종료 후에도 유지)
             os.makedirs(_outdir, exist_ok=True)
-            _safe = str(target_lot_id).replace('/', '_').replace('\\', '_') or 'lot'
+            _safe = str(report_key or target_lot_id).replace('/', '_').replace('\\', '_') or 'lot'
             _base = os.path.join(_outdir, f"ai_input_{_safe}")
+            _ts = _dt.now().strftime('%Y-%m-%d %H:%M:%S')
             with open(_base + '.json', 'w', encoding='utf-8') as _jf:
                 json.dump({"target_lot_id": target_lot_id,
+                           "report_key": report_key or target_lot_id,
+                           "generated_at": _ts,
                            "findings": [_slim(f) for f in findings],
                            "stages": _io}, _jf, ensure_ascii=False, indent=2, default=str)
-            _lines = [f"# AI 입력/출력 덤프 — lot {target_lot_id}", "",
+            _lines = [f"# AI 입력/출력 덤프 — lot {target_lot_id} ({_ts})", "",
                       "> `anomaly_engine.interpret_with_ai`가 LLM에 실제로 보낸 system/user 프롬프트와 응답.",
                       "> 측정 raw 데이터/reformatter는 전달하지 않고, 코드 findings 요약 + ANOMALY_KNOWLEDGE.md 텍스트만 넣는다.",
                       "", "## 입력 findings (JSON)", "", "```json", fjson, "```", ""]

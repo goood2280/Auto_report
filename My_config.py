@@ -539,6 +539,9 @@ class Config:
         self.use_email_send = False        # 사내 메일 API로 PPT+HTML 발송 on/off (True면 리포트 발행 후 메일 전송)
         self.use_s3_upload = True          # 생성 PPT의 S3(DX) 업로드 on/off
         self.use_description_page = True   # PPT CAT2 간지(Description) 페이지 삽입 on/off
+        self.use_archive_snapshot = True   # 발행 스냅샷(RUN/ARCHIVE/<lot>_<step_id>/) 저장 on/off
+        #   summary.json(발행 메타+findings+item_stats+rule_trace) + target_rows.parquet(당시 index 컬럼만).
+        #   규칙 제안 다이제스트/확정 사례 아카이브의 입력 — 지워지거나 없어도 리포트 발행엔 영향 없음.
         # 이상 Trend chart([0] 섹션) 표시 여부.
         #   - AI(GPT) 사용 여부와 무관하게 동작합니다.
         #   - use_gpt_summary=False 이거나 GPT 호출이 실패해도,
@@ -590,6 +593,16 @@ class Config:
         #              바로 적용. 같은 문구 → 항상 같은 코드. 미리보기/캐시정비는 `--convert-nl-rules`.
         #   False: 발행 시 자동 적용 끔(수기 [RULE] + `--convert-nl-rules-md`로 명시 적용만).
         self.anomaly_nl_autocompile = True
+
+        # ── 규칙 제안 다이제스트 (POWER_USER, 1일 1회) ──
+        #   RUN/ARCHIVE 발행 스냅샷을 집계해 '규칙별 매칭 현황 + 불량모드 매칭 통계 +
+        #   미매칭 반복 패턴의 [RULE] 자연어 제안'을 RUN/AI/rule_digest_<날짜>.txt로 저장하고,
+        #   메일링 xlsx에 'POWER_USER' 시트가 있으면(+use_email_send=True) 그 수신처로 발송한다.
+        #   제안은 자동 반영되지 않으며(propose-only), 반영/삭제 전까지 매일 반복 제안된다.
+        #   미리보기: python Main.py --rule-digest
+        self.rule_digest_enabled = True    # 다이제스트 생성 on/off (수신처 없으면 파일만 저장)
+        self.rule_digest_window_days = 14  # 집계 기간(일) — 스냅샷 summary.json의 generated_at 기준
+        self.rule_digest_min_repeat = 3    # 제안 승격 최소 반복 리포트 수(미매칭 패턴 기준)
 
         # 불량 모드(Defect Mode) 판정/조합 해석은 코드가 하지 않는다.
         #   - 코드는 각 Index의 단일 이상(spec-out / median·std 이탈)만 산출.
