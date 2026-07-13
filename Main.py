@@ -1890,7 +1890,8 @@ def main():
                                         return (f'<table cellpadding="{cellpad}" cellspacing="0" '
                                                 f'style="border-collapse:collapse; border:none;">{_rows}</table>')
 
-                                    def _trend_block(item, is_spec, img_b64, w, h):
+                                    def _trend_block(item, is_spec, img_src, w, h):
+                                        # img_src = 완성된 data URI(_img_datauri 결과, PNG 또는 용량 초과 시 JPEG)
                                         if is_spec:
                                             _stat, _bg, _fg = 'SPEC OUT', '#d32f2f', '#ffffff'
                                         else:
@@ -1902,7 +1903,7 @@ def main():
                                         return (
                                             f'<div style="position:relative; width:{w}px;">'
                                             f'<div style="position:absolute; top:6px; left:6px; z-index:2;">{_sticker}</div>'
-                                            f'<img src="data:image/png;base64,{img_b64}" width="{w}" height="{h}" '
+                                            f'<img src="{img_src}" width="{w}" height="{h}" '
                                             f'style="display:block; width:{w}px; height:{h}px; border:1px solid #ddd;"/>'
                                             '</div>')
 
@@ -1929,6 +1930,42 @@ def main():
                                         except Exception:
                                             return target_w, round(target_w * 0.44)
 
+                                    def _img_datauri(raw, max_kb=None):
+                                        """인라인 <img>용 data URI 생성 — 이미지 1개 바이트를 상한 이하로 보장.
+                                        사내 메일 서버는 큰 인라인 data:image를 '첨부'로 분리해, 제품(=이미지
+                                        크기)마다 인라인/첨부가 들쭉날쭉해진다. 모든 이미지를 동일 상한 이하로
+                                        맞춰 제품과 무관하게 항상 인라인으로 통일한다.
+                                          - 상한 이하: 원본 PNG 유지(무손실).
+                                          - 초과: 단계적 다운스케일(최적화 PNG) → 그래도 크면 JPEG(품질↓) 재인코딩.
+                                        반환: 완성된 'data:image/...;base64,...' 문자열.
+                                        """
+                                        if max_kb is None:
+                                            max_kb = int(getattr(GLOBAL_CONFIG, 'html_inline_img_max_kb', 100) or 100)
+                                        _budget = max_kb * 1024
+                                        if len(raw) <= _budget:
+                                            return 'data:image/png;base64,' + base64.b64encode(raw).decode('utf-8')
+                                        try:
+                                            from PIL import Image as _PILc
+                                            import io as _ioc
+                                            _im = _PILc.open(_ioc.BytesIO(raw)).convert('RGB')
+                                            _w0, _h0 = _im.size
+                                            for _sc in (0.8, 0.65, 0.5):
+                                                _b = _ioc.BytesIO()
+                                                (_im.resize((max(1, int(_w0 * _sc)), max(1, int(_h0 * _sc))), _PILc.LANCZOS)
+                                                 .save(_b, format='PNG', optimize=True))
+                                                if _b.tell() <= _budget:
+                                                    return 'data:image/png;base64,' + base64.b64encode(_b.getvalue()).decode('utf-8')
+                                            _last = None
+                                            for _q in (72, 58, 45, 35):
+                                                _b = _ioc.BytesIO()
+                                                _im.save(_b, format='JPEG', quality=_q, optimize=True)
+                                                _last = _b.getvalue()
+                                                if _b.tell() <= _budget:
+                                                    return 'data:image/jpeg;base64,' + base64.b64encode(_last).decode('utf-8')
+                                            return 'data:image/jpeg;base64,' + base64.b64encode(_last).decode('utf-8')
+                                        except Exception:
+                                            return 'data:image/png;base64,' + base64.b64encode(raw).decode('utf-8')
+
                                     _spec_rows, _warn_items = [], []
                                     for item in top_item_names:
                                         safe_item = re.sub(r'[\\/:*?"<>|]', '_', str(item))
@@ -1936,7 +1973,7 @@ def main():
                                         if not os.path.exists(img_path):
                                             continue
                                         with open(img_path, "rb") as f:
-                                            img_b64 = base64.b64encode(f.read()).decode('utf-8')
+                                            img_b64 = _img_datauri(f.read())   # 상한 이하 인라인 data URI(첨부 분리 방지)
                                         _tw, _th = _img_px(img_path, 380)   # 포워딩용 고정 px(가로 380)
                                         _is_spec = metrics_dict.get(item, {}).get('spec_out_count', 0) > 0
                                         if not _is_spec:
@@ -2005,9 +2042,9 @@ def main():
                                                     _disp_h = _ch_total // _hs
                                                     _cbuf = _io2.BytesIO()
                                                     _comp.save(_cbuf, format='PNG', optimize=True)
-                                                    _cb64 = base64.b64encode(_cbuf.getvalue()).decode('utf-8')
+                                                    _wf_src = _img_datauri(_cbuf.getvalue())   # 상한 이하 인라인(첨부 분리 방지)
                                                     _wf_block = (
-                                                        f'<img src="data:image/png;base64,{_cb64}" '
+                                                        f'<img src="{_wf_src}" '
                                                         f'width="{_disp_w}" height="{_disp_h}" '
                                                         f'style="display:block; width:{_disp_w}px; height:{_disp_h}px; border:none;"/>')
                                             except Exception as _we:
@@ -2023,18 +2060,18 @@ def main():
                                             f'<tr><td style="border:none; vertical-align:top; padding-right:12px;">{_trend_block(item, True, img_b64, _tw, _th)}</td>'
                                             f'<td style="border:none; vertical-align:top;">{_wf_block}</td></tr></table></div>')
 
-                                    # 주의 블록 조립 — 이상 항목이 하나도 없으면(주의만 있을 때) 각 주의
-                                    # 항목도 이상 항목처럼 '항목명 헤더'를 위에 붙여 무엇이 주의인지 식별 가능하게 한다.
-                                    _warn_named = not _spec_rows
+                                    # 주의 블록 조립 — 이상 항목처럼 각 주의 항목도 항상 '항목명 헤더'를
+                                    # 위에 붙여 무엇이 주의인지 식별 가능하게 한다. (이전엔 이상 항목이 하나도
+                                    # 없을 때만 이름을 붙여, 이상+주의가 섞인 제품에선 주의 차트에 항목명이
+                                    # 표시되지 않는 문제가 있었다. → 이상 유무와 무관하게 항상 표기.)
                                     _warn_blocks = []
                                     for _wit, _wb64, _ww, _wh in _warn_items:
                                         _blk = _trend_block(_wit, False, _wb64, _ww, _wh)
-                                        if _warn_named:
-                                            _warn_hdr = (
-                                                '<div style="font-size:13px; font-weight:bold; color:#1f4e79; '
-                                                'margin:2px 0 3px 2px; border-left:4px solid #f9a825; padding-left:7px;">'
-                                                f'{display_name(_wit)}</div>')
-                                            _blk = '<div>' + _warn_hdr + _blk + '</div>'
+                                        _warn_hdr = (
+                                            '<div style="font-size:13px; font-weight:bold; color:#1f4e79; '
+                                            'margin:2px 0 3px 2px; border-left:4px solid #f9a825; padding-left:7px;">'
+                                            f'{display_name(_wit)}</div>')
+                                        _blk = '<div>' + _warn_hdr + _blk + '</div>'
                                         _warn_blocks.append(_blk)
 
                                     # '이상'/'주의' 탭 라벨은 표시하지 않는다. 각 차트 좌상단의
@@ -2154,12 +2191,16 @@ def main():
                                 html_code_final = html_content   # 생성된 HTML 코드 문자열
 
                                 # ── 본문 인라인 이미지 정보 ──
-                                # data:image/png;base64 인라인은 첨부로 분리되지 않음(확인 완료).
-                                # PNG→JPEG 변환·CID 방식 모두 불필요 — 원본 PNG 인라인 그대로 발송.
+                                # 모든 <img>는 data:image(base64) 인라인. 이미지 1개 바이트를
+                                # html_inline_img_max_kb 이하로 맞춰(_img_datauri) 메일 서버의 '첨부 분리'를
+                                # 막아, 제품과 무관하게 항상 인라인으로 통일한다(초과 시 자동 PNG 축소→JPEG).
                                 import re as _re_mail
                                 _img_pattern = r'<img\s[^>]*src="data:image/[^"]*"[^>]*/?\s*>'
                                 _imgs = _re_mail.findall(_img_pattern, html_code_final, _re_mail.DOTALL)
-                                print(f"[INFO] 메일 본문 인라인 이미지 {len(_imgs)}개 (PNG 원본 유지)")
+                                _png_n = html_code_final.count('src="data:image/png')
+                                _jpg_n = html_code_final.count('src="data:image/jpeg')
+                                print(f"[INFO] 메일 본문 인라인 이미지 {len(_imgs)}개 "
+                                      f"(PNG {_png_n} · JPEG {_jpg_n}, 각 ≤{getattr(GLOBAL_CONFIG, 'html_inline_img_max_kb', 100)}KB)")
 
                                 # 수신 그룹(=메일링 xlsx의 시트명). config email_receiver가 리스트면 첫 항목 사용.
                                 email_receiver_now = (email_receiver[0]

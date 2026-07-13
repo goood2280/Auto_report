@@ -682,6 +682,12 @@ class Config:
         self.html_img_scale = 2            # HTML 합성 이미지 supersample 배율 (1=합성 픽셀=표시 px)
         self.html_chart_dpi = 170          # HTML Trend chart PNG 해상도 (figsize 4.55in×170 ≈ 773px ≥ 표시 380px×2)
         self.html_wfmap_dpi = 200          # HTML WF MAP PNG 해상도 (0.62in×200 ≈ 124px ≥ 셀 58px×2)
+        # 메일 본문 인라인 이미지 1개당 바이트 상한(KB). 사내 메일 서버는 인라인
+        # data:image가 일정 크기를 넘으면 '첨부'로 분리해, 제품(=이미지 크기)에 따라
+        # 어떤 건 인라인·어떤 건 첨부로 들쭉날쭉해진다. 모든 <img>를 이 상한 이하로
+        # 보장(초과 시 자동 다운스케일→PNG, 그래도 크면 JPEG 재인코딩)해 제품과
+        # 무관하게 항상 인라인으로 통일한다. 너무 크면 첨부 분리, 너무 작으면 화질↓.
+        self.html_inline_img_max_kb = 100
 
         # ──────────────────────────────────────────────────────
         # 병렬 렌더링 설정 (Parallel chart rendering)
