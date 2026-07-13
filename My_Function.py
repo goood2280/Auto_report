@@ -19,7 +19,17 @@ import gc
 import glob
 import time
 import traceback
+import warnings
 from datetime import datetime, timedelta
+
+# matplotlib "Glyph ... missing from font(s)" (U+2212 등) 경고 억제.
+#   Main.py에도 동일 필터가 있으나(그 필터는 __main__=Main일 때만 워커로 전파됨),
+#   차트 렌더링은 병렬 워커 프로세스에서 이 모듈(My_Function)을 import해 실행하므로
+#   진입점이 Main.py가 아닐 때(스케줄러/래퍼 실행 등) 워커에는 Main의 필터가 없어
+#   경고가 다시 새어 나온다. 워커가 반드시 import하는 이 모듈 최상단에 필터를 둬
+#   진입점과 무관하게 모든 렌더링 프로세스에서 무음 처리한다. (warn_on_missing_glyph
+#   → warnings.warn(UserWarning); axes.unicode_minus=False는 각 차트 함수에서 설정.)
+warnings.filterwarnings("ignore", message=".*Glyph.*")
 
 # ===================================================================
 #  서드파티 라이브러리 (Third-party Imports)

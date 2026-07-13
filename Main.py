@@ -298,9 +298,14 @@ def _maybe_send_rule_digest(json_rules, llm_fn, force=False):
                 'title': (f"[HOL] 규칙 제안 다이제스트 {_today} "
                           f"(리포트 {d['n_reports']}건 · 제안 {d['n_proposals']}건)"),
             }
+            # 사내 메일 API(/send/attach)는 multipart/form-data를 요구한다. 첨부(PPT)가
+            # 있는 리포트 발송은 files=[...] 덕에 자동으로 multipart가 되지만, 첨부가 없는
+            # 다이제스트는 data= 만 쓰면 application/x-www-form-urlencoded로 전송돼
+            # 서버가 content type 오류(HTTP 500)를 낸다. → mailSendString을 multipart
+            # form-data 파트(None=파일 아님)로 보내 리포트 발송과 동일한 Content-Type 사용.
             _resp = requests.request('POST', GLOBAL_CONFIG.get('url'),
                                      headers={'x-dep-ticket': GLOBAL_CONFIG.get('TICKET')},
-                                     data={'mailSendString': f'{_payload_content}'})
+                                     files=[('mailSendString', (None, f'{_payload_content}'))])
             _sc = getattr(_resp, 'status_code', None)
             _sent_note = f"POWER_USER {len(_rcv)}명 발송(HTTP {_sc})"
             if _sc != 200:

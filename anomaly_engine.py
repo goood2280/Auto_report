@@ -28,6 +28,7 @@ ET 측정 데이터에서 이상 항목을 감지하고, 엔지니어가 여러 
 #  표준·서드파티 임포트 (Standard & Third-party Imports)
 # ===================================================================
 import re
+import warnings
 import pandas as pd
 import matplotlib
 import matplotlib.pyplot as plt
@@ -35,6 +36,9 @@ import matplotlib.pyplot as plt
 # Matplotlib 백엔드를 Agg(비-GUI)로 설정하여 서버 환경 호환
 matplotlib.use('Agg')
 plt.rcParams['axes.unicode_minus'] = False   # U+2212 글리프 없는 폰트 경고 방지
+# 렌더 텍스트에 실제 U+2212가 섞이면 unicode_minus=False만으로는 "Glyph ... missing
+# from font(s)" 경고가 계속 나므로 메시지 패턴으로 무음 처리(워커 프로세스 포함).
+warnings.filterwarnings("ignore", message=".*Glyph.*")
 
 
 # ===================================================================
