@@ -30,6 +30,11 @@ from datetime import datetime, timedelta
 #   진입점과 무관하게 모든 렌더링 프로세스에서 무음 처리한다. (warn_on_missing_glyph
 #   → warnings.warn(UserWarning); axes.unicode_minus=False는 각 차트 함수에서 설정.)
 warnings.filterwarnings("ignore", message=".*Glyph.*")
+# matplotlib "findfont: Font family 'NanumGothic' not found." — logging 채널(font_manager 로거)
+#   이라 warnings 필터로는 안 잡힘. 워커 프로세스가 반드시 import하는 이 모듈에서 로거 레벨을
+#   올려, 설정 폰트 미설치 환경에서 차트 텍스트마다 반복되는 findfont 로그를 무음 처리한다.
+import logging as _mpl_logging
+_mpl_logging.getLogger('matplotlib.font_manager').setLevel(_mpl_logging.ERROR)
 
 # ===================================================================
 #  서드파티 라이브러리 (Third-party Imports)

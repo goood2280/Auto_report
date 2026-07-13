@@ -51,6 +51,12 @@ warnings.filterwarnings("ignore", message=".*extension is not supported and will
 #   경고가 계속 나므로 메시지 패턴으로 무음 처리. Windows spawn 워커는 __main__(Main)을 재import하므로
 #   이 필터가 렌더링 워커 프로세스에도 그대로 적용된다.
 warnings.filterwarnings("ignore", message=".*Glyph.*")
+# matplotlib "findfont: Font family 'NanumGothic' not found." 로그 억제.
+#   이 메시지는 warnings가 아니라 logging(matplotlib.font_manager 로거, WARNING 레벨)으로
+#   나오므로 위 필터로는 안 잡힌다. 설정 폰트가 미설치인 환경에서 차트 텍스트를 그릴 때마다
+#   반복 출력돼 로그를 어지럽힘 → 로거 레벨을 ERROR로 올려 무음 처리(렌더링엔 영향 없음).
+import logging as _mpl_logging
+_mpl_logging.getLogger('matplotlib.font_manager').setLevel(_mpl_logging.ERROR)
 
 
 # ==================================================================================================================================
