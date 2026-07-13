@@ -1714,33 +1714,46 @@ def main():
                                         if not _wf_ss.empty:
                                             _wfmap_src = _wf_ss
 
-                                    def _html_table(cells, ncol, cellpad=2, cellstyle='vertical-align:top;'):
+                                    def _html_table(cells, ncol, cellpad=2, cellstyle='vertical-align:top;',
+                                                    colwidth=None):
                                         """cell HTML 리스트를 ncol개씩 table 행으로 배치(포워딩에서 flex/grid 대체).
-                                        템플릿 전역 CSS(table/td 테두리)를 inline border:none로 덮어 격자/구분선 제거."""
+                                        템플릿 전역 CSS(table/td 테두리)를 inline border:none로 덮어 격자/구분선 제거.
+                                        colwidth(px)를 주면 td/table에 고정 폭 + table-layout:fixed를 걸어
+                                        포워딩(메일 클라이언트 재해석) 시 셀이 줄바꿈/축소되지 않게 한다."""
+                                        _wstyle = f'width:{colwidth}px; ' if colwidth else ''
                                         _rows = ''
                                         for _i in range(0, len(cells), ncol):
-                                            _tds = ''.join(f'<td style="border:none; {cellstyle}">{_c}</td>'
+                                            _tds = ''.join(f'<td style="border:none; {_wstyle}{cellstyle}">{_c}</td>'
                                                            for _c in cells[_i:_i + ncol])
                                             _rows += f'<tr>{_tds}</tr>'
-                                        return (f'<table cellpadding="{cellpad}" cellspacing="0" '
-                                                f'style="border-collapse:collapse; border:none;">{_rows}</table>')
+                                        # 고정 폭: 열 폭 + 좌우 cellpadding(각 셀 2*cellpad) 합 → 표 전체 px 명시
+                                        _tstyle = (f'width:{(colwidth + 2 * cellpad) * ncol}px; table-layout:fixed; '
+                                                   if colwidth else '')
+                                        return (f'<table role="presentation" cellpadding="{cellpad}" cellspacing="0" '
+                                                f'style="border-collapse:collapse; border:none; {_tstyle}">{_rows}</table>')
 
-                                    def _trend_block(item, is_spec, img_src, w, h):
-                                        # img_src = 완성된 data URI(_img_datauri 결과, PNG 또는 용량 초과 시 JPEG)
+                                    def _status_badge(is_spec):
+                                        """상태 스티커(SPEC OUT/WARNING) span.
+                                        포워딩 강건성: 예전엔 차트 위 position:absolute 오버레이였으나,
+                                        Outlook 등 mail 클라이언트가 position을 무시해 배지가 정상 흐름의
+                                        블록이 되어 차트를 아래로 밀어냈다. → 항목명 헤더 줄에 인라인 배치.
+                                        (box-shadow/position 미사용 — 메일·포워딩에서 안정적으로 렌더)."""
                                         if is_spec:
                                             _stat, _bg, _fg = 'SPEC OUT', '#d32f2f', '#ffffff'
                                         else:
                                             _stat, _bg, _fg = 'WARNING', '#f9a825', '#1a1a1a'
-                                        _bstyle = ('font-size:10px; font-weight:bold; padding:2px 7px; '
-                                                   'border-radius:3px; box-shadow:0 1px 2px rgba(0,0,0,.35);')
-                                        _sticker = f'<span style="background:{_bg}; color:{_fg}; {_bstyle}">{_stat}</span>'
-                                        # 포워딩 호환: img width/height를 px로 inline + attribute 둘 다 명시(%/max-width 미사용)
                                         return (
-                                            f'<div style="position:relative; width:{w}px;">'
-                                            f'<div style="position:absolute; top:6px; left:6px; z-index:2;">{_sticker}</div>'
-                                            f'<img src="{img_src}" width="{w}" height="{h}" '
-                                            f'style="display:block; width:{w}px; height:{h}px; border:1px solid #ddd;"/>'
-                                            '</div>')
+                                            f'<span style="display:inline-block; background:{_bg}; color:{_fg}; '
+                                            f'font-size:10px; font-weight:bold; padding:2px 7px; border-radius:3px; '
+                                            f'margin-right:7px; vertical-align:middle;">{_stat}</span>')
+
+                                    def _trend_block(item, is_spec, img_src, w, h):
+                                        # img_src = 완성된 data URI(_img_datauri 결과, PNG 또는 용량 초과 시 JPEG)
+                                        # 포워딩 호환: img width/height를 attribute + inline px 둘 다 명시(%/max-width/
+                                        # position 미사용). 상태 스티커는 _status_badge로 항목명 헤더에 인라인 배치.
+                                        return (
+                                            f'<img src="{img_src}" width="{w}" height="{h}" border="0" '
+                                            f'style="display:block; width:{w}px; height:{h}px; border:1px solid #ddd;"/>')
 
                                     def _spec_bounds(item):
                                         _slow = _shigh = None
@@ -1819,6 +1832,7 @@ def main():
                                         # 이상(SPEC OUT) — 우측에 spec-out WF MAP을 PIL로 1장 합성
                                         # Trend(좌) 1장 + WF MAP 합성(우) 1장 = 아이템당 img 태그 2개
                                         _wf_block = ''
+                                        _wf_w = 0   # WF MAP 합성 이미지 표시 폭(px) — 표 고정폭 계산용(포워딩 강건)
                                         if _wf_on:
                                             try:
                                                 _slow, _shigh = _spec_bounds(item)
@@ -1929,48 +1943,63 @@ def main():
                                                     _cbuf = _io2.BytesIO()
                                                     _comp.save(_cbuf, format='PNG', optimize=True)
                                                     _wf_src = _img_datauri(_cbuf.getvalue())   # 상한 이하 인라인(첨부 분리 방지)
+                                                    _wf_w = _disp_w   # 표 고정폭 계산용(포워딩 강건)
                                                     _wf_block = (
                                                         f'<img src="{_wf_src}" '
-                                                        f'width="{_disp_w}" height="{_disp_h}" '
+                                                        f'width="{_disp_w}" height="{_disp_h}" border="0" '
                                                         f'style="display:block; width:{_disp_w}px; height:{_disp_h}px; border:none;"/>')
                                             except Exception as _we:
                                                 print(f"[WARN] spec-out WF MAP 스킵 ({item}): {_we}")
-                                        # 이상 항목명(헤더) → Trend(좌) 1장 + WF MAP 합성(우) 1장
+                                        # 이상 항목명(헤더) → SPEC OUT 배지 + 항목명. Trend(좌) 1장 + WF MAP 합성(우) 1장.
+                                        # 배지는 오버레이 대신 헤더 인라인(포워딩 강건: _status_badge 참조).
                                         _item_hdr = (
                                             '<div style="font-size:13px; font-weight:bold; color:#1f4e79; '
-                                            'margin:2px 0 3px 2px; border-left:4px solid #d32f2f; padding-left:7px;">'
-                                            f'{display_name(item)}</div>')
+                                            'text-align:left; margin:2px 0 3px 2px; '
+                                            'border-left:4px solid #d32f2f; padding-left:7px;">'
+                                            f'{_status_badge(True)}{display_name(item)}</div>')
+                                        # 포워딩 강건: table/td 고정 폭 + table-layout:fixed → 셀 줄바꿈/축소 방지.
+                                        _trend_cell_w = _tw + 12                # trend img(_tw) + padding-right(12)
+                                        _wf_cell_w = _wf_w if _wf_w else _tw    # WF MAP 합성 폭(없으면 폴백)
                                         _spec_rows.append(
                                             '<div style="margin-bottom:14px;">' + _item_hdr +
-                                            '<table cellpadding="0" cellspacing="0" style="border-collapse:collapse; border:none;">'
-                                            f'<tr><td style="border:none; vertical-align:top; padding-right:12px;">{_trend_block(item, True, img_b64, _tw, _th)}</td>'
-                                            f'<td style="border:none; vertical-align:top;">{_wf_block}</td></tr></table></div>')
+                                            '<table role="presentation" cellpadding="0" cellspacing="0" '
+                                            f'style="border-collapse:collapse; border:none; '
+                                            f'width:{_trend_cell_w + _wf_cell_w}px; table-layout:fixed;">'
+                                            f'<tr><td style="border:none; vertical-align:top; padding-right:12px; '
+                                            f'width:{_trend_cell_w}px;">{_trend_block(item, True, img_b64, _tw, _th)}</td>'
+                                            f'<td style="border:none; vertical-align:top; width:{_wf_cell_w}px;">{_wf_block}</td>'
+                                            '</tr></table></div>')
 
                                     # 주의 블록 조립 — 이상 항목처럼 각 주의 항목도 항상 '항목명 헤더'를
                                     # 위에 붙여 무엇이 주의인지 식별 가능하게 한다. (이전엔 이상 항목이 하나도
                                     # 없을 때만 이름을 붙여, 이상+주의가 섞인 제품에선 주의 차트에 항목명이
                                     # 표시되지 않는 문제가 있었다. → 이상 유무와 무관하게 항상 표기.)
                                     _warn_blocks = []
+                                    _warn_col_w = 380   # 주의 차트 폭(= _img_px(...,380)) — 그리드 고정폭용
                                     for _wit, _wb64, _ww, _wh in _warn_items:
                                         _blk = _trend_block(_wit, False, _wb64, _ww, _wh)
-                                        # 항목명 헤더는 좌측 정렬(전역 td{text-align:center} 상속 차단)
+                                        # 항목명 헤더는 좌측 정렬(전역 td{text-align:center} 상속 차단).
+                                        # WARNING 배지는 오버레이 대신 헤더 인라인(포워딩 강건: _status_badge 참조).
                                         _warn_hdr = (
                                             '<div style="font-size:13px; font-weight:bold; color:#1f4e79; '
                                             'text-align:left; margin:2px 0 3px 2px; '
                                             'border-left:4px solid #f9a825; padding-left:7px;">'
-                                            f'{display_name(_wit)}</div>')
+                                            f'{_status_badge(False)}{display_name(_wit)}</div>')
                                         _blk = '<div style="text-align:left;">' + _warn_hdr + _blk + '</div>'
                                         _warn_blocks.append(_blk)
 
-                                    # '이상'/'주의' 탭 라벨은 표시하지 않는다. 각 차트 좌상단의
-                                    # SPEC OUT / WARNING 스티커가 상태 식별 역할을 대신한다.
+                                    # '이상'/'주의' 탭 라벨은 표시하지 않는다. 각 항목명 헤더 줄의
+                                    # SPEC OUT / WARNING 스티커가 상태 식별 역할을 대신한다(포워딩 강건성을
+                                    # 위해 차트 위 오버레이 대신 헤더 줄에 인라인 배치 — _status_badge 참조).
                                     _parts = []
                                     if _spec_rows:
                                         _parts.extend(_spec_rows)
                                     if _warn_blocks:
-                                        # 주의 차트 — 개별 <img> 태그로 표시 (PIL 합성 → 큰 이미지 → 첨부 분리 방지)
+                                        # 주의 차트 — 개별 <img> 태그로 표시 (PIL 합성 → 큰 이미지 → 첨부 분리 방지).
+                                        # colwidth로 그리드 셀 고정폭 → 포워딩 시 줄바꿈/축소 방지.
                                         _parts.append(_html_table(_warn_blocks, 2, cellpad=4,
-                                                                  cellstyle='vertical-align:top; text-align:left;'))
+                                                                  cellstyle='vertical-align:top; text-align:left;',
+                                                                  colwidth=_warn_col_w))
                                     anomaly_html = ''.join(_parts) if _parts else '<p style="margin:4px 0;">이상항목 없음</p>'
                                 else:
                                     anomaly_html = '<p style="margin:4px 0;">이상항목 없음</p>'
