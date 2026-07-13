@@ -1937,7 +1937,8 @@ def main():
                                                 _slow, _shigh = _spec_bounds(item)
                                                 _wfmaps = render_specout_wfmaps_b64(
                                                     _wfmap_src, item, spec_low=_slow, spec_high=_shigh,
-                                                    target_lot=target_lot_id, max_maps=_wf_max)
+                                                    target_lot=target_lot_id, max_maps=_wf_max,
+                                                    main_vehicle=vehicle)
                                                 if _wfmaps:
                                                     # PIL 합성: 개별 WF MAP을 그리드로 배치 + 라벨 표기 → 1장
                                                     from PIL import Image as _PILImg2, ImageDraw as _PILDraw2, ImageFont as _PILFont2

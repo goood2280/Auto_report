@@ -1509,7 +1509,7 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
 
 def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
                               target_lot=None, max_maps=25,
-                              size_in=0.62, dpi=None):
+                              size_in=0.62, dpi=None, main_vehicle=None):
     """spec-out(=flier) 칩맵을 측정(lot, wafer, tkout) 단위로 그려 [(label, b64), ...]로 반환.
 
     [0] Anomaly Trend Chart 의 SPEC OUT 항목 우측에 붙이는 용도.
@@ -1521,6 +1521,13 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
       - label = f"{ROOT_LOT_ID} #{WAFER_ID}".
     spec_low/spec_high는 호출부에서 REPORT DIRECTION을 이미 반영한 값(UPPER=하한 None,
     LOWER=상한 None)을 넘겨야 Trend의 SPEC OUT 판정과 일치한다.
+
+    main_vehicle : wafer 원(150mm)·shot pitch·격자 범위를 '측정 데이터'가 아니라 등록된
+      MASK(vehicle)별 chip layout(CHIP_X_ADJ/CHIP_Y_ADJ/Chip_Radius)으로 계산하기 위한 vehicle 명.
+      이걸 넘겨야 _wafer_circle_params가 측정 subset에 radius가 없거나 GLOBAL_CONFIG.vehicle이
+      미설정/불일치일 때도 실제 Chip_Radius fit(정확한 150mm 원)을 쓴다. 미전달 시 측정 데이터
+      radius나 GLOBAL_CONFIG.vehicle에 의존하다 실패하면 shot을 억지로 원 안에 가두는
+      bounding-원 폴백으로 떨어져, 실제로는 원 밖으로 나가야 할 edge shot이 안쪽으로 눌린다.
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -1558,7 +1565,9 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
     if len(d) == 0:
         return []
     d[ct] = pd.to_datetime(d[ct], errors='coerce')
-    _circ = _wafer_circle_params(d, cx, cy, crad, mask_col=cm)   # 실제 150mm wafer 원(vehicle 매칭)
+    # 실제 150mm wafer 원(vehicle 매칭) — main_vehicle을 넘겨 등록 layout의 Chip_Radius fit을
+    # 강제(측정 subset radius 결손/GLOBAL_CONFIG 미설정 시 bounding-원 폴백으로 눌리는 것 방지)
+    _circ = _wafer_circle_params(d, cx, cy, crad, mask_col=cm, main_vehicle=main_vehicle)
     vals = pd.to_numeric(d[item], errors='coerce')
     lo = None if spec_low is None else float(spec_low)
     hi = None if spec_high is None else float(spec_high)
@@ -1601,10 +1610,11 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
         ordered = tgt + rest
 
     # 전체 wafer 격자가 잘리지 않도록 공통 축범위 — chip layout이 있으면 전체 grid 기준
-    gx0, gx1, gy0, gy1, xpad, ypad = _wfmap_grid_limits(d, cx, cy)
+    gx0, gx1, gy0, gy1, xpad, ypad = _wfmap_grid_limits(d, cx, cy, main_vehicle=main_vehicle)
     # 축 표시범위(원 포함) — 모든 맵 공통. shot은 인접 센터 간격(pitch) 크기 사각형으로 그림(gap 제거)
     _xlo, _xhi, _ylo, _yhi = _wfmap_axis_limits(gx0, gx1, gy0, gy1, xpad, ypad, _circ)
-    _pit_x, _pit_y = _wfmap_shot_pitch_xy(d, cx, cy)   # 좌표파일 layout 있으면 그 기준(측정 pt수 무관)
+    # 좌표파일 layout 있으면 그 기준(측정 pt수 무관) — main_vehicle로 실제 shot 크기 반영
+    _pit_x, _pit_y = _wfmap_shot_pitch_xy(d, cx, cy, main_vehicle=main_vehicle)
 
     res = []
     for gd, g in ordered:
