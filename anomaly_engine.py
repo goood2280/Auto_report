@@ -48,7 +48,7 @@ warnings.filterwarnings("ignore", message=".*Glyph.*")
 # ──────────────────────────────────────────────────────────────────────
 # Finding severity 등급 — 신호등 3색 (HTML/PPT 색상·정렬에 사용)
 #   CRITICAL : 빨강 ● 이상            (spec-out 불량모드 등 확정적 이상)
-#   WARNING  : 주황 ● 주의            (공정 실이상이나 재현성 낮음 — std 확대/집단분리/median 이탈/drift/재발)
+#   WARNING  : 주황 ● 주의            (spec 이내 이상 신호 — 플라이어(소수 pt 이탈)/산포 확대)
 #   NOTICE   : 노랑 ● 주의            (측정이상 추정 — PCHK 동일 site 등 측정 신뢰성 의심)
 #   INFO     : 회색 ● 참고
 # ※ 색/라벨을 바꾸려면 이 표만 수정하면 됨(HTML·요약 head 모두 반영). PPT는 insert_findings_page 미러.
@@ -679,7 +679,7 @@ RULE_FUNCTION_SPEC = """\
   median(ITEM) <= x        : 지정 항목 대표 median(wafer median 중앙값) 비교(우변: 숫자 또는 spec_high/spec_low[*계수])
   stddev(ITEM) <= x        : 지정 항목 대표 산포(wafer std 중앙값) 비교(우변 동일)
   rstd(ITEM) >= x          : 지정 항목 대표 robust 산포(wafer robust std 중앙값) 비교
-등급 의미: 이상(critical)=spec 이탈 pt 존재 / 주의(warning)=wafer 산포가 보통 wafer 대비 임계배수 초과.
+등급 의미: 이상(critical)=spec 이탈 pt 존재 / 주의(warning)=플라이어(spec 이내 소수 pt 이탈) 또는 wafer 산포가 보통 wafer 대비 임계배수 초과(+spec 폭 대비 절대량 게이트).
 항목명/CAT2명은 원 이름(ALIAS)·표시명 둘 다 인식된다(자연어에 적힌 표기 그대로 사용)."""
 
 # 자연어 표현 → 조건 원자 변환 지침 — ANOMALY_KNOWLEDGE.md의 '쓸 수 있는 조건 표현' 표와 1:1.
@@ -2126,6 +2126,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         return getattr(config, k, d) if config else d
 
     disp_ratio = cfg('anomaly_lot_dispersion_ratio', 1.5)
+    # ── 주의(WARNING) 세부 판정 설정 (My_config — HTML/PPT 안내문에도 동일 값이 동적 표기됨) ──
+    flier_sigma = float(cfg('anomaly_flier_sigma', 3.5) or 0)         # Flier 임계 σ (0=OFF)
+    flier_max_pts = int(cfg('anomaly_flier_max_pts', 0) or 0)         # Flier 최대 pt 상한(0=상한 없음)
+    disp_min_spec_frac = float(cfg('anomaly_disp_min_spec_frac', 0.0) or 0.0)  # 산포 절대량 게이트(spec 폭 비율)
 
     # radius zone 경계(Center ≤ r_center_max, Middle ≤ r_middle_max, 그 외 Edge).
     #  radius plot이 참고하는 설정파일(reformatter/config.yaml)의 radius_zones와 동일 값.
@@ -2742,8 +2746,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         #   산포 배수     = wafer 내부 robust 산포 / 보통 wafer 산포
         #   항목 대표값 = target lot wafer 중 '가장 심한' wafer(worst).
         disp_txt = ''
+        flier_txt = ''
         worst_med_dev, worst_med_w, worst_med_val = 0.0, None, None
         worst_disp_ratio, worst_disp_w = 0.0, None
+        worst_flier_w, worst_flier_cnt, worst_flier_dev = None, 0, 0.0
         _wstats = {}    # wafer별 {median, std, n} — 이상/주의 항목의 wafer 통계(요청: findings·AI·룰에 포함)
         _rws = []       # wafer별 robust 산포(1.4826×MAD) — rstd/rstd_asc 룰 원자용
         if tgt_it is not None:
@@ -2771,8 +2777,22 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         _wi = _waf_int(w)
                         worst_disp_ratio = r
                         worst_disp_w = _wi if _wi is not None else w
+                # ── Flier: wafer median 대비 '보통 wafer 산포'의 flier_sigma σ 초과 pt ──
+                #   1개 이상이면 Flier 주의(flier_max_pts>0이면 그 개수 이하일 때만 — 초과는 산포 쪽).
+                #   MAD 기반 산포배수는 소수 pt에 둔감해 이 케이스를 못 잡으므로 상보적 판정.
+                if typ_wspread and flier_sigma > 0 and len(_s) >= 5:
+                    _fdev = (_s - float(_s.median())).abs() / typ_wspread
+                    _fcnt = int((_fdev > flier_sigma).sum())
+                    if (_fcnt >= 1 and (flier_max_pts <= 0 or _fcnt <= flier_max_pts)
+                            and float(_fdev.max()) > worst_flier_dev):
+                        _wi = _waf_int(w)
+                        worst_flier_dev = float(_fdev.max())
+                        worst_flier_w = _wi if _wi is not None else w
+                        worst_flier_cnt = _fcnt
             if worst_disp_ratio >= 1.3 and worst_disp_w is not None:
                 disp_txt = f"#{worst_disp_w} 산포 {worst_disp_ratio:.1f}배"
+            if worst_flier_w is not None:
+                flier_txt = f"#{worst_flier_w} Flier {worst_flier_cnt}pt(최대 {worst_flier_dev:.1f}σ)"
 
         # ── agg(trend_tkout_agg 집계 판정) 항목은 '산포(wafer 내부 분산)' 기준 주의를 띄우지 않는다 ──
         #   agg 항목은 판정 자체가 집계값(P10/MEDIAN 등) 기준이라 raw 측정치의 wafer 내부 산포는
@@ -2781,6 +2801,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         #   에서 모두 제외한다. spec-out(CRITICAL) 판정은 agg 집계값 기준으로 그대로 유지된다.
         if it in _agg_item_set:
             worst_disp_ratio, worst_disp_w, disp_txt = 0.0, None, ''
+            worst_flier_w, worst_flier_cnt, worst_flier_dev, flier_txt = None, 0, 0.0, ''
 
         # spec-out을 wafer별 pt개수로 그룹 + 순위지표(최고 wafer 비율/spec-out wafer 수) + PGM(pt)/zone
         specout_txt, n_out, specout_map = ('', 0, {})
@@ -2813,6 +2834,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'n_so_wafers': int(so_n_wafers),
             'worst_med_dev': float(worst_med_dev),
             'worst_disp_ratio': float(worst_disp_ratio),
+            'worst_flier_dev': float(worst_flier_dev),
             'report_order': report_order.get(it, 1e9),
         }
 
@@ -2825,19 +2847,34 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         if so_commonality:
             _bits.append(so_commonality)
         # radius zone 분포(위치: Center N ...)는 표시하지 않음(요청). so_zones는 basis에만 기록.
-        # median 이탈은 판정 기준에서 제외됨 → 상세에도 표시하지 않음. 산포(disp_txt)만.
+        # median 이탈은 판정 기준에서 제외됨 → 상세에도 표시하지 않음. 플라이어/산포만.
+        if flier_txt:
+            _bits.append(flier_txt)
         if disp_txt:
             _bits.append(disp_txt)
         detail = '. '.join(_bits)
 
+        # ── 산포 확대 절대량 게이트: worst wafer의 절대 robust 산포(배수×보통 wafer 산포)가
+        #    spec 폭(UCL−LCL)의 disp_min_spec_frac 미만이면 산포 주의를 띄우지 않는다
+        #    (spec 대비 무의미하게 작은 산포 확대 오탐 억제). 단측 spec/무spec은 게이트 미적용.
+        _disp_gate_ok = True
+        if (disp_min_spec_frac > 0 and lo is not None and hi is not None and hi > lo
+                and typ_wspread and worst_disp_ratio > 0):
+            _disp_gate_ok = (worst_disp_ratio * typ_wspread) >= disp_min_spec_frac * (hi - lo)
+
         # 판단 severity 결정 — 모든 Index 동일 기준(PCHK 특수처리 없음).
         #   이상(CRITICAL): spec(LCL/UCL) 이탈 point가 하나라도 있으면 이상. (median 기준 미사용)
-        #   주의(WARNING) : spec 이내지만 '해당 wafer의 내부 산포'가 다른 wafer(보통 wafer) 대비 큰 경우.
+        #   주의(WARNING) : spec 이내지만 ① Flier(wafer median 대비 보통 wafer 산포의
+        #                   flier_sigma σ 초과 pt 1개 이상) 또는
+        #                   ② 산포 확대(wafer 내부 산포가 보통 wafer 대비 disp_ratio배 초과,
+        #                   disp_min_spec_frac>0이면 절대량 게이트도 통과)인 경우.
         #   그 외         : 참고(INFO).
         if n_out > 0:
             # 제외 키워드 PCHK는 이상(CRITICAL) 판정 대신 '측정이상 추정(NOTICE)' 신호만
             _sev = 'NOTICE' if it in _meas_only else 'CRITICAL'
-        elif worst_disp_ratio > disp_ratio:
+        elif worst_flier_w is not None:
+            _sev = 'INFO' if it in _meas_only else 'WARNING'
+        elif worst_disp_ratio > disp_ratio and _disp_gate_ok:
             _sev = 'INFO' if it in _meas_only else 'WARNING'
         else:
             _sev = 'INFO'
@@ -2892,6 +2929,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                                    key=lambda z: (z is None, z)),  # spec-out wafer 번호 목록
             'so_ratio': float(so_max_ratio),     # spec_out_ratio(ITEM): wafer 최고 이탈 비율(0~1)
             'med_dev': float(worst_med_dev),     # median_dev_sigma(ITEM): worst wafer median 이탈 σ
+            'flier_pt': int(worst_flier_cnt),    # 플라이어 pt 수(worst wafer, 1~max일 때만 >0)
+            'flier_dev': float(worst_flier_dev), # 플라이어 최대 이탈 σ(보통 wafer 산포 기준)
             'pattern': so_pattern or '',         # pattern(ITEM, 라벨): 특이맵 라벨(판정 on일 때만)
             'zones': dict(so_zones or {}),       # zone_share(ITEM, Edge): spec-out zone 분포
             'commonality': so_commonality or '', # repeat_shot/repeat_similar(ITEM)
@@ -2916,6 +2955,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'median_pctile': round(_tmed_pct, 1) if _tmed_pct is not None else None,
             'worst_wafer_median_sigma': round(worst_med_dev, 1) if worst_med_dev else 0.0,
             'worst_wafer_dispersion_ratio': round(worst_disp_ratio, 1) if worst_disp_ratio else 0.0,
+            'flier_pt': int(worst_flier_cnt),
+            'flier_max_dev_sigma': round(worst_flier_dev, 1) if worst_flier_dev else 0.0,
             'pattern': so_pattern,
             # wafer별 median/std (AI 해석 입력 — 더 정확한 판단). rep_*는 룰/요약 대표값.
             'rep_stddev': _sig4(_rep_std),
@@ -2951,6 +2992,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'worst_median_dev_sigma': round(worst_med_dev, 3) if worst_med_dev else 0.0,
             'worst_dispersion_wafer': worst_disp_w,
             'worst_dispersion_ratio': round(worst_disp_ratio, 3) if worst_disp_ratio else 0.0,
+            'dispersion_abs_gate_pass': bool(_disp_gate_ok),   # 산포 절대량 게이트(spec 폭 비율) 통과 여부
+            'flier_wafer': worst_flier_w,                      # 플라이어 worst wafer
+            'flier_pt': int(worst_flier_cnt),                  # 플라이어 pt 수(1~flier_max_pts)
+            'flier_max_dev_sigma': round(worst_flier_dev, 2) if worst_flier_dev else 0.0,
             # 측정신뢰성(측정이상 추정, AI 전용) — 동일 shot 다른 항목 동시 spec-out 겹침
             'meas_target_items': _meas_target_tokens,       # 매핑에 적힌 검증 대상(원문 표기)
             'meas_target_resolved': _meas_target_resolved,  # 실제 매칭된 ITEM alias(None=전체)
@@ -3021,7 +3066,20 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         if it in _meas_only:   # spec-out 없는 판정 제외 PCHK → finding 없음
             continue
 
-        if worst_disp_ratio > disp_ratio:
+        # ── 주의① Flier: spec 이내지만 소수 pt 뜬 케이스 — 산포 확대보다 우선 표기 ──
+        if worst_flier_w is not None:
+            findings.append(_finding(
+                "WARNING", "FLIER", it,
+                f"Flier : {_disp(it)} - #{worst_flier_w} {worst_flier_cnt}pt "
+                f"(최대 {worst_flier_dev:.1f}σ)", "",
+                display_name=_disp(it), cat2=cat2_map.get(it, ''),
+                basis=(f"spec 이내지만 wafer median 대비 보통 wafer 산포의 "
+                       f"{flier_sigma:g}σ 초과 pt {worst_flier_cnt}개"),
+                wafer_stats=dict(_wstats), rep_stddev=_rep_std, rep_median=_rep_med))
+            continue
+
+        # ── 주의② 산포 확대(DISPERSION): 배수 초과 (+게이트 설정 시 절대량 통과) ──
+        if worst_disp_ratio > disp_ratio and _disp_gate_ok:
             # 형식: "산포 확대 : ITEM - #W 산포 X배" (제목에 다 담고 상세는 비움 → 깔끔)
             findings.append(_finding(
                 "WARNING", "DISPERSION", it,
@@ -3566,6 +3624,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     #   이상(SPEC_OUT) : P = 20000 + 100·R_max + N_wf/100
     #        R_max = 항목 내 '최대 wafer spec-out 비율' = max_wafer(이탈 pt / 측정 pt), 0~1
     #        N_wf  = spec-out wafer 수 (0~25, 동점 tie-break용으로 /100 축소)
+    #   주의(FLIER)     : P = 10000 + 100·(F/kσ)
+    #        F = 플라이어 최대 이탈 σ, kσ = anomaly_flier_sigma (임계 대비 배수 — 산포배수 D와 동일 스케일)
     #   주의(DISPERSION): P = 10000 + 100·D
     #        D = 항목 내 '최대 wafer 산포배수' = max_wafer(wafer 내부 robust 산포 / 보통 wafer 산포)
     #   참고(그 외)     : P = 100·D
@@ -3579,6 +3639,9 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             return 30000.0 + (100.0 if f.get('severity') == 'CRITICAL' else 0.0)
         if t == 'SPEC_OUT':
             return 20000.0 + 100.0 * ri.get('max_ratio', 0.0) + ri.get('n_so_wafers', 0) / 100.0
+        if t == 'FLIER':
+            return 10000.0 + 100.0 * (ri.get('worst_flier_dev', 0.0) / flier_sigma
+                                      if flier_sigma > 0 else 0.0)
         if t == 'DISPERSION':
             return 10000.0 + 100.0 * ri.get('worst_disp_ratio', 0.0)
         return 100.0 * ri.get('worst_disp_ratio', 0.0)

@@ -1387,43 +1387,10 @@ def main():
                         sb_rows = list(VIP_group_HTML.iterrows())
                         _wcols = list(VIP_group_HTML.columns)
 
-                        # wafer별 WF MAP (≥min_pts 측정 index만) — index 점수행 아래에 'WF MAP 행'으로, wafer 열에 정렬
-                        _wf_min = getattr(GLOBAL_CONFIG, 'scoreboard_wfmap_min_pts', 50)
-                        _wf_excl = [str(k).upper() for k in getattr(GLOBAL_CONFIG, 'wfmap_exclude_keywords', [])]
-                        wfmaps_by_item = {}
-                        try:
-                            # 항목별 spec/방향만 먼저 추려 배치 렌더링(워커 프로세스 병렬) 요청
-                            _wf_specs = []
-                            for _it in list(dict.fromkeys([idx[1] for idx, _ in sb_rows])):
-                                # 제외 키워드(예: PCHK)가 포함된 item은 pt수와 무관하게 WF MAP 미표시
-                                if any(_kw in str(_it).upper() for _kw in _wf_excl):
-                                    continue
-                                _dir = 'BOTH'
-                                _slow = _shigh = None
-                                try:
-                                    if _it in spec_data.index:
-                                        if 'REPORT DIRECTION' in spec_data.columns:
-                                            _dv = str(spec_data.loc[_it, 'REPORT DIRECTION']).strip().upper()
-                                            if _dv in ('UPPER', 'LOWER', 'BOTH'):
-                                                _dir = _dv
-                                        if 'SPECLOW' in spec_data.columns:
-                                            _v = spec_data.loc[_it, 'SPECLOW']; _slow = None if pd.isna(_v) else _v
-                                        if 'SPECHIGH' in spec_data.columns:
-                                            _v = spec_data.loc[_it, 'SPECHIGH']; _shigh = None if pd.isna(_v) else _v
-                                except Exception:
-                                    pass
-                                _wf_specs.append({'item': _it, 'direction': _dir,
-                                                  'spec_low': _slow, 'spec_high': _shigh})
-                            wfmaps_by_item = render_wafer_wfmaps_batch(
-                                df, _wf_specs, min_pts=_wf_min, lot_prefix=target_root_lot_id,
-                                dpi=getattr(GLOBAL_CONFIG, 'html_wfmap_dpi', 110), by_lot=True)
-                            print(f"[INFO] Score Board wafer WF MAP: {len(wfmaps_by_item)}개 index (>={_wf_min}pt)")
-                        except Exception as _we:
-                            print(f"[WARN] Score Board WF MAP 스킵: {_we}")
+                        # Score Board WF MAP은 용량 문제로 제거됨 — WF MAP은 PPT에서만 확인.
+                        # (렌더링/합성 코드와 scoreboard_wfmap_min_pts 설정도 함께 삭제)
 
-                        # 렌더 시퀀스: index 점수행만. WF MAP은 행마다 <img>를 넣는 대신 표 아래
-                        # '단일 합성 보드 이미지 1장'으로 붙인다 — 사내 메일 API가 본문 인라인
-                        # 이미지도 첨부로 계산하므로, 첨부 수가 index 수에 비례하지 않게 상수화.
+                        # 렌더 시퀀스: index 점수행만.
                         render_seq = []   # (kind, cat, item, payload)
                         for idx, row in sb_rows:
                             cat, item = idx
@@ -1440,23 +1407,16 @@ def main():
                             cat_span[_j] = _k - _j + 1
                             _j = _k + 1
 
-                        # WF MAP이 있으면 wafer 열 폭을 약간만 넓혀 표시 (48→45px, ~5% 축소 → #25까지 표시)
-                        _has_wf = len(wfmaps_by_item) > 0
-                        _wf_w = 45
                         # 메일 클라이언트는 <style> CSS를 무시하므로 각 셀에 inline style로 직접 지정
                         # (padding/font-size/nowrap도 <style> 값과 동일하게 inline — 메일·포워딩 표시 통일)
                         _SB_BD = 'border:1px solid #2c2c2c;'      # 셀 구분선(inline)
                         _SB_PAD = 'padding:4px 6px; white-space:nowrap;'
-                        _sb_waf_w = _wf_w if _has_wf else 40      # wafer 셀 폭(숫자 잘림 방지) inline min-width
+                        _sb_waf_w = 40      # wafer 셀 폭(숫자 잘림 방지) inline min-width
                         _SB_WAF = (f'{_SB_BD} text-align:center; width:{_sb_waf_w}px; min-width:{_sb_waf_w}px; '
                                    f'max-width:{_sb_waf_w}px; padding:2px 1px; font-size:10px; white-space:nowrap;')
                         _SB_CAT = f'{_SB_BD} {_SB_PAD} text-align:center; min-width:77px;'      # category 고정열
                         _SB_ITEM = f'{_SB_BD} {_SB_PAD} text-align:center; min-width:240px;'    # Item 고정열
                         sb_html = ''
-                        if _has_wf:
-                            sb_html += (f'<style>.score-board td.sb-val, .score-board th.sb-waf'
-                                        f'{{width:{_wf_w}px !important; min-width:{_wf_w}px !important; '
-                                        f'max-width:{_wf_w}px !important;}}</style>\n')
                         # lot 그룹(헤더 colspan용): _wcols 순서대로 같은 lot을 묶음
                         _lot_groups = []   # [(lot, [col, ...]), ...]
                         for _c in _wcols:
@@ -1501,138 +1461,7 @@ def main():
                             sb_html += '    </tr>\n'
                         sb_html += '  </tbody>\n</table>\n'
 
-                        # ── Score Board WF MAP 제거됨 (용량 문제) ──
-                        # WF MAP은 PPT에서만 확인 가능. HTML Score Board에서는 표시하지 않음.
-                        _WF_BUDGET_BYTES = 2 * 1024 * 1024   # 2MB
-                        if False:  # wfmaps_by_item — WF MAP 비활성화(용량)
-                            try:
-                                from PIL import Image as _PILImg, ImageDraw as _PILDraw, ImageFont as _PILFont
-                                import base64 as _b64_sb
-                                import io as _io_sb
-                                _hs_sb = max(1, int(getattr(GLOBAL_CONFIG, 'html_img_scale', 2)))
-
-                                # 모든 WF MAP 보유 항목 표시 (첨부 제한 없으므로 CAT2 필터링 불필요)
-                                _b_items = [it for _k, _c, it, _p in render_seq if it in wfmaps_by_item]
-                                _b_items = list(dict.fromkeys(_b_items))
-
-                                def _render_wfmap_strips(scale):
-                                    """항목별 strip 이미지를 렌더링해 [(item, b64, disp_w, disp_h), ...] 반환."""
-                                    _sc = max(1, int(scale))
-                                    _slot = _wf_w * _sc
-                                    _map_px = (_wf_w - 2) * _sc
-                                    _row_h = _map_px + 6 * _sc
-                                    _LBL_W = 190 * _sc
-                                    _hdr_lot = 16 * _sc if len(_lot_groups) > 1 else 0
-                                    _hdr_h = _hdr_lot + 16 * _sc
-                                    _strip_w = _LBL_W + _slot * len(_wcols)
-                                    try:
-                                        _sb_ttf = "NanumGothic.ttf"
-                                        try:
-                                            _PILFont.truetype(_sb_ttf, 10)
-                                        except Exception:
-                                            _sb_ttf = "arial.ttf"
-                                        _bfont = _PILFont.truetype(_sb_ttf, 10 * _sc)
-                                        _bfont_s = _PILFont.truetype(_sb_ttf, 9 * _sc)
-                                    except Exception:
-                                        _bfont = _bfont_s = _PILFont.load_default()
-
-                                    def _fit_t(txt, max_w, font):
-                                        try:
-                                            while txt and _PILDraw.Draw(_PILImg.new('RGB', (1, 1))).textlength(txt, font=font) > max_w:
-                                                txt = txt[:-1]
-                                        except Exception:
-                                            txt = txt[:28]
-                                        return txt
-
-                                    def _txt_w(txt, font):
-                                        try:
-                                            return _PILDraw.Draw(_PILImg.new('RGB', (1, 1))).textlength(txt, font=font)
-                                        except Exception:
-                                            return len(txt) * 5
-
-                                    strips = []
-                                    # 헤더 strip (lot 구간 + wafer 번호)
-                                    _hdr = _PILImg.new('RGB', (_strip_w, _hdr_h), (240, 240, 240))
-                                    _hdraw = _PILDraw.Draw(_hdr)
-                                    if _hdr_lot:
-                                        _cx = _LBL_W
-                                        for _lot, _cols in _lot_groups:
-                                            _seg_w = _slot * len(_cols)
-                                            _lt = _fit_t(str(_lot), _seg_w - 4 * _sc, _bfont_s)
-                                            _hdraw.text((_cx + max(0, (_seg_w - _txt_w(_lt, _bfont_s)) // 2), 2 * _sc),
-                                                        _lt, fill=(30, 30, 30), font=_bfont_s)
-                                            _hdraw.line([(_cx, 0), (_cx, _hdr_h - 1)], fill=(180, 180, 180))
-                                            _cx += _seg_w
-                                    for _ci, col in enumerate(_wcols):
-                                        _lab = f"#{col[1]}"
-                                        _hdraw.text((_LBL_W + _ci * _slot + max(0, (_slot - _txt_w(_lab, _bfont_s)) // 2),
-                                                     _hdr_lot + 2 * _sc), _lab, fill=(60, 60, 60), font=_bfont_s)
-                                    _hdraw.rectangle([0, 0, _strip_w - 1, _hdr_h - 1], outline=(44, 44, 44))
-                                    _hbuf = _io_sb.BytesIO()
-                                    _hdr.save(_hbuf, format='PNG', optimize=True)
-                                    strips.append(('__header__', _b64_sb.b64encode(_hbuf.getvalue()).decode('utf-8'),
-                                                   _strip_w // _sc, _hdr_h // _sc))
-
-                                    # 항목별 strip
-                                    for _bit in _b_items:
-                                        _bmaps = wfmaps_by_item[_bit]
-                                        _strip = _PILImg.new('RGB', (_strip_w, _row_h), (255, 255, 255))
-                                        _sdraw = _PILDraw.Draw(_strip)
-                                        _sdraw.rectangle([0, 0, _LBL_W - 1, _row_h - 1], fill=(235, 244, 255))
-                                        _sdraw.text((6 * _sc, (_row_h - 12 * _sc) // 2),
-                                                    _fit_t(str(display_name(_bit)), _LBL_W - 12 * _sc, _bfont),
-                                                    fill=(31, 78, 121), font=_bfont)
-                                        for _ci, col in enumerate(_wcols):
-                                            _x0 = _LBL_W + _ci * _slot
-                                            _b = _bmaps.get(f"{col[0]}|{col[1]}")
-                                            if _b:
-                                                try:
-                                                    _mimg = (_PILImg.open(_io_sb.BytesIO(_b64_sb.b64decode(_b)))
-                                                             .convert('RGB').resize((_map_px, _map_px), _PILImg.LANCZOS))
-                                                    _strip.paste(_mimg, (_x0 + (_slot - _map_px) // 2, 3 * _sc))
-                                                except Exception:
-                                                    pass
-                                            else:
-                                                _sdraw.rectangle([_x0 + 1, 1, _x0 + _slot - 1, _row_h - 1],
-                                                                 fill=(246, 246, 246))
-                                        _sdraw.line([(0, 0), (_strip_w - 1, 0)], fill=(210, 210, 210))
-                                        for _ci in range(len(_wcols)):
-                                            _x = _LBL_W + _ci * _slot
-                                            _sdraw.line([(_x, 0), (_x, _row_h - 1)], fill=(225, 225, 225))
-                                        _sdraw.rectangle([0, 0, _strip_w - 1, _row_h - 1], outline=(180, 180, 180))
-                                        _sbuf = _io_sb.BytesIO()
-                                        _strip.save(_sbuf, format='PNG', optimize=True)
-                                        strips.append((_bit, _b64_sb.b64encode(_sbuf.getvalue()).decode('utf-8'),
-                                                       _strip_w // _sc, _row_h // _sc))
-                                    return strips
-
-                                # 1차 렌더 (기본 배율)
-                                _strips = _render_wfmap_strips(_hs_sb)
-                                _total_bytes = sum(len(s[1]) * 3 // 4 for s in _strips)  # base64 → 실제 byte 추정
-                                # 2MB 초과 시 배율 축소 후 재렌더
-                                if _total_bytes > _WF_BUDGET_BYTES and _hs_sb > 1:
-                                    _ratio = (_WF_BUDGET_BYTES / _total_bytes) ** 0.5
-                                    _new_sc = max(1, int(_hs_sb * _ratio))
-                                    if _new_sc < _hs_sb:
-                                        print(f"[INFO] WF MAP 총 {_total_bytes / 1024:.0f}KB > 2MB → 배율 {_hs_sb}→{_new_sc} 축소 재렌더")
-                                        _strips = _render_wfmap_strips(_new_sc)
-                                        _total_bytes = sum(len(s[1]) * 3 // 4 for s in _strips)
-                                print(f"[INFO] Score Board WF MAP: {len(_b_items)}개 항목, 총 {_total_bytes / 1024:.0f}KB")
-
-                                sb_html += (
-                                    '<div style="margin:6px 0 2px 0; font-size:11px; color:#555;">'
-                                    f'WF MAP (측정 ≥{_wf_min}pt index)</div>')
-                                for _sname, _sb64, _sw, _sh in _strips:
-                                    sb_html += (
-                                        f'<img class="sb-wfmap" src="data:image/png;base64,{_sb64}" width="{_sw}" height="{_sh}" '
-                                        f'style="width:{_sw}px; height:{_sh}px; display:block; margin:0; padding:0;"/>')
-                                sb_html += (
-                                    '<div style="margin:2px 0 0 0; font-size:10px; color:#888;">'
-                                    'Color: <span style="color:#d62728; font-weight:bold;">■</span> Spec High(빨강) '
-                                    '/ <span style="color:#1f77b4; font-weight:bold;">■</span> Spec Low(파랑) '
-                                    '/ <span style="color:#999999; font-weight:bold;">■</span> Median(회색)</div>')
-                            except Exception as _sb_comp_err:
-                                print(f"[WARN] Score Board WF MAP 생성 실패 → WF MAP 생략(PPT 참조): {_sb_comp_err}")
+                        # Score Board WF MAP은 용량 문제로 제거됨 — PPT에서만 확인.
                         score_board_html = sb_html
 
                         # ==================== Inline Table HTML 렌더링 (Manual) ====================
@@ -1992,7 +1821,9 @@ def main():
                                                     target_lot=target_lot_id, max_maps=_wf_max,
                                                     main_vehicle=vehicle)
                                                 if _wfmaps:
-                                                    # PIL 합성: 개별 WF MAP을 그리드로 배치 + 라벨 표기 → 1장
+                                                    # PIL 합성: '해당 lot(target)' WF MAP은 왼쪽에 파란 테두리 블록으로
+                                                    # 묶어 표시하고, 오른쪽에 나머지 lot(tkout_time 최신순) 그리드를
+                                                    # 이어붙여 1장으로 만든다. (각 블록 2행 기준 그리드)
                                                     from PIL import Image as _PILImg2, ImageDraw as _PILDraw2, ImageFont as _PILFont2
                                                     import io as _io2
                                                     _map_sz = 58 * _hs   # 맵 1개 px (supersample 적용)
@@ -2000,10 +1831,32 @@ def main():
                                                     _pad = 3 * _hs       # 셀 간격
                                                     _cell_w = _map_sz + _pad
                                                     _cell_h = _map_sz + _lab_h + _pad
-                                                    _ncol2 = max(1, -(-len(_wfmaps) // 2))  # 2행 기준 열수
-                                                    _nrow2 = -(-len(_wfmaps) // _ncol2)
-                                                    _cw_total = _ncol2 * _cell_w + _pad
-                                                    _ch_total = _nrow2 * _cell_h + _pad
+                                                    _wf_tgt = [w for w in _wfmaps if (len(w) > 2 and w[2])]
+                                                    _wf_rest = [w for w in _wfmaps if not (len(w) > 2 and w[2])]
+                                                    _bpad = 4 * _hs      # 파란 테두리와 맵 사이 여백
+                                                    _bw2 = max(2, _hs)   # 파란 테두리 두께(px)
+                                                    _gap = 7 * _hs if (_wf_tgt and _wf_rest) else 0   # 블록 간 간격
+
+                                                    def _grid_dims(_n):
+                                                        """2행 기준 그리드 (열수, 행수, 콘텐츠 w, 콘텐츠 h)."""
+                                                        if _n <= 0:
+                                                            return 0, 0, 0, 0
+                                                        _nc = max(1, -(-_n // 2))
+                                                        _nr = -(-_n // _nc)
+                                                        return (_nc, _nr,
+                                                                (_nc - 1) * _cell_w + _map_sz,
+                                                                (_nr - 1) * _cell_h + _map_sz + _lab_h)
+
+                                                    _nc_t, _nr_t, _w_t, _h_t = _grid_dims(len(_wf_tgt))
+                                                    _nc_r, _nr_r, _w_r, _h_r = _grid_dims(len(_wf_rest))
+                                                    # 두 블록의 맵 상단은 같은 높이로 정렬(테두리 여백은 target 블록만)
+                                                    _y0 = _pad + (_bpad if _wf_tgt else 0)
+                                                    _x_t = _pad + (_bpad if _wf_tgt else 0)
+                                                    _x_r = (_x_t + _w_t + _bpad + _gap) if _wf_tgt else _pad
+                                                    _cw_total = ((_x_r + _w_r + _pad) if _wf_rest
+                                                                 else (_x_t + _w_t + _bpad + _pad))
+                                                    _ch_total = max(_y0 + _h_t + (_bpad if _wf_tgt else 0),
+                                                                    _y0 + _h_r) + _pad
                                                     # 폰트
                                                     try:
                                                         _cf = "NanumGothic.ttf"
@@ -2014,29 +1867,56 @@ def main():
                                                         _cfont = _PILFont2.truetype(_cf, max(9, 10 * _hs))
                                                     except Exception:
                                                         _cfont = _PILFont2.load_default()
+                                                    # target lot 라벨용 bold 폰트(없으면 stroke로 두껍게 폴백)
+                                                    _cfont_b = None
+                                                    for _bf in ("NanumGothicBold.ttf", "malgunbd.ttf", "arialbd.ttf"):
+                                                        try:
+                                                            _cfont_b = _PILFont2.truetype(_bf, max(9, 10 * _hs))
+                                                            break
+                                                        except Exception:
+                                                            continue
                                                     _comp = _PILImg2.new('RGB', (_cw_total, _ch_total), (255, 255, 255))
                                                     _cdraw = _PILDraw2.Draw(_comp)
-                                                    for _wi, _wf in enumerate(_wfmaps):
+
+                                                    def _draw_wf_cell(_wf, _ox, _oy):
+                                                        """WF MAP 1셀(맵+라벨) 드로잉 — target lot 라벨은 파란색+bold."""
                                                         _lab, _b = _wf[0], _wf[1]
                                                         _is_tgt = _wf[2] if len(_wf) > 2 else False
-                                                        _col_i = _wi % _ncol2
-                                                        _row_i = _wi // _ncol2
-                                                        _ox = _pad + _col_i * _cell_w
-                                                        _oy = _pad + _row_i * _cell_h
-                                                        # WF MAP 이미지 붙이기
                                                         _wf_img = _PILImg2.open(_io2.BytesIO(base64.b64decode(_b)))
                                                         _wf_img = _wf_img.resize((_map_sz, _map_sz), _PILImg2.LANCZOS)
                                                         _comp.paste(_wf_img, (_ox, _oy))
-                                                        # 라벨
                                                         _lcolor = (0, 51, 204) if _is_tgt else (85, 85, 85)
+                                                        _lfont = (_cfont_b or _cfont) if _is_tgt else _cfont
                                                         try:
-                                                            _lbox = _cdraw.textbbox((0, 0), _lab, font=_cfont)
+                                                            _lbox = _cdraw.textbbox((0, 0), _lab, font=_lfont)
                                                             _lw = _lbox[2] - _lbox[0]
                                                         except Exception:
                                                             _lw = len(_lab) * 6 * _hs
                                                         _lx = _ox + (_map_sz - _lw) // 2
                                                         _ly = _oy + _map_sz + 1 * _hs
-                                                        _cdraw.text((_lx, _ly), _lab, fill=_lcolor, font=_cfont)
+                                                        if _is_tgt and _cfont_b is None:
+                                                            # bold 폰트가 없으면 stroke(외곽선)로 두껍게
+                                                            try:
+                                                                _cdraw.text((_lx, _ly), _lab, fill=_lcolor, font=_lfont,
+                                                                            stroke_width=max(1, _hs // 2), stroke_fill=_lcolor)
+                                                            except TypeError:   # 구버전 Pillow → 1px offset 이중 드로잉
+                                                                _cdraw.text((_lx, _ly), _lab, fill=_lcolor, font=_lfont)
+                                                                _cdraw.text((_lx + 1, _ly), _lab, fill=_lcolor, font=_lfont)
+                                                        else:
+                                                            _cdraw.text((_lx, _ly), _lab, fill=_lcolor, font=_lfont)
+
+                                                    for _wi, _wf in enumerate(_wf_tgt):
+                                                        _draw_wf_cell(_wf, _x_t + (_wi % _nc_t) * _cell_w,
+                                                                      _y0 + (_wi // _nc_t) * _cell_h)
+                                                    for _wi, _wf in enumerate(_wf_rest):
+                                                        _draw_wf_cell(_wf, _x_r + (_wi % _nc_r) * _cell_w,
+                                                                      _y0 + (_wi // _nc_r) * _cell_h)
+                                                    # 해당 lot(target) WF MAP 묶음 = 파란 테두리 박스
+                                                    if _wf_tgt:
+                                                        _cdraw.rectangle(
+                                                            [_x_t - _bpad, _y0 - _bpad,
+                                                             _x_t + _w_t + _bpad - 1, _y0 + _h_t + _bpad - 1],
+                                                            outline=(0, 51, 204), width=_bw2)
                                                     # 최종 크기 (supersample → 표시용 축소)
                                                     _disp_w = _cw_total // _hs
                                                     _disp_h = _ch_total // _hs
@@ -2067,11 +1947,13 @@ def main():
                                     _warn_blocks = []
                                     for _wit, _wb64, _ww, _wh in _warn_items:
                                         _blk = _trend_block(_wit, False, _wb64, _ww, _wh)
+                                        # 항목명 헤더는 좌측 정렬(전역 td{text-align:center} 상속 차단)
                                         _warn_hdr = (
                                             '<div style="font-size:13px; font-weight:bold; color:#1f4e79; '
-                                            'margin:2px 0 3px 2px; border-left:4px solid #f9a825; padding-left:7px;">'
+                                            'text-align:left; margin:2px 0 3px 2px; '
+                                            'border-left:4px solid #f9a825; padding-left:7px;">'
                                             f'{display_name(_wit)}</div>')
-                                        _blk = '<div>' + _warn_hdr + _blk + '</div>'
+                                        _blk = '<div style="text-align:left;">' + _warn_hdr + _blk + '</div>'
                                         _warn_blocks.append(_blk)
 
                                     # '이상'/'주의' 탭 라벨은 표시하지 않는다. 각 차트 좌상단의
@@ -2082,7 +1964,7 @@ def main():
                                     if _warn_blocks:
                                         # 주의 차트 — 개별 <img> 태그로 표시 (PIL 합성 → 큰 이미지 → 첨부 분리 방지)
                                         _parts.append(_html_table(_warn_blocks, 2, cellpad=4,
-                                                                  cellstyle='vertical-align:top;'))
+                                                                  cellstyle='vertical-align:top; text-align:left;'))
                                     anomaly_html = ''.join(_parts) if _parts else '<p style="margin:4px 0;">이상항목 없음</p>'
                                 else:
                                     anomaly_html = '<p style="margin:4px 0;">이상항목 없음</p>'
@@ -2127,10 +2009,42 @@ def main():
                         _ai_block = (ai_html + '<hr style="border:none;border-top:1px solid #eee;margin:8px 0;">') if ai_html else ''
                         _chart_sub = (f'<div class="section-title" style="{_SEC_T} font-size:13px; margin-top:14px;">'
                                       'Anomaly Trend Chart</div>')
+                        # ── 판정 로직 안내 박스(차트 위 고정 표기) — 임계값은 My_config에서 동적 반영 ──
+                        _lg_ratio = getattr(GLOBAL_CONFIG, 'anomaly_lot_dispersion_ratio', 2.0)
+                        _lg_fls = float(getattr(GLOBAL_CONFIG, 'anomaly_flier_sigma', 3.5) or 0)
+                        _lg_flm = int(getattr(GLOBAL_CONFIG, 'anomaly_flier_max_pts', 0) or 0)
+                        _lg_dgf = float(getattr(GLOBAL_CONFIG, 'anomaly_disp_min_spec_frac', 0.0) or 0.0)
+                        _lg_agg = ', '.join(f'{k}={v}' for k, v in
+                                            (getattr(GLOBAL_CONFIG, 'trend_tkout_agg', {}) or {}).items())
+                        _lg_agg_txt = (f' (집계 항목 {_lg_agg} 은 site가 아닌 집계값 기준)'
+                                       if _lg_agg else '')
+                        _lg_fcnt_txt = '1개 이상' if _lg_flm <= 0 else f'1~{_lg_flm}개'
+                        _lg_flier_txt = (
+                            f'① Flier — wafer median 대비 |값−median|이 보통 wafer 산포의 '
+                            f'{_lg_fls:g}σ를 넘는 pt가 {_lg_fcnt_txt} wafer 존재'
+                            if _lg_fls > 0 else '① Flier — OFF')
+                        _lg_gate_txt = (f'(절대 산포가 spec 폭의 {_lg_dgf * 100:g}% 이상일 때)'
+                                        if _lg_dgf > 0 else '')
+                        _chart_logic = (
+                            '<div style="font-size:11px; color:#555555; background:#f7f8fa; '
+                            'border:1px solid #e3e6ea; border-radius:4px; padding:6px 10px; '
+                            'margin:4px 0 8px 0; line-height:1.7; text-align:left;">'
+                            '<b style="color:#003366;">판정 로직</b><br>'
+                            f'&nbsp;· <span style="background:#d32f2f; color:#ffffff; font-weight:bold; '
+                            f'padding:0 5px; border-radius:2px;">SPEC OUT</span> : 해당 lot 측정값 중 '
+                            f'spec 이탈 pt가 1개 이상{_lg_agg_txt}<br>'
+                            f'&nbsp;· <span style="background:#f9a825; color:#1a1a1a; font-weight:bold; '
+                            f'padding:0 5px; border-radius:2px;">WARNING</span> : 설정된 spec 이탈은 없으나 '
+                            f'{_lg_flier_txt} ② 산포 확대 — 특정 wafer의 내부 산포가 보통 wafer 산포의 '
+                            f'{_lg_ratio:g}배 초과{_lg_gate_txt}<br>'
+                            f'&nbsp;· <b>SPEC OUT WF MAP</b> : <span style="color:#0033cc; font-weight:bold;">파란 '
+                            f'테두리 박스(파란 bold 라벨) = 해당 측정 lot_id({target_lot_id})내 wafer</span>, '
+                            '<span style="color:#555555;">회색 라벨 = 그 외 tkout_time 기준 최근 '
+                            'spec-out WF MAP</span></div>')
                         html_content = html_content.replace(
                             '<div id="target0"></div>',
                             f'<div id="target0"><div class="section-title" style="{_SEC_T}">■ [0] Anomaly Summary</div>'
-                            f'{_ai_block}{code_summary_html}{_chart_sub}{anomaly_html}</div>'
+                            f'{_ai_block}{code_summary_html}{_chart_sub}{_chart_logic}{anomaly_html}</div>'
                         )
                         html_content = html_content.replace(
                             '<div id="target1"></div>',
@@ -2153,6 +2067,20 @@ def main():
                             '<div id="target4"></div>',
                             ''
                         )
+
+                        # ==================== 인라인 이미지 불변식 검증 (수정 금지) ====================
+                        # 불변식: 리포트 HTML의 모든 <img> src는 반드시 data:image(base64) 인라인이어야
+                        # 한다(파일 경로/CID 참조 금지 — 메일 본문·포워딩·보관 HTML에서 이미지가 깨짐).
+                        # 코드 수정 후 이 검증에서 [ERROR]가 나오면 이미지 삽입부가 잘못 바뀐 것이다.
+                        # 새 이미지를 추가할 때는 항상 _img_datauri()를 거쳐 data URI로 넣을 것.
+                        _img_srcs = re.findall(r'<img\s[^>]*?src="([^"]*)"', html_content, re.DOTALL)
+                        _bad_srcs = [s for s in _img_srcs if not s.startswith('data:image/')]
+                        if _bad_srcs:
+                            print(f"[ERROR] HTML 인라인 이미지 불변식 위반 — data:image가 아닌 <img> src "
+                                  f"{len(_bad_srcs)}개 발견 (이미지가 깨져 보일 수 있음): "
+                                  f"{[s[:60] for s in _bad_srcs[:3]]}")
+                        else:
+                            print(f"[INFO] HTML 인라인 이미지 검증 OK — <img> {len(_img_srcs)}개 모두 data:image 인라인")
 
                         # ==================== HTML 저장 ====================
                         with open(f'{html_save_path}{fname}', 'w', encoding='utf-8') as hf:

@@ -174,8 +174,8 @@ python setup.py              # 현재 폴더에 전체 소스 추출 (기존 파
 
 - **AI 토글**: `use_gpt_summary`(마스터), `use_gpt_multistep`(다단계), `ai_stage_mode`(`'multi'`/`'single'`).
 - **규칙 컴파일**: `anomaly_nl_autocompile`(True — NL_RULES 자연어 규칙을 발행 시 자동 변환/적용).
-- **분석 민감도**: `anomaly_lot_dispersion_ratio`(↑=덜 민감), 지식 규칙용 `anomaly_median_low_sigma`. **통계 우선순위 제외**: `anomaly_exclude_items`(와일드카드). → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
-- **WF MAP**: `scoreboard_wfmap_min_pts`(=50), `wfmap_exclude_keywords`(예: `['PCHK']`).
+- **분석 민감도**: `anomaly_lot_dispersion_ratio`(↑=덜 민감), 플라이어 `anomaly_flier_sigma`/`anomaly_flier_max_pts`, 산포 절대량 게이트 `anomaly_disp_min_spec_frac`, 지식 규칙용 `anomaly_median_low_sigma`. **통계 우선순위 제외**: `anomaly_exclude_items`(와일드카드). → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
+- **WF MAP**: `wfmap_exclude_keywords`(예: `['PCHK']`).
 - **이미지 해상도**: PPT `ppt_chart_dpi`/`ppt_map_jpg_quality`, HTML `html_chart_dpi`/`html_wfmap_dpi`(독립 조정).
 - **색상**: `score_color_scale`(Score Board 연속 색), `score_color_scale_by_item`(ITEM별 override).
 - **발송/업로드**: `use_email_send`(사내 메일 API), `use_s3_upload`(S3/DX 업로드), `use_description_page`(CAT2 간지).
@@ -271,7 +271,8 @@ finding type과 우선순위(값이 클수록 위에 정렬)는 다음과 같습
 | **40000+** | `DEFECT_MODE` | 🔴 이상 / 🟠 주의 | `ANOMALY_KNOWLEDGE.md`의 **`[RULE]`** 충족 → 여러 항목 조합 판정(매칭 규칙마다 각각 finding) | `[불량 모드] <note>` + LINK + spec-out wafer 번호. → [지식 규칙 엔진](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용) |
 | **30000+** | `KNOWLEDGE` | 🔴 이상 / 🟠 주의 | 수기 `[RULE]` 체이닝 블록의 산포 비교(`compare_disp`) 등 지식 판정 | `[지식 판정] <name>` |
 | **20000+** | `SPEC_OUT` | 🔴 CRITICAL (이상) | 타깃 lot에서 spec(SPECLOW~SPECHIGH) 이탈 측정점 ≥ 1 | wafer별 (이탈 pt/측정 pt) 비율, 위치(radius zone)·PGM(pt) |
-| **10000+** | `DISPERSION` | 🟠 WARNING (주의) | spec 미초과 + **어떤 wafer의 산포** `> anomaly_lot_dispersion_ratio` 배 | worst wafer 내부 산포가 '보통 wafer 산포'의 몇 배 |
+| **10000+** | `FLIER` | 🟠 WARNING (주의) | spec 미초과 + 어떤 wafer에서 **\|값−wafer median\| > `anomaly_flier_sigma`×보통 wafer 산포**인 pt가 1개 이상 (`anomaly_flier_max_pts`>0이면 그 개수 이하일 때만) | worst wafer의 Flier pt 수 + 최대 이탈 σ |
+| **10000+** | `DISPERSION` | 🟠 WARNING (주의) | spec 미초과 + **어떤 wafer의 산포** `> anomaly_lot_dispersion_ratio` 배 (`anomaly_disp_min_spec_frac`>0이면 절대 산포 게이트도 통과해야) | worst wafer 내부 산포가 '보통 wafer 산포'의 몇 배 |
 | **하위(참고)** | `MEAS_SUSPECT` | 🟡 NOTICE (측정이상 추정) | **판정 제외(`wfmap_exclude_keywords`) PCHK**가 spec-out | 동일 shot 겹침 신호만 산출 → AI 측정이상 추정 입력 |
 
 > **median 이탈은 더 이상 finding을 만들지 않습니다.** 각 wafer median이 제품 wafer 분포에서 몇 σ 떨어졌는지는
@@ -671,6 +672,9 @@ interpret_with_ai(findings, metrics, knowledge_text, _LLM_FN, ...)
 | 변수 | 기본값 | 무엇을 바꾸나 | ↑ 올리면 | ↓ 내리면 |
 |------|--------|------|------|------|
 | `anomaly_lot_dispersion_ratio` | `2.0` | **주의(산포)** 임계 배수 — target wafer 내부 산포가 '보통 wafer 산포'의 이 배수 초과 시 주의 | 큰 산포만 주의 | 약한 산포도 주의 |
+| `anomaly_flier_sigma` | `3.5` | **주의(Flier)** 임계 σ — wafer median 대비 \|값−median\|이 '보통 wafer 산포'의 이 σ 초과 pt를 Flier로 판정 (0=OFF) | 확실히 뜬 pt만 | 살짝 뜬 pt도 |
+| `anomaly_flier_max_pts` | `0` | Flier로 볼 wafer당 **최대 초과 pt 수 상한** — `0`=상한 없음(1개 이상이면 Flier). 양수면 초과 시 산포 확대로 판정 | 더 많은 pt도 Flier | 소수 pt만 Flier |
+| `anomaly_disp_min_spec_frac` | `0.0` | **주의(산포) 절대량 게이트** — worst wafer 절대 산포가 spec 폭(UCL−LCL)의 이 비율 미만이면 산포 주의 미발생 (`0`=게이트 OFF, 단측 spec 미적용) | spec 대비 큰 산포만 | 작은 산포도 |
 | `anomaly_median_low_sigma` | `2.0` | 지식 규칙 `median_low/high(ITEM)` 원자의 임계 σ — target median이 제품 대비 이 σ 이상 낮을/높을 때 참(True) | 확실한 이동만 매칭 | 작은 이동도 매칭 |
 | `anomaly_trend_chart_top_n` | `3` | [0] Anomaly Trend Chart / HTML 요약에 **보여줄 상위 항목 수**(CAT2당 대표 1개) | 더 많이 표시 | 핵심만 표시 |
 | `anomaly_deviation_sigma` | `1.5` | Trend chart 항목이 top_n에 못 미칠 때 **`metrics_dict`로 보충 선정**하는 σ(판정 아님) | 보충 적게 | 보충 많이 |
@@ -708,7 +712,6 @@ self.anomaly_exclude_items = [
 | `anomaly_trend_chart_top_n` | `3` | Trend chart 최대 개수(이상+주의 합산, 요약 상위와 동일 — 같은 CAT2는 대표 1개) |
 | `anomaly_wfmap_specout` | `True` | 이상 항목 우측 spec-out WF MAP 표시 |
 | `anomaly_wfmap_max_count` | `42` | spec-out WF MAP 총 표시 상한(타깃 spec wafer는 항상 전부) |
-| `scoreboard_wfmap_min_pts` | `50` | Score Board(HTML)에 wafer별 WF MAP 넣을 최소 측정 point 수 |
 | `wfmap_exclude_keywords` | `['PCHK']` | ALIAS에 키워드 부분일치 시 WF MAP 미표시 + 통계 판정 제외(PCHK는 `MEAS_SUSPECT` 신호로만) |
 
 ### Score Board 색상 (연속 보간)
@@ -759,7 +762,7 @@ self.anomaly_exclude_items = [
 ### Score Board / WF MAP
 
 - **HTML Score Board**: 컬럼 = `(FAB_LOT_ID, WAFER_ID)`. 같은 root의 형제 lot을 평균으로 합치지 않고 **lot별로 분리** 표시(타깃 lot 맨 왼쪽·연녹 강조 → reference → 형제 lot, lot내 wafer 오름차순).
-- **wafer별 WF MAP 행**: 임계(`scoreboard_wfmap_min_pts`=50) 이상 측정된 index는 점수행 **아래에 WF MAP 행**을 추가, 각 wafer 열에 그 wafer의 WF MAP(첫 TKOUT) 삽입. sparse wafer는 빈칸. 메일 용량 보호를 위해 대상 index가 많으면 **CAT2별 대표 1개씩**으로 줄이고, 미표시 index는 표 아래 안내 문구로 대신합니다(PPT 참조).
+- **wafer별 WF MAP 행**: 용량 문제로 HTML Score Board에서는 제거됨 — WF MAP은 PPT에서만 확인합니다.
 - **PPT Score Board**(`insert_score_board`): (lot, wafer) MultiIndex 헤더(lot 가로 병합), ITEM 세로 병합, 타깃 lot 먼저, 측정된 wafer만 표기. 셀 색은 HTML과 동일한 연속 보간(`score_color`) + 테두리.
 - 색은 PPT·HTML 모두 `GLOBAL_CONFIG.score_color()`를 호출하므로 동일합니다.
 

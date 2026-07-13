@@ -867,6 +867,11 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
     except Exception:
         _rc, _rm = 60.0, 100.0
     _dsp = getattr(GLOBAL_CONFIG, 'anomaly_lot_dispersion_ratio', 2.0)
+    _fls = float(getattr(GLOBAL_CONFIG, 'anomaly_flier_sigma', 3.5) or 0)
+    _flm = int(getattr(GLOBAL_CONFIG, 'anomaly_flier_max_pts', 0) or 0)
+    _dgf = float(getattr(GLOBAL_CONFIG, 'anomaly_disp_min_spec_frac', 0.0) or 0.0)
+    _fcnt_txt = "1개 이상" if _flm <= 0 else f"1~{_flm}개"
+    _disp_gate_txt = (f"(절대 산포가 spec 폭의 {_dgf * 100:g}% 이상일 때)" if _dgf > 0 else "")
     _note_lines = [
         f"※ 참고: 모든 판정은 대상 lot의 'wafer 단위'로 보며, 비교 기준은 제품({_veh}) 전체의 'wafer별' 통계입니다.",
         "· robust 산포 = 값들의 1.4826×MAD(0이면 IQR/1.349, 그래도 0이면 std).",
@@ -874,12 +879,18 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         "'N배' = 대상 wafer 내부 산포 / 보통 wafer 산포.",
         f"· 위치(radius zone): Center ≤ {_rc:g}, Middle {_rc:g}~{_rm:g}, Edge > {_rm:g}.",
         "· [판정 기준]",
-        "   - 이상(빨강): spec을 벗어난 측정 point가 하나라도 있으면 이상. (median 이동은 판정에 사용하지 않음)",
-        f"   - 주의(주황): spec은 모두 만족하지만, 대상 lot의 어떤 wafer 내부 산포가 '보통 wafer 산포'의 {_dsp:g}배를 넘으면 주의.",
+        "   - 이상(빨강): 해당 lot 측정값 중 spec 이탈 pt가 1개 이상. (median 이동은 판정에 사용하지 않음)",
+        (f"   - 주의(주황) ① Flier: 설정된 spec 이탈은 없으나 wafer median 대비 |값-median|이 "
+         f"'보통 wafer 산포'의 {_fls:g}σ를 넘는 pt가 {_fcnt_txt}인 wafer 존재." if _fls > 0 else
+         "   - 주의(주황) ① Flier: OFF (anomaly_flier_sigma=0)"),
+        (f"   - 주의(주황) ② 산포 확대: 특정 wafer의 내부 산포가 '보통 wafer 산포'의 {_dsp:g}배 초과"
+         f"{_disp_gate_txt}."),
         "   - 그 외: 참고.",
         "· [우선순위 P] — 값이 클수록 위에 정렬. R_max=최대 wafer spec-out 비율(out pt/측정 pt), "
-        "N_wf=spec-out wafer 수, D=최대 wafer 산포배수.",
-        "   - 이상: P = 20000 + 100·R_max + N_wf/100      - 주의: P = 10000 + 100·D      (동점 시 REPORT ORDER 오름차순)",
+        f"N_wf=spec-out wafer 수, D=최대 wafer 산포배수, F=Flier 최대 이탈 σ(임계 {_fls:g}σ 대비).",
+        "   - 이상: P = 20000 + 100·R_max + N_wf/100      "
+        f"- 주의(Flier): P = 10000 + 100·(F/{_fls:g})      "
+        "- 주의(산포): P = 10000 + 100·D      (동점 시 REPORT ORDER 오름차순)",
     ]
 
     # ── 카테고리(cat2)별 그룹핑 — 우선순위 상 '첫 등장' 순으로 카테고리 배열, 카테고리 내는 우선순위 유지 ──
@@ -2883,12 +2894,21 @@ def _render_item_charts(task):
             dev = round(abs(t_med - g_med) / g_std, 2) if g_std > 0 else 0.0
 
             # spec-out(이상) 분류는 '해당 lot_id'에만 한정 — 같은 root의 형제 lot은 이상으로 분류하지 않음
-            if 'fab_lot_id' in t_df.columns:
-                _t_spec = t_df[t_df['fab_lot_id'].astype(str) == str(target_lot_id)]
+            # trend_tkout_agg(집계) 항목은 spec-out 판정도 Trend·이상판정(anomaly_engine)과 동일하게
+            # '측정(tkout)별 집계값(P10 등)' 기준으로 한다 — raw shot 단위 pt로 잡히지 않도록.
+            # (tdf는 위 Trend용으로 이미 집계된 프레임 — agg 항목이면 그걸 그대로 사용)
+            _t_spec = None
+            if _agg_spec and has_lot:
+                _t_spec = tdf[tdf['fab_lot_id'].astype(str) == str(target_lot_id)]
                 if len(_t_spec) == 0:
+                    _t_spec = None
+            if _t_spec is None:
+                if 'fab_lot_id' in t_df.columns:
+                    _t_spec = t_df[t_df['fab_lot_id'].astype(str) == str(target_lot_id)]
+                    if len(_t_spec) == 0:
+                        _t_spec = t_df
+                else:
                     _t_spec = t_df
-            else:
-                _t_spec = t_df
 
             # spec 이탈 칩 목록 (기존 행별 iterrows → 벡터화)
             _v = pd.to_numeric(_t_spec[item_name], errors='coerce')

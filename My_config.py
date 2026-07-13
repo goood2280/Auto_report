@@ -463,12 +463,6 @@ class Config:
         # ──────────────────────────────────────────────────────
         self.base_path = os.path.dirname(os.path.abspath(__file__))
 
-        # ET reformatter 엑셀 파일 경로
-        self.et_file_path = os.path.join(
-            self.base_path, 'HOL_reformatter.xlsx')
-        # FAB 데이터 추출 입력 파일 경로
-        self.fab_file_path = os.path.join(
-            self.base_path, 'SF3_Data_Extractor_Input_File_v0.xlsx')
         # Inline reformatter 엑셀 파일 경로
         self.inline_file_path = os.path.join(
             self.base_path, 'INLINE_1_reformatter.xlsx')
@@ -556,6 +550,19 @@ class Config:
         # 모두 이 파일에서 조정 → README "Anomaly Trend Chart 우선순위" 참고
         # ──────────────────────────────────────────────────────
         self.anomaly_lot_dispersion_ratio = 2.0  # 주의(산포): target wafer 내부 산포가 '보통 wafer 산포'의 이 배수 초과 시 주의
+        # ── 주의(WARNING) 세부 판정 — HTML '판정 로직' 박스·PPT Anomaly 참고사항에 아래 값이 동적 표기됨 ──
+        #   ① Flier: spec 이내지만 wafer median 대비 |값−median|이 '보통 wafer 산포'의
+        #      anomaly_flier_sigma σ를 초과하는 pt가 1개 이상인 wafer가 있으면 주의.
+        #      (한두 pt만 뜬 케이스 검출 — MAD 기반 산포배수는 소수 pt에 둔감해서 이를 못 잡음)
+        #      sigma를 0 이하로 두면 Flier 판정 OFF.
+        self.anomaly_flier_sigma = 3.5       # Flier 임계 σ (보통 wafer 산포 기준 배수)
+        #   Flier로 볼 wafer당 최대 초과 pt 수 상한. 0(기본)=상한 없음('1개 이상'이면 Flier).
+        #   양수로 두면 그 개수 초과 시 Flier가 아닌 산포 확대(②)로 넘긴다.
+        self.anomaly_flier_max_pts = 0
+        #   ② 산포 확대(DISPERSION) 절대량 게이트: 산포배수 초과여도 worst wafer의 절대 산포가
+        #      spec 폭(UCL−LCL)의 이 비율 미만이면 주의를 띄우지 않는다(spec 대비 무의미하게 작은
+        #      산포 확대 오탐 억제). 0(기본)=게이트 OFF(산포배수만으로 판정). 단측 spec 미적용.
+        self.anomaly_disp_min_spec_frac = 0.0
         self.anomaly_median_low_sigma = 2.0      # 지식규칙 median_low(): target median이 제품 median 대비 이 σ 이상 낮으면 True
         # ── 통계 자동분석 제외 항목 ──
         #   여기에 넣은 ITEM(ALIAS)은 통계 자동분석(이상/주의 finding·우선순위·Anomaly Trend Chart)에서
@@ -565,9 +572,8 @@ class Config:
         self.anomaly_exclude_items = [
             'MAWIN_minus_margin', 'MAWIN_plus_margin', 'MAWIN_ovl_index', 'MAWIN_new',
         ]
-        self.scoreboard_wfmap_min_pts = 50       # Score Board(HTML)에 wafer별 WF MAP을 넣을 최소 측정 point 수
-        # WF MAP 제외 키워드: item(ALIAS)명에 아래 키워드가 포함되면 측정 point 수와
-        # 무관하게 Score Board WF MAP을 표시하지 않는다. (예: PCHK 측정 항목)
+        # WF MAP 제외 키워드: item(ALIAS)명에 아래 키워드가 포함되면 통계 이상/주의 판정과
+        # Anomaly Trend chart(WF MAP 포함)에서 제외한다. (예: PCHK 측정 항목)
         # 새 키워드를 추가하려면 이 리스트에 문자열을 넣으면 된다.
         self.wfmap_exclude_keywords = ['PCHK']
 
@@ -600,7 +606,7 @@ class Config:
         #   메일링 xlsx에 'POWER_USER' 시트가 있으면(+use_email_send=True) 그 수신처로 발송한다.
         #   제안은 자동 반영되지 않으며(propose-only), 반영/삭제 전까지 매일 반복 제안된다.
         #   미리보기: python Main.py --rule-digest
-        self.rule_digest_enabled = True    # 다이제스트 생성 on/off (수신처 없으면 파일만 저장)
+        self.rule_digest_enabled = False   # 다이제스트 생성 on/off (기본 off — 필요 시 True)
         self.rule_digest_window_days = 14  # 집계 기간(일) — 스냅샷 summary.json의 generated_at 기준
         self.rule_digest_min_repeat = 3    # 제안 승격 최소 반복 리포트 수(미매칭 패턴 기준)
 
