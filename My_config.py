@@ -559,6 +559,12 @@ class Config:
         #   Flier로 볼 wafer당 최대 초과 pt 수 상한. 0(기본)=상한 없음('1개 이상'이면 Flier).
         #   양수로 두면 그 개수 초과 시 Flier가 아닌 산포 확대(②)로 넘긴다.
         self.anomaly_flier_max_pts = 0
+        #   Flier 방향 완화 배수(REPORT DIRECTION=UPPER/LOWER 전용): report direction에 맞는
+        #   spec 방향으로 튄 pt는 anomaly_flier_sigma 그대로(정상 감도)로 잡되, 반대 방향으로
+        #   튄 pt는 anomaly_flier_sigma × 이 배수를 초과할 때만 잡는다(반대 방향은 이상이 매우
+        #   클 때만 검출 → 오탐 완화). 1.0=완화 없음(양방향 동일 감도). BOTH는 방향 개념이 없어
+        #   미적용(양방향 동일 감도). HTML '판정 로직'·PPT 참고사항에 이 값이 동적 표기됨.
+        self.anomaly_flier_offdir_relax = 2.0
         #   ② 산포 확대(DISPERSION) 절대량 게이트: 산포배수 초과여도 worst wafer의 절대 산포가
         #      spec 폭(UCL−LCL)의 이 비율 미만이면 주의를 띄우지 않는다(spec 대비 무의미하게 작은
         #      산포 확대 오탐 억제). 0(기본)=게이트 OFF(산포배수만으로 판정). 단측 spec 미적용.

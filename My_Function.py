@@ -874,8 +874,11 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
     _dsp = getattr(GLOBAL_CONFIG, 'anomaly_lot_dispersion_ratio', 2.0)
     _fls = float(getattr(GLOBAL_CONFIG, 'anomaly_flier_sigma', 3.5) or 0)
     _flm = int(getattr(GLOBAL_CONFIG, 'anomaly_flier_max_pts', 0) or 0)
+    _fodr = float(getattr(GLOBAL_CONFIG, 'anomaly_flier_offdir_relax', 2.0) or 1.0)
     _dgf = float(getattr(GLOBAL_CONFIG, 'anomaly_disp_min_spec_frac', 0.0) or 0.0)
     _fcnt_txt = "1개 이상" if _flm <= 0 else f"1~{_flm}개"
+    _fdir_txt = (f"(REPORT DIRECTION=UPPER/LOWER: spec 방향 정상 감도, 반대 방향 {_fodr:g}배 완화 / BOTH: 양방향 동일)"
+                 if _fodr != 1.0 else "(REPORT DIRECTION 방향 완화 없음)")
     _disp_gate_txt = (f"(절대 산포가 spec 폭의 {_dgf * 100:g}% 이상일 때)" if _dgf > 0 else "")
     _note_lines = [
         f"※ 참고: 모든 판정은 대상 lot의 'wafer 단위'로 보며, 비교 기준은 제품({_veh}) 전체의 'wafer별' 통계입니다.",
@@ -887,7 +890,7 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         "   - 이상(빨강): 해당 lot 측정값 중 spec 이탈 pt가 1개 이상. (median 이동은 판정에 사용하지 않음)",
         (f"   - 주의(주황) ① Flier: 설정된 spec 이탈은 없으나 wafer median 대비 |값-median|이 "
          f"'보통 wafer 산포'의 {_fls:g}σ를 넘는 pt가 {_fcnt_txt}인 wafer 존재. "
-         f"(REPORT DIRECTION 설정 시 해당 방향은 정상 감도, 반대 방향은 1.5배 완화 적용)" if _fls > 0 else
+         f"{_fdir_txt}" if _fls > 0 else
          "   - 주의(주황) ① Flier: OFF (anomaly_flier_sigma=0)"),
         (f"   - 주의(주황) ② 산포 확대: 특정 wafer의 내부 산포가 '보통 wafer 산포'의 {_dsp:g}배 초과"
          f"{_disp_gate_txt}."),

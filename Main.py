@@ -2061,16 +2061,20 @@ def main():
                         _lg_ratio = getattr(GLOBAL_CONFIG, 'anomaly_lot_dispersion_ratio', 2.0)
                         _lg_fls = float(getattr(GLOBAL_CONFIG, 'anomaly_flier_sigma', 3.5) or 0)
                         _lg_flm = int(getattr(GLOBAL_CONFIG, 'anomaly_flier_max_pts', 0) or 0)
+                        _lg_fodr = float(getattr(GLOBAL_CONFIG, 'anomaly_flier_offdir_relax', 2.0) or 1.0)
                         _lg_dgf = float(getattr(GLOBAL_CONFIG, 'anomaly_disp_min_spec_frac', 0.0) or 0.0)
                         _lg_agg = ', '.join(f'{k}={v}' for k, v in
                                             (getattr(GLOBAL_CONFIG, 'trend_tkout_agg', {}) or {}).items())
                         _lg_agg_txt = (f' (집계 항목 {_lg_agg} 은 site가 아닌 집계값 기준)'
                                        if _lg_agg else '')
                         _lg_fcnt_txt = '1개 이상' if _lg_flm <= 0 else f'1~{_lg_flm}개'
+                        _lg_dir_txt = (
+                            f' (REPORT DIRECTION=UPPER/LOWER: spec 방향은 정상 감도, 반대 방향은 {_lg_fodr:g}배 완화'
+                            f' / BOTH: 양방향 동일 감도)' if _lg_fodr != 1.0
+                            else ' (REPORT DIRECTION 방향 완화 없음)')
                         _lg_flier_txt = (
                             f'① Flier — wafer median 대비 |값−median|이 보통 wafer 산포의 '
-                            f'{_lg_fls:g}σ를 넘는 pt가 {_lg_fcnt_txt} wafer 존재'
-                            f' (REPORT DIRECTION 설정 시 해당 방향은 정상 감도, 반대 방향은 1.5배 완화)'
+                            f'{_lg_fls:g}σ를 넘는 pt가 {_lg_fcnt_txt} wafer 존재{_lg_dir_txt}'
                             if _lg_fls > 0 else '① Flier — OFF')
                         _lg_gate_txt = (f'(절대 산포가 spec 폭의 {_lg_dgf * 100:g}% 이상일 때)'
                                         if _lg_dgf > 0 else '')

@@ -2133,6 +2133,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     # ── 주의(WARNING) 세부 판정 설정 (My_config — HTML/PPT 안내문에도 동일 값이 동적 표기됨) ──
     flier_sigma = float(cfg('anomaly_flier_sigma', 3.5) or 0)         # Flier 임계 σ (0=OFF)
     flier_max_pts = int(cfg('anomaly_flier_max_pts', 0) or 0)         # Flier 최대 pt 상한(0=상한 없음)
+    flier_offdir_relax = float(cfg('anomaly_flier_offdir_relax', 2.0) or 1.0)  # 반대 방향 완화 배수(UPPER/LOWER)
     disp_min_spec_frac = float(cfg('anomaly_disp_min_spec_frac', 0.0) or 0.0)  # 산포 절대량 게이트(spec 폭 비율)
 
     # radius zone 경계(Center ≤ r_center_max, Middle ≤ r_middle_max, 그 외 Edge).
@@ -2801,12 +2802,12 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                     _item_dir = direction_map.get(it, 'BOTH')
 
                     if _item_dir == 'UPPER':
-                        # 상한 감시: 위쪽 flier는 정상 감도, 아래쪽은 1.5배 완화
-                        _fmask = (_raw_dev > flier_sigma) | (_raw_dev < -(flier_sigma * 1.5))
+                        # 상한 감시: 위쪽(spec 방향) flier는 정상 감도, 아래쪽(반대)은 flier_offdir_relax배 완화
+                        _fmask = (_raw_dev > flier_sigma) | (_raw_dev < -(flier_sigma * flier_offdir_relax))
                     elif _item_dir == 'LOWER':
-                        # 하한 감시: 아래쪽 flier는 정상 감도, 위쪽은 1.5배 완화
-                        _fmask = (_raw_dev < -flier_sigma) | (_raw_dev > (flier_sigma * 1.5))
-                    else:  # BOTH
+                        # 하한 감시: 아래쪽(spec 방향) flier는 정상 감도, 위쪽(반대)은 flier_offdir_relax배 완화
+                        _fmask = (_raw_dev < -flier_sigma) | (_raw_dev > (flier_sigma * flier_offdir_relax))
+                    else:  # BOTH — 방향 개념 없음: 양방향 동일 감도(완화 미적용)
                         _fmask = _raw_dev.abs() > flier_sigma
 
                     _fcnt = int(_fmask.sum())
