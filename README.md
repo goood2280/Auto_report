@@ -64,10 +64,11 @@ DC 측정 결과를 자동으로 통계 분석하고, 리포트를 자동 생성
 - **디스크 임시파일 제거** — PPT 차트는 디스크가 아닌 **메모리(BytesIO)**로 처리해 루트에 `tmp_*.jpg`를 남기지 않습니다.
 
 ### 🔬 이상(Anomaly) 분석 정밀도
-- **WF MAP을 이상 분석에 연동** — ① [0] Anomaly Trend Chart의 이상 항목 **우측에 spec-out WF MAP**(통과=회색/이탈=빨강, 타깃 wafer 전량 우선) ② Score Board에 **wafer별 WF MAP 행**을 붙여 공간 패턴(엣지/센터/재발)을 바로 확인.
+- **WF MAP을 이상 분석에 연동** — ① [0] Anomaly Trend Chart의 이상 항목 **우측에 spec-out WF MAP**(통과=회색/이탈=빨강, 타깃 wafer 전량 우선, **모든 step_id**의 spec-out wafer를 표시하고 라벨에 step 매칭값 2자리 `(XX)` 표기) ② Score Board에 **wafer별 WF MAP 행**을 붙여 공간 패턴(엣지/센터/재발)을 바로 확인.
 - **통계 자동 분석을 'wafer 단위'로 재설계** — 예전에는 *lot median vs 제품 chip median*으로 봤지만, 이제 **target lot의 각 wafer**를 **제품 전체의 'wafer별' 기준**과 비교합니다. spec-out은 **wafer별 이탈 비율**로 순위를 매기고, 주의(median/산포)는 **제품 wafer 분포 대비 wafer 이탈**로 판정 → lot 전체 평균에 묻히던 국소 이상을 잡아냅니다. → [analyze_commonality](#analyze_commonality--코드-단독-동작).
 - **PCHK를 일반 Index로 통합** — PCHK도 spec-out이면 동일하게 **이상(CRITICAL)**. '측정이상 추정'은 코드가 겹침 신호만 basis에 남기고 **AI가 판정**(억지 규칙 제거).
-- **통계 분석 제외 항목 설정** — `anomaly_exclude_items`로 파생/마진 컬럼 등을 **우선순위에서 제외**해 노이즈를 줄입니다(와일드카드 지원). → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
+- **주의(Flier) 방향 감시** — spec 이내지만 trend에서 튄 pt를 잡되, **`REPORT DIRECTION`에 맞는 spec 방향**은 `anomaly_flier_sigma`(정상 감도), **반대 방향**은 `anomaly_flier_sigma × anomaly_flier_offdir_relax`(기본 2.0배 완화 = 이상이 매우 클 때만) 초과 시에만 Flier로 봅니다. `BOTH`는 방향 개념이 없어 양방향 동일 감도(+ 산포 병행). 판정은 항목 자신의 '보통 wafer 산포' 기준 **비율(σ)** 이라 값 scale(1e-15~수백만)과 무관합니다. → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
+- **통계 분석 제외 항목 설정** — `anomaly_exclude_items`(무조건 완전 제외) / `anomaly_exclude_unless_rule`(**RULE에 걸릴 때만 부활하는 조건부 제외**)로 파생/마진 컬럼·tight-spec 항목 등을 **우선순위에서 제외**해 노이즈를 줄입니다(와일드카드 지원). → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
 - **판정 규칙 = `[RULE]` 자연어 한 줄** — 엔지니어는 `ANOMALY_KNOWLEDGE.md`의 `NL_RULES` 마커 사이에 **`[RULE] ...` 자연어 한 줄**씩만 적습니다. 발행 시 코드가 이를 **JSON 조건식으로 컴파일**(AI 우선, 미연결 시 키워드 fallback, 원문 sha256 캐시로 결정론 유지)해 **모든 규칙을 전부 점검하고, 조건을 만족하는 규칙마다 각각 코멘트**를 남깁니다(다중 매칭 전부 표기). **엔지니어의 룰 관리 지점 = md 파일 하나**. 매 발행마다 전 규칙 체크 결과를 터미널 `[RULE CHECK]` + `RUN/AI/anomaly_rule_check_*.txt/.json`으로 기록. → [지식 규칙 엔진](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용).
 - **측정순서(seq) 판정** — 측정순서(chip_x_adj 먼저 증가 → chip_y_adj 증가 = WF MAP 좌상단부터 한 줄씩 우측 진행)상 **연속 spec-out / 이탈 비율 / 앞부분 집중**을 규칙 조건으로 사용할 수 있고, **"A,B,C,D 모두에서 측정순서에 따른 이상"** 같은 다중 항목 공통 판정도 가능합니다.
 - **AI 다단계 해석(선택)** — 통계 Finding 위에 triage→root-cause→final 3단계로 원인/조치를 자연어 보강. **AI 없거나 실패해도 코드 통계 분석은 그대로** 동작(AI-optional). 결과는 **평문 서술형 문장(핵심만 볼드)** 으로 표시하고, **`[RULE]`에 정의된 불량 모드만 표기**(규칙 미매칭 시 '수동 검토 필요'만 — AI 자유 제안·임의 링크는 리포트에 나오지 않음).
@@ -174,7 +175,7 @@ python setup.py              # 현재 폴더에 전체 소스 추출 (기존 파
 
 - **AI 토글**: `use_gpt_summary`(마스터), `use_gpt_multistep`(다단계), `ai_stage_mode`(`'multi'`/`'single'`).
 - **규칙 컴파일**: `anomaly_nl_autocompile`(True — NL_RULES 자연어 규칙을 발행 시 자동 변환/적용).
-- **분석 민감도**: `anomaly_lot_dispersion_ratio`(↑=덜 민감), 플라이어 `anomaly_flier_sigma`/`anomaly_flier_max_pts`, 산포 절대량 게이트 `anomaly_disp_min_spec_frac`, 지식 규칙용 `anomaly_median_low_sigma`. **통계 우선순위 제외**: `anomaly_exclude_items`(와일드카드). → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
+- **분석 민감도**: `anomaly_lot_dispersion_ratio`(↑=덜 민감), 플라이어 `anomaly_flier_sigma`/`anomaly_flier_max_pts`/`anomaly_flier_offdir_relax`(반대 방향 완화 배수), 산포 절대량 게이트 `anomaly_disp_min_spec_frac`, 지식 규칙용 `anomaly_median_low_sigma`. **통계 우선순위 제외**: `anomaly_exclude_items`(완전 제외) / `anomaly_exclude_unless_rule`(RULE 매칭 시 부활, 와일드카드). → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
 - **WF MAP**: `wfmap_exclude_keywords`(예: `['PCHK']`).
 - **이미지 해상도**: PPT `ppt_chart_dpi`/`ppt_map_jpg_quality`, HTML `html_chart_dpi`/`html_wfmap_dpi`(독립 조정).
 - **색상**: `score_color_scale`(Score Board 연속 색), `score_color_scale_by_item`(ITEM별 override).
@@ -271,7 +272,7 @@ finding type과 우선순위(값이 클수록 위에 정렬)는 다음과 같습
 | **40000+** | `DEFECT_MODE` | 🔴 이상 / 🟠 주의 | `ANOMALY_KNOWLEDGE.md`의 **`[RULE]`** 충족 → 여러 항목 조합 판정(매칭 규칙마다 각각 finding) | `[불량 모드] <note>` + LINK + spec-out wafer 번호. → [지식 규칙 엔진](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용) |
 | **30000+** | `KNOWLEDGE` | 🔴 이상 / 🟠 주의 | 수기 `[RULE]` 체이닝 블록의 산포 비교(`compare_disp`) 등 지식 판정 | `[지식 판정] <name>` |
 | **20000+** | `SPEC_OUT` | 🔴 CRITICAL (이상) | 타깃 lot에서 spec(SPECLOW~SPECHIGH) 이탈 측정점 ≥ 1 | wafer별 (이탈 pt/측정 pt) 비율, 위치(radius zone)·PGM(pt) |
-| **10000+** | `FLIER` | 🟠 WARNING (주의) | spec 미초과 + 어떤 wafer에서 **\|값−wafer median\| > `anomaly_flier_sigma`×보통 wafer 산포**인 pt가 1개 이상 (`anomaly_flier_max_pts`>0이면 그 개수 이하일 때만) | worst wafer의 Flier pt 수 + 최대 이탈 σ |
+| **10000+** | `FLIER` | 🟠 WARNING (주의) | spec 미초과 + 어떤 wafer에서 **\|값−wafer median\| > `anomaly_flier_sigma`×보통 wafer 산포**인 pt가 1개 이상 (`anomaly_flier_max_pts`>0이면 그 개수 이하일 때만). **REPORT DIRECTION 방향 감시**: UPPER/LOWER는 spec 방향 정상 감도·반대 방향은 `×anomaly_flier_offdir_relax`(기본 2.0) 초과 시만, BOTH는 양방향 동일 감도 | worst wafer의 Flier pt 수 + 최대 이탈 σ |
 | **10000+** | `DISPERSION` | 🟠 WARNING (주의) | spec 미초과 + **어떤 wafer의 산포** `> anomaly_lot_dispersion_ratio` 배 (`anomaly_disp_min_spec_frac`>0이면 절대 산포 게이트도 통과해야) | worst wafer 내부 산포가 '보통 wafer 산포'의 몇 배 |
 | **하위(참고)** | `MEAS_SUSPECT` | 🟡 NOTICE (측정이상 추정) | **판정 제외(`wfmap_exclude_keywords`) PCHK**가 spec-out | 동일 shot 겹침 신호만 산출 → AI 측정이상 추정 입력 |
 
@@ -532,8 +533,10 @@ python Main.py --convert-nl-rules-md   # 변환해서 바로 MD의 ANOMALY_RULES
 **spec-out WF MAP**(`render_specout_wfmaps_b64`):
 - 칩 색: 통과=회색(`#bdbdbd`), spec 이탈(flier)=빨강(`#d32f2f`).
 - **타깃 lot의 spec-out wafer는 전량 우선 표시**(25매 모두 spec이면 25장). 남는 칸만 다른 lot을 TKOUT_TIME 최신순으로.
-- 상한은 `anomaly_wfmap_max_count`(=25)지만 **타깃 spec wafer는 상한과 무관하게 모두** 표시.
+- 상한은 `anomaly_wfmap_max_count`(=42)지만 **타깃 spec wafer는 상한과 무관하게 모두** 표시.
 - spec_low/high는 `REPORT DIRECTION`을 반영해 전달 → Trend의 SPEC OUT 판정과 일치.
+- **step_id 필터 없음** — 리포트 제품(`MASK==main_vehicle`)의 **모든 step_id**의 spec-out wafer를 표시합니다(Trend chart와 동일 스코프). 측정 단위(root_lot·fab_lot·wafer·tkout·**step_id**)로 그룹핑하므로 같은 wafer의 다른 step 측정은 별도 맵으로 분리됩니다.
+- **라벨** = `{ROOT_LOT_ID} #{WAFER_ID} ({XX})` — `XX`는 그 wafer의 `STEP_ID`를 `dc_dict`(step_id→DC step 매칭테이블, `get_dc_step_from_id`)로 변환한 값의 **앞 2자리**(미등록 step은 괄호 생략). 여러 step이 섞였을 때 어느 step의 spec-out wafer인지 구분합니다. 타깃 lot 라벨은 진파랑(`#0033cc`) bold, 그 외는 회색. 라벨이 맵 셀 폭을 넘으면 **자간을 자동으로 좁혀** 이웃 라벨과 겹치지 않게 그립니다.
 
 **상태 스티커**: 각 Trend 차트 좌상단에 CSS 배지 — `SPEC OUT`(빨강) / `WARNING`(주황). PNG 자체는 수정하지 않으므로 PPT 차트에는 영향 없음(HTML [0]에만 적용).
 
@@ -674,6 +677,7 @@ interpret_with_ai(findings, metrics, knowledge_text, _LLM_FN, ...)
 | `anomaly_lot_dispersion_ratio` | `2.0` | **주의(산포)** 임계 배수 — target wafer 내부 산포가 '보통 wafer 산포'의 이 배수 초과 시 주의 | 큰 산포만 주의 | 약한 산포도 주의 |
 | `anomaly_flier_sigma` | `3.5` | **주의(Flier)** 임계 σ — wafer median 대비 \|값−median\|이 '보통 wafer 산포'의 이 σ 초과 pt를 Flier로 판정 (0=OFF) | 확실히 뜬 pt만 | 살짝 뜬 pt도 |
 | `anomaly_flier_max_pts` | `0` | Flier로 볼 wafer당 **최대 초과 pt 수 상한** — `0`=상한 없음(1개 이상이면 Flier). 양수면 초과 시 산포 확대로 판정 | 더 많은 pt도 Flier | 소수 pt만 Flier |
+| `anomaly_flier_offdir_relax` | `2.0` | **Flier 반대 방향 완화 배수**(REPORT DIRECTION=UPPER/LOWER 전용) — spec 방향은 `anomaly_flier_sigma` 그대로, **반대 방향**은 `anomaly_flier_sigma × 이 값` 초과 시에만 Flier. `1.0`=완화 없음(양방향 동일). BOTH는 방향 개념이 없어 미적용 | 반대 방향은 더 큰 것만 | 반대 방향도 민감 |
 | `anomaly_disp_min_spec_frac` | `0.0` | **주의(산포) 절대량 게이트** — worst wafer 절대 산포가 spec 폭(UCL−LCL)의 이 비율 미만이면 산포 주의 미발생 (`0`=게이트 OFF, 단측 spec 미적용) | spec 대비 큰 산포만 | 작은 산포도 |
 | `anomaly_median_low_sigma` | `2.0` | 지식 규칙 `median_low/high(ITEM)` 원자의 임계 σ — target median이 제품 대비 이 σ 이상 낮을/높을 때 참(True) | 확실한 이동만 매칭 | 작은 이동도 매칭 |
 | `anomaly_trend_chart_top_n` | `3` | [0] Anomaly Trend Chart / HTML 요약에 **보여줄 상위 항목 수**(CAT2당 대표 1개) | 더 많이 표시 | 핵심만 표시 |
@@ -701,6 +705,23 @@ self.anomaly_exclude_items = [
 - **대소문자 무시**, `fnmatch` 와일드카드(`*`, `?`) 지원. 빈 리스트(`[]`)면 제외 없음.
 - 판정은 `anomaly_engine.item_excluded(name, patterns)` 한 함수가 담당 → `analyze_commonality`(finding·basis)와 `Main.py`(Trend chart 보충 선정) **양쪽에서 동일 적용**.
 - 제외된 항목은 `RUN/TEMP/anomaly_basis_<lot>_<step_id>.json`에도 나타나지 않습니다.
+
+#### 조건부 제외 — RULE에 걸릴 때만 부활 (`anomaly_exclude_unless_rule`)
+
+`anomaly_exclude_items`가 **무조건 완전 제외**라면, 이쪽은 **평소엔 built-in 판정(spec-out/Flier/산포 확대)을 억제하되, `[RULE]`/`NL_RULES`가 그 항목을 trigger·참조해 매칭될 때만 finding으로 부활**시키는 조건부 제외입니다.
+
+```python
+# My_config.py — MyConfig.__init__
+self.anomaly_exclude_unless_rule = [
+    'ET_KELVIN_RES',   # 정확한 ALIAS
+    'ET_KELVIN_*',     # 와일드카드도 가능 — 여러 항목 등록 가능
+]
+```
+
+- **용도**: Kelvin RES처럼 WF MAP 컬러링을 위해 spec을 tight하게 잡아 **spec-out이 한두 개씩 상시** 뜨는 항목 — 그 노이즈로는 이상/주의를 띄우지 않되, 엔지니어가 정의한 RULE(예: `spec_out(ET_KELVIN_RES) >= 20`)에 걸리는 **진짜 이상일 때만** 잡고 싶을 때.
+- **동작**: 대상 항목은 분석에서 **빠지지 않고**(spec_out_pt·severity·산포 등 컨텍스트가 유지되어 RULE이 실제 통계로 평가 가능) built-in finding만 억제합니다. 전 RULE 평가 후 그 항목을 참조·trigger한 RULE finding(`DEFECT_MODE`/`KNOWLEDGE`)이 있으면 built-in finding까지 되살리고, 없으면 최종적으로 제거해 Trend chart·요약·WF MAP 어디에도 노출하지 않습니다.
+- **여러 항목 등록 가능**, `fnmatch` 와일드카드 지원, 대소문자 무시. `anomaly_exclude_items`와 동일한 `item_excluded` 매칭.
+- **우선순위**: 한 항목이 `anomaly_exclude_items`(완전 제외)와 `anomaly_exclude_unless_rule` 둘 다에 걸리면 **완전 제외가 우선**(items에서 먼저 빠져 RULE 평가도 안 됨).
 
 > 과거 detector의 잔여 설정(`anomaly_trend_slope_sigma`·`anomaly_split_separation`·`anomaly_site_recurrence_min_lots`·`anomaly_pchk_check`·`anomaly_lot_median_sigma` 등)은 **My_config에서 삭제되었습니다**(불량 모드/측정 의심/median 해석은 [지식 규칙 엔진](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용)과 AI로 이전됨).
 
