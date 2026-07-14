@@ -665,6 +665,9 @@ RULE_FUNCTION_SPEC = """\
   disp(ITEM) >= x          : 항목의 worst wafer 산포배수를 숫자로 직접 비교
   disp_cat2(CAT2) >= x     : CAT2 그룹 최대 산포배수를 숫자로 직접 비교
   median_dev_sigma(ITEM) >= x : worst wafer median 이탈 σ(제품 wafer 기준) 비교
+  flier_dev(ITEM) >= x     : 플라이어 최대 이탈 σ(spec 이내지만 wafer median 대비 보통 wafer 산포
+                             기준으로 튄 pt의 최대 σ) 비교 — "1pt가 매우 튄" 케이스 판정
+  flier_pt(ITEM) <= n      : 플라이어 pt 수(worst wafer) 비교 — flier_dev와 조합해 "소수 pt 극단 이탈" 표현
   pattern(ITEM, Edge ring) : 특이맵 라벨 부분일치(예: Edge ring/줄성/Center 집중 —
                              특이맵 판정(anomaly_pattern_rules) 활성 시에만 라벨이 생성됨)
   zone_share(ITEM, Edge) >= f : spec-out 좌표 중 해당 zone(Edge|Middle|Center) 비율(0~1)
@@ -715,6 +718,8 @@ NL_PATTERN_HINTS = """\
   "X 카테고리 산포가 x배 이상"         → disp_cat2(X) >= x
   "median이 매우 높으면/낮으면"        → median_high(A) / median_low(A)
   "wafer median이 xσ 이상 이탈"        → median_dev_sigma(A) >= x
+  "A에 xσ 이상 튄 pt(플라이어)가 있으면" → flier_dev(A) >= x
+  "A에 소수 pt(n개 이하)만 극단(xσ+)으로 튀면" → flier_dev(A) >= x AND flier_pt(A) <= n
   "특이맵이 Edge ring(라벨)이면"       → pattern(A, Edge ring)
   "이탈의 N% 이상이 Edge(zone)면"      → zone_share(A, Edge) >= N/100
   "여러 wafer에서 같은 자리 반복이면"  → repeat_shot(A) (비슷한 자리면 repeat_similar)
@@ -755,7 +760,7 @@ _ATOM_VALID_PATTERNS = [
     r'median_low\([^()]+\)$',
     r'median_pctile\([^()]+\)\s*(>=|<=|<|>)\s*[\d.]+$',
     # ── 확장 원자 (평가기 _eval_atom 확장분과 1:1) ──
-    r'(spec_out_pt|spec_out_wafers|spec_out_ratio|disp|median_dev_sigma|meas_overlap)\([^()]+\)\s*(>=|<=|==|<|>)\s*[\d.]+$',
+    r'(spec_out_pt|spec_out_wafers|spec_out_ratio|disp|median_dev_sigma|meas_overlap|flier_dev|flier_pt)\([^()]+\)\s*(>=|<=|==|<|>)\s*[\d.]+$',
     r'disp_cat2\([^()]+\)\s*(>=|<=|==|<|>)\s*[\d.]+$',
     r'median_high\([^()]+\)$',
     r'pattern\([^,()]+,\s*[^()]+\)$',
@@ -1297,7 +1302,9 @@ def _nl_json_ai(lines, llm_fn):
         '    "spec_out": ">=3",\n'
         '    "seq_run": ">=3",\n'
         '    "seq_dead": ">=0.5",\n'
-        '    "seq_front_heavy": true\n'
+        '    "seq_front_heavy": true,\n'
+        '    "flier_dev": ">=6",\n'
+        '    "flier_pt": "<=2"\n'
         "  },\n"
         '  "not_items": ["ITEM_C", "ITEM_D"],\n'
         '  "trend_items": ["ITEM_D", "ITEM_C", "ITEM_B", "ITEM_A"],\n'
@@ -1315,6 +1322,10 @@ def _nl_json_ai(lines, llm_fn):
         '    "측정순서에 따른 이상이 보이면"처럼 개수 없으면 ">=3"을 기본으로\n'
         '- condition.seq_dead: 측정순서 시퀀스 중 spec-out 비율(0~1) 비교\n'
         '- condition.seq_front_heavy: true — 측정 앞부분(앞 절반 ≥60%)에 이탈 집중 + 뒤 절반 양호(≤20%)\n'
+        '- condition.flier_dev: 플라이어 최대 이탈 σ 비교 — "spec 이내지만 크게 튄 pt(플라이어)".\n'
+        '    "xσ 이상 튄 pt가 있으면" → "flier_dev": ">=x". σ 명시 없이 "매우/크게 튄 pt"면 ">=6" 기본\n'
+        '- condition.flier_pt: 플라이어 pt 수(worst wafer) 비교 — "소수 pt만/한두 pt만 튀면" → "<=2".\n'
+        '    flier_dev와 함께 쓰면 "소수 pt 극단 이탈" 판정\n'
         '- "[A],[B],[C],[D] 모두에서 측정순서에 따른 이상이 보이면" → items에 4개 전부 +\n'
         '    "logic": "all" + "seq_run": ">=3" (각 항목이 모두 조건을 만족해야 매칭)\n'
         '- condition.median/stddev 우변은 숫자 대신 "spec_high"/"spec_low"(선택 "*계수") 가능.\n'
@@ -1340,7 +1351,8 @@ def _nl_json_keyword_parse(line):
     """키워드 기반 자연어 한 줄 → JSON 규칙 dict 파싱.
 
     지원: 등급(이상/주의)·logic(모두)·median/stddev/disp_ratio/spec_out 수치 조건,
-    median 범위("10~30 사이"), not_items("~에서 이상 수준 보이지 않으면"),
+    median 범위("10~30 사이"), 플라이어("xσ 이상 튄 pt"→flier_dev, "소수/한두/n개 이하"→flier_pt),
+    not_items("~에서 이상 수준 보이지 않으면"),
     trend_items("D,C,B,A로 갈수록 산포가 벌어지면" → robust std 기준 asc), link(URL).
     """
     import re
@@ -1455,6 +1467,25 @@ def _nl_json_keyword_parse(line):
     m = re.search(r'spec.?out\s*(?:이|가)?\s*([\d]+)\s*(?:개|이상)', line, re.I)
     if m:
         cond['spec_out'] = f'>={m.group(1)}'
+
+    # 플라이어("튄 pt") — flier_dev(최대 이탈 σ) / flier_pt(소수 pt 상한)
+    #   "xσ 이상 튄 pt가 있으면"/"pt가 튀면" → flier_dev>=x. σ 명시 없으면 >=6("매우/크게 튄").
+    #   "한두/소수 pt만" 또는 "n개 이하" → flier_pt 상한.
+    #   트리거: '플라이어/flier' 또는 (pt·포인트·점 표현 + 튀/튄 동사 공존 — 어순·활용형 무관)
+    if re.search(r'플라이어|flier', line, re.I) or (
+            re.search(r'[튀튄]', line) and re.search(r'pt|포인트|점', line, re.I)):
+        m = re.search(r'([\d.]+)\s*(?:σ|시그마|sigma)', line, re.I)
+        cond['flier_dev'] = f'>={m.group(1)}' if m else '>=6'
+        m2 = re.search(r'([\d]+)\s*개\s*이하', line)
+        if m2:
+            cond['flier_pt'] = f'<={m2.group(1)}'
+        elif re.search(r'한두|소수', line):
+            cond['flier_pt'] = '<=2'
+        # 플라이어 지표 자체가 판정 신호 + "6σ 이상 튄"의 '이상'이 위 grade 파서에서
+        # '>=abnormal'로 오검출되는 것 방지 — 명시적 '이상/주의 수준' 표기가 없으면
+        # grade 제약을 참고(info)로 풀어 flier 조건만으로 판정한다(플라이어는 WARNING 등급).
+        if '이상수준' not in low and '주의수준' not in low:
+            cond['grade'] = '>=info'
 
     # 측정순서(측정 순서) 관련 — 연속 N개 이탈(seq_run) / 앞부분 집중(seq_front_heavy)
     #   "모두 측정순서에 따른 이상"은 logic(모두) + seq_run으로 각 항목 전부 검사된다.
@@ -1598,6 +1629,8 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
             'stddev': 'rep_std',
             'disp_ratio': 'disp',
             'spec_out': 'spec_out_pt',
+            'flier_dev': 'flier_dev',   # 플라이어 최대 이탈 σ("1pt가 매우 튄" 판정)
+            'flier_pt': 'flier_pt',     # 플라이어 pt 수(worst wafer)
         }
         for cond_key, ctx_key in num_fields.items():
             expr = cond.get(cond_key)
@@ -1656,8 +1689,10 @@ def evaluate_json_rules(json_rules, item_ctx, disp_fn=None, name_forms_fn=None):
     def _num_clause(field, expr):
         nm = {'median': 'median', 'stddev': 'stddev', 'disp_ratio': '산포',
               'spec_out': 'spec-out point', 'seq_run': '측정순서 연속 spec-out',
-              'seq_dead': '측정순서 spec-out 비율'}.get(field, field)
-        unit = {'disp_ratio': '배', 'spec_out': '개', 'seq_run': '개'}.get(field, '')
+              'seq_dead': '측정순서 spec-out 비율',
+              'flier_dev': '플라이어 최대 이탈', 'flier_pt': '플라이어 pt'}.get(field, field)
+        unit = {'disp_ratio': '배', 'spec_out': '개', 'seq_run': '개',
+                'flier_dev': 'σ', 'flier_pt': '개'}.get(field, '')
         exprs = expr if isinstance(expr, list) else [expr]
         parts = []
         for e in exprs:
@@ -3314,13 +3349,16 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         return False
                     return {'>=': v >= t, '<=': v <= t, '==': v == t, '<': v < t, '>': v > t}[op]
 
-                # 수치 비교형: spec_out_pt/spec_out_wafers/spec_out_ratio/disp/median_dev_sigma/meas_overlap
-                m = re.match(r'(spec_out_pt|spec_out_wafers|spec_out_ratio|disp|median_dev_sigma|meas_overlap)'
+                # 수치 비교형: spec_out_pt/spec_out_wafers/spec_out_ratio/disp/median_dev_sigma/
+                #             meas_overlap/flier_dev/flier_pt
+                m = re.match(r'(spec_out_pt|spec_out_wafers|spec_out_ratio|disp|median_dev_sigma|'
+                             r'meas_overlap|flier_dev|flier_pt)'
                              r'\(([^()]+)\)\s*(>=|<=|==|<|>)\s*([\d.]+)$', atom)
                 if m:
                     _key = {'spec_out_pt': 'spec_out_pt', 'spec_out_wafers': 'so_wafers',
                             'spec_out_ratio': 'so_ratio', 'disp': 'disp',
-                            'median_dev_sigma': 'med_dev', 'meas_overlap': 'ov_shots'}[m.group(1)]
+                            'median_dev_sigma': 'med_dev', 'meas_overlap': 'ov_shots',
+                            'flier_dev': 'flier_dev', 'flier_pt': 'flier_pt'}[m.group(1)]
                     c = _find_ctx(m.group(2).strip())
                     return bool(c) and _cmp(c.get(_key, 0), m.group(3), m.group(4))
                 # disp_cat2(CAT2) >= x : CAT2 최대 산포배수 직접 비교
