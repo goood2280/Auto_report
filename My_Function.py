@@ -4124,7 +4124,8 @@ def _filter_inline_by_vehicle(inline_df, vehicle):
     쿼리(step_seq)나 Inline Table에 섞여 들어가지 않는다.
 
     - 'VEHICLE' 열이 있으면 그 값이 vehicle과 일치(공백·대소문자 무시)하는
-      행만 반환.
+      행만 반환. 한 셀에 콤마로 구분된 복수 vehicle("ABC,DEF")이 들어 있으면
+      그 목록에 vehicle이 포함되는 행도 매칭한다(예: 셀="ABC,DEF", vehicle="DEF").
     - 'VEHICLE' 열이 없으면(로컬 더미 시트 등) 원본을 그대로 반환(하위호환).
     - 일치 행이 0개면 경고를 출력하고 빈 결과를 반환한다
       (잘못된 vehicle 명일 때 조용히 전량 표시되는 것을 방지).
@@ -4132,10 +4133,17 @@ def _filter_inline_by_vehicle(inline_df, vehicle):
     if inline_df is None or 'VEHICLE' not in inline_df.columns:
         return inline_df
     _veh = str(vehicle).strip().upper()
-    _col = inline_df['VEHICLE'].astype(str).str.strip().str.upper()
-    filtered = inline_df[_col == _veh].copy()
+
+    def _cell_has_vehicle(cell):
+        # 콤마로 구분된 복수 vehicle 지원(공백·대소문자 무시)
+        return _veh in {p.strip().upper() for p in str(cell).split(',') if p.strip()}
+
+    _mask = inline_df['VEHICLE'].map(_cell_has_vehicle)
+    filtered = inline_df[_mask].copy()
     if filtered.empty:
-        _avail = sorted(inline_df['VEHICLE'].dropna().astype(str).str.strip().unique().tolist())
+        # 진단용 목록: 콤마 분해 후 개별 vehicle 명 표시
+        _avail = sorted({p.strip() for cell in inline_df['VEHICLE'].dropna().astype(str)
+                         for p in cell.split(',') if p.strip()})
         print(f"[WARN] INLINE 설정 시트에 VEHICLE='{vehicle}' 행이 없습니다. "
               f"(시트 내 VEHICLE 목록: {_avail})")
     return filtered
