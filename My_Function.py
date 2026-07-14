@@ -4115,6 +4115,32 @@ def etdata_query():
         print(f"[ERROR] etdata_query 실패: {e}")
         traceback.print_exc()
 
+def _filter_inline_by_vehicle(inline_df, vehicle):
+    """INLINE 설정 시트에서 현재 리포트 대상 vehicle 행만 남긴다.
+
+    INLINE_1_reformatter.xlsx의 INLINE_1 시트에는 여러 vehicle의
+    STEP_DESC/ITEM 설정이 함께 들어 있을 수 있다. 리포트 대상
+    vehicle(main_vehicle)의 행만 사용해야 다른 vehicle의 step_id/STEP_DESC가
+    쿼리(step_seq)나 Inline Table에 섞여 들어가지 않는다.
+
+    - 'VEHICLE' 열이 있으면 그 값이 vehicle과 일치(공백·대소문자 무시)하는
+      행만 반환.
+    - 'VEHICLE' 열이 없으면(로컬 더미 시트 등) 원본을 그대로 반환(하위호환).
+    - 일치 행이 0개면 경고를 출력하고 빈 결과를 반환한다
+      (잘못된 vehicle 명일 때 조용히 전량 표시되는 것을 방지).
+    """
+    if inline_df is None or 'VEHICLE' not in inline_df.columns:
+        return inline_df
+    _veh = str(vehicle).strip().upper()
+    _col = inline_df['VEHICLE'].astype(str).str.strip().str.upper()
+    filtered = inline_df[_col == _veh].copy()
+    if filtered.empty:
+        _avail = sorted(inline_df['VEHICLE'].dropna().astype(str).str.strip().unique().tolist())
+        print(f"[WARN] INLINE 설정 시트에 VEHICLE='{vehicle}' 행이 없습니다. "
+              f"(시트 내 VEHICLE 목록: {_avail})")
+    return filtered
+
+
 # 사용중 Inline Query
 def inlinedata_query(root_lot_id):
     """Inline(FAB 공정 내) 측정 데이터를 쿼리하여 CSV로 저장 후 DataFrame 반환.
@@ -4132,6 +4158,12 @@ def inlinedata_query(root_lot_id):
     try: 
         setting_file = pd.read_excel(GLOBAL_CONFIG.get("inline_file_path"), sheet_name=None)
         Inline1 = setting_file[GLOBAL_CONFIG.get("inline_file_sheet")]
+
+        # ── VEHICLE 필터 ──────────────────────────────────────────────
+        # INLINE 설정 시트에 여러 vehicle이 섞여 있어도 현재 대상 vehicle 행만
+        # 사용한다. (다른 vehicle의 STEP_DESC가 step_seq 쿼리에 섞이는 문제 방지)
+        Inline1 = _filter_inline_by_vehicle(Inline1, GLOBAL_CONFIG.get("vehicle"))
+
         Inline1_step_id_list = Inline1['STEP_DESC'].tolist()
 
         current_time_fab = datetime.now()

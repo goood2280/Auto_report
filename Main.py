@@ -26,6 +26,7 @@ import requests
 #   (병렬 렌더링 워커가 __main__=Main을 재import할 때 무거운 bigdataquery 재import·안내문
 #    출력이 매번 발생하던 문제 방지 — 실제 쿼리는 My_Function 내부에서 지연 import한다.)
 from My_Function import *
+from My_Function import _filter_inline_by_vehicle  # import * 는 언더스코어 이름 미포함
 from My_config import GLOBAL_CONFIG
 from anomaly_engine import analyze_commonality, render_findings_html, render_findings_count_html, interpret_with_ai, item_excluded, compile_nl_to_json
 
@@ -1290,7 +1291,10 @@ def main():
                         # 데이터프레임에 있는 열만 선택하여 새로운 리스트 생성
                         Inline_setting_file = pd.read_excel(inline_file_path, sheet_name=None, engine='openpyxl')
                         Inline1 = Inline_setting_file[inline_file_sheet]
-                        inline_filtered = Inline1[Inline1['Key'] == True] 
+                        # INLINE 설정 시트에 여러 vehicle이 섞여 있어도 현재 리포트 대상(vehicle)
+                        # 행만 사용 — Inline Table에 다른 vehicle의 step_id/항목이 섞이지 않도록.
+                        Inline1 = _filter_inline_by_vehicle(Inline1, vehicle)
+                        inline_filtered = Inline1[Inline1['Key'] == True]
                         inline_filtered['STEP_DESC_ITEM_ID'] = inline_filtered['ITEMNAME'] + '_' + inline_filtered['ITEM_ID'] 
                         inline_grouped  = inline_filtered.groupby('STEP_DESC_ITEM_ID')['Module'].last()
                         inline_grouped = inline_grouped.reset_index()
