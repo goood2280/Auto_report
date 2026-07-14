@@ -1905,23 +1905,38 @@ def main():
                                                         _comp.paste(_wf_img, (_ox, _oy))
                                                         _lcolor = (0, 51, 204) if _is_tgt else (85, 85, 85)
                                                         _lfont = (_cfont_b or _cfont) if _is_tgt else _cfont
-                                                        try:
-                                                            _lbox = _cdraw.textbbox((0, 0), _lab, font=_lfont)
-                                                            _lw = _lbox[2] - _lbox[0]
-                                                        except Exception:
-                                                            _lw = len(_lab) * 6 * _hs
-                                                        _lx = _ox + (_map_sz - _lw) // 2
-                                                        _ly = _oy + _map_sz + 1 * _hs
-                                                        if _is_tgt and _cfont_b is None:
-                                                            # bold 폰트가 없으면 stroke(외곽선)로 두껍게
+                                                        # 라벨 자간(letter-spacing) 조절 — step 접미사 "(XX)"가 붙어
+                                                        # 라벨이 맵 셀 폭보다 넓어지면 이웃 라벨과 겹친다. 문자별로
+                                                        # 그려 자간을 줄여 셀 pitch(_cell_w) 안에 맞춘다: 기본은
+                                                        # 소폭만 좁히고, 넘칠 땐 겹치지 않을 만큼 더 좁힌다.
+                                                        def _adv(_ch):
                                                             try:
-                                                                _cdraw.text((_lx, _ly), _lab, fill=_lcolor, font=_lfont,
-                                                                            stroke_width=max(1, _hs // 2), stroke_fill=_lcolor)
-                                                            except TypeError:   # 구버전 Pillow → 1px offset 이중 드로잉
-                                                                _cdraw.text((_lx, _ly), _lab, fill=_lcolor, font=_lfont)
-                                                                _cdraw.text((_lx + 1, _ly), _lab, fill=_lcolor, font=_lfont)
-                                                        else:
-                                                            _cdraw.text((_lx, _ly), _lab, fill=_lcolor, font=_lfont)
+                                                                return _cdraw.textlength(_ch, font=_lfont)
+                                                            except Exception:
+                                                                return 6 * _hs
+                                                        _advs = [_adv(_c) for _c in _lab]
+                                                        _sum = sum(_advs)
+                                                        _n = len(_lab)
+                                                        _avail = _cell_w - 2 * _hs   # 이웃 라벨과 최소 간격 확보
+                                                        _trk = -0.5 * _hs            # 기본 소폭 좁힘
+                                                        if _n > 1:
+                                                            _trk = min(_trk, (_avail - _sum) / (_n - 1))
+                                                        _total = _sum + max(0, _n - 1) * _trk
+                                                        _ly = _oy + _map_sz + 1 * _hs
+                                                        _bold_stroke = (_is_tgt and _cfont_b is None)
+                                                        _cx = _ox + (_map_sz - _total) / 2.0
+                                                        for _ci, _ch in enumerate(_lab):
+                                                            if _bold_stroke:
+                                                                # bold 폰트가 없으면 stroke(외곽선)로 두껍게
+                                                                try:
+                                                                    _cdraw.text((_cx, _ly), _ch, fill=_lcolor, font=_lfont,
+                                                                                stroke_width=max(1, _hs // 2), stroke_fill=_lcolor)
+                                                                except TypeError:   # 구버전 Pillow → 1px offset 이중 드로잉
+                                                                    _cdraw.text((_cx, _ly), _ch, fill=_lcolor, font=_lfont)
+                                                                    _cdraw.text((_cx + 1, _ly), _ch, fill=_lcolor, font=_lfont)
+                                                            else:
+                                                                _cdraw.text((_cx, _ly), _ch, fill=_lcolor, font=_lfont)
+                                                            _cx += _advs[_ci] + _trk
 
                                                     for _wi, _wf in enumerate(_wf_tgt):
                                                         _draw_wf_cell(_wf, _x_t + (_wi % _nc_t) * _cell_w,
