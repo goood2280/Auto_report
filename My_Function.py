@@ -1546,7 +1546,8 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
                    (lot 25매가 다 spec이면 25장 다 나옴 — max_maps 상한 미적용),
                    ② 그 외 lot의 spec-out wafer는 TKOUT_TIME 최신순으로 (max_maps - target 개수)
                    만큼만 표시 (target이 이미 max_maps 이상이면 그 외 lot은 표시 안 함).
-      - label = f"{ROOT_LOT_ID} #{WAFER_ID}".
+      - label = f"{ROOT_LOT_ID} #{WAFER_ID} ({STEP2})" — STEP2 = step_id를 dc_dict(매칭테이블)로
+        변환한 값의 앞 2자리(미등록 step은 괄호 생략). 여러 step이 섞여 있을 때 step 구분용.
     spec_low/spec_high는 호출부에서 REPORT DIRECTION을 이미 반영한 값(UPPER=하한 None,
     LOWER=상한 None)을 넘겨야 Trend의 SPEC OUT 판정과 일치한다.
 
@@ -1585,10 +1586,11 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
     clot = _pick('FAB_LOT_ID', 'fab_lot_id')
     crad = _pick('Chip_Radius', 'chip_radius')
     cm = _pick('MASK', 'mask')                        # vehicle 매칭용(150mm 원 shot 크기 계산)
+    cstep = _pick('STEP_ID', 'step_id')               # 라벨의 (XX) step 구분용(매칭테이블 변환 앞2자리)
     if not (cx and cy and cw and ct):
         return []
 
-    keep = [c for c in [cx, cy, cw, ct, croot, clot, crad, cm, item] if c]
+    keep = [c for c in [cx, cy, cw, ct, croot, clot, crad, cm, cstep, item] if c]
     d = merged_df[keep].dropna(subset=[item]).copy()
     if len(d) == 0:
         return []
@@ -1606,8 +1608,10 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
         out_mask = out_mask | (vals > hi)
     d['_specout'] = out_mask.values
 
-    # 측정 단위 그룹: (root_lot, fab_lot, wafer, tkout) — spec-out 칩이 있는 측정만
-    gcols = [c for c in [croot, clot, cw, ct] if c]
+    # 측정 단위 그룹: (root_lot, fab_lot, wafer, tkout, step_id) — spec-out 칩이 있는 측정만.
+    #   step_id를 grouping에 포함 → 여러 step이 섞인 merged_df에서도 같은 wafer의 서로 다른
+    #   step 측정이 별도 WF MAP으로 분리되고, 라벨의 (XX)로 step을 구분(전 step 표시).
+    gcols = [c for c in [croot, clot, cw, ct, cstep] if c]
     groups = []
     for gkey, g in d.groupby(gcols, dropna=False):
         if not g['_specout'].any():
@@ -1663,8 +1667,19 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
             _wv = int(_wv)
         except (ValueError, TypeError):
             pass
+        # step_id → 매칭테이블(dc_dict) 변환값의 앞 2자리를 라벨 괄호로 표기(예: "... #1 (PH)").
+        #   여러 step이 섞여 있어 어느 step의 spec-out wafer인지 라벨로 구분한다. 매칭 실패/미등록
+        #   step은 괄호를 생략한다(라벨 오염 방지).
+        _step2 = ''
+        if cstep:
+            _sid = gd.get(cstep)
+            if _sid is not None and str(_sid).strip() and str(_sid) != 'nan':
+                _dcn = GLOBAL_CONFIG.get_dc_step_from_id(str(_sid))
+                if _dcn:
+                    _step2 = str(_dcn).strip()[:2]
+        _label = f"{_root} #{_wv}" + (f" ({_step2})" if _step2 else "")
         # (label, base64, is_target_lot) — target lot WF MAP은 HTML에서 라벨을 진한 파란색 강조
-        res.append((f"{_root} #{_wv}", base64.b64encode(_png).decode('utf-8'), _is_tgt(gd)))
+        res.append((_label, base64.b64encode(_png).decode('utf-8'), _is_tgt(gd)))
     return res
 
 

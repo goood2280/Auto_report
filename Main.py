@@ -1698,11 +1698,12 @@ def main():
                                     _wf_max = getattr(GLOBAL_CONFIG, 'anomaly_wfmap_max_count', 25)
                                     # supersample 배율 (Score Board WF MAP 합성 등에서 사용)
                                     _hs = max(1, int(getattr(GLOBAL_CONFIG, 'html_img_scale', 2)))
-                                    # spec-out WF MAP 데이터 스코프 = '현재 리포트 제품(main vehicle) + 현재 step'만.
-                                    #   merged_df에는 with_vehicle(비교용 다른 제품/vehicle)이 concat되어 있고
-                                    #   여러 step이 섞여 있어, 그대로 넘기면 render_specout_wfmaps_b64의 '남는 칸
-                                    #   채우기'가 다른 제품/vehicle/타 step의 wafer까지 끌어온다. anomaly 분석
-                                    #   모집단(anomaly_engine: MASK==main_vehicle)과 동일 스코프로 한정한다.
+                                    # spec-out WF MAP 데이터 스코프 = '현재 리포트 제품(main vehicle)'만.
+                                    #   merged_df에는 with_vehicle(비교용 다른 제품/vehicle)이 concat되어 있어
+                                    #   MASK==main_vehicle로 anomaly 분석 모집단(anomaly_engine)과 동일 제품으로 한정한다.
+                                    #   단, step은 필터하지 않는다 — Trend chart와 동일하게 '모든 step'의 spec-out
+                                    #   wafer가 WF MAP에 나오도록(라벨의 (XX)로 step 구분). render_specout_wfmaps_b64
+                                    #   가 각 wafer의 STEP_ID를 라벨에 표기하므로 타 step wafer도 식별 가능하다.
                                     _wfmap_src = merged_df
                                     _wf_mask_col = next((c for c in ('MASK', 'mask')
                                                          if c in _wfmap_src.columns), None)
@@ -1710,13 +1711,6 @@ def main():
                                         _wf_mv = _wfmap_src[_wfmap_src[_wf_mask_col] == vehicle]
                                         if not _wf_mv.empty:
                                             _wfmap_src = _wf_mv
-                                    _wf_step_col = next((c for c in ('STEP_ID', 'step_id')
-                                                         if c in _wfmap_src.columns), None)
-                                    if _wf_step_col is not None:
-                                        _wf_ss = _wfmap_src[_wfmap_src[_wf_step_col].astype(str)
-                                                            == str(target_DC_step_id)]
-                                        if not _wf_ss.empty:
-                                            _wfmap_src = _wf_ss
 
                                     def _html_table(cells, ncol, cellpad=2, cellstyle='vertical-align:top;',
                                                     colwidth=None):
