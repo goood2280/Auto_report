@@ -2824,21 +2824,21 @@ def _render_item_charts(task):
             if spec_high is not None:
                 ax.axhline(y=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
 
-            # ── y축 범위 자동 조정: 해당 lot + spec line 중심 ──
-            #   이전(모집단) high flier로 y축이 과도하게 커져 대상 lot이 안 보이는 문제 →
-            #   target lot·모집단 모두 'robust 범위(1~99%)'만 반영하고 spec line은 반드시 포함.
-            #   범위를 벗어난 high flier는 잘려도 무방(대상 lot과 spec을 명확히 보이게 함).
+            # ── y축 범위 자동 조정: 해당 lot 전량 + spec line 중심, 최대 확대 ──
+            #   target lot의 모든 데이터(flier 포함)와 spec line을 반드시 포함하되,
+            #   다른 lot(모집단)의 극단값은 Y축 범위 결정에서 제외하여 최대한 확대.
             if not log_scale:
                 try:
                     _tgt_y = _select_target_lot_frame(tdf, target_lot_id, target_root_lot_id, target_DC_step_id)
                 except Exception:
                     _tgt_y = tdf.iloc[0:0]
                 _yv = []
-                for _d in (_tgt_y, veh_df):
-                    if len(_d):
-                        _s = pd.to_numeric(_d[item_name], errors='coerce').dropna()
-                        if len(_s):
-                            _yv += [float(_s.quantile(0.01)), float(_s.quantile(0.99))]
+                # target lot: min~max 전량 포함 (flier도 반드시 표시)
+                if len(_tgt_y):
+                    _s = pd.to_numeric(_tgt_y[item_name], errors='coerce').dropna()
+                    if len(_s):
+                        _yv += [float(_s.min()), float(_s.max())]
+                # spec line 포함
                 if spec_low is not None:
                     _yv.append(float(spec_low))
                 if spec_high is not None:
@@ -2846,8 +2846,8 @@ def _render_item_charts(task):
                 _yv = [v for v in _yv if pd.notna(v)]
                 if _yv:
                     _ylo, _yhi = min(_yv), max(_yv)
-                    # 데이터/ spec 범위 위아래로 12% 여유(spec 초과 값도 빡빡하지 않게)
-                    _pad = (_yhi - _ylo) * 0.12 if _yhi > _ylo else (abs(_yhi) * 0.12 or 1.0)
+                    # 위아래 8% 마진 — spec/flier가 축 경계에 딱 붙지 않도록
+                    _pad = (_yhi - _ylo) * 0.08 if _yhi > _ylo else (abs(_yhi) * 0.08 or 1.0)
                     ax.set_ylim(_ylo - _pad, _yhi + _pad)
             ax.set_title("")
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
