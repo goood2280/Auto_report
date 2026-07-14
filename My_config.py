@@ -578,6 +578,20 @@ class Config:
         self.anomaly_exclude_items = [
             'MAWIN_minus_margin', 'MAWIN_plus_margin', 'MAWIN_ovl_index', 'MAWIN_new',
         ]
+        # ── 통계자동분석 '조건부' 제외 항목 (RULE에 걸리지 않으면 제외) ──
+        #   여기에 넣은 ITEM(ALIAS)은 built-in 자동판정(spec-out/Flier/산포 확대)으로는
+        #   이상/주의를 띄우지 않는다(= 평소엔 제외). 단, ANOMALY_KNOWLEDGE.md의 [RULE]/NL_RULES가
+        #   그 항목을 trigger/참조해 '걸리면' 그때만 finding으로 살아나 Trend chart·요약에 표시된다.
+        #   용도: Kelvin RES처럼 WF MAP 컬러링을 위해 spec을 tight하게 잡아 spec-out이 한두 개씩
+        #        상시 뜨는 항목 — built-in으로는 안 잡되, 엔지니어가 정의한 RULE(예: spec_out>=N)에
+        #        걸리는 '진짜 이상'일 때만 잡고 싶을 때.
+        #   차이: anomaly_exclude_items = 무조건 완전 제외 / anomaly_exclude_unless_rule = RULE 매칭 시 부활.
+        #   - 대소문자 무시, fnmatch 와일드카드(*,?) 지원. (예: 'ET_KELVIN_*')
+        #   - 두 리스트에 모두 있으면 완전 제외(anomaly_exclude_items)가 우선.
+        #   - RULE이 항목의 실제 통계(spec_out_pt·severity·disp 등)를 평가할 수 있도록 항목은
+        #     분석에서 빠지지 않고 컨텍스트가 유지된다(단 built-in finding만 조건부 억제).
+        self.anomaly_exclude_unless_rule = [
+        ]
         # WF MAP 제외 키워드: item(ALIAS)명에 아래 키워드가 포함되면 통계 이상/주의 판정과
         # Anomaly Trend chart(WF MAP 포함)에서 제외한다. (예: PCHK 측정 항목)
         # 새 키워드를 추가하려면 이 리스트에 문자열을 넣으면 된다.

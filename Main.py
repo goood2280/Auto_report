@@ -1618,6 +1618,26 @@ def main():
                         _excl_items += [f"*{str(_k).strip()}*"
                                         for _k in (getattr(GLOBAL_CONFIG, 'wfmap_exclude_keywords', []) or [])
                                         if str(_k).strip()]
+                        # 조건부 제외(anomaly_exclude_unless_rule): RULE에 걸려 code_findings에 살아남은
+                        #   항목만 Trend chart에 노출하고, 그 외(미매칭)는 metrics 폴백에서도 제외한다.
+                        #   (anomaly_engine이 built-in finding을 이미 억제 → code_findings에 없으면 미매칭.)
+                        _excl_unless = list(getattr(GLOBAL_CONFIG, 'anomaly_exclude_unless_rule', []) or [])
+                        _finding_item_set = set()
+                        if _excl_unless:
+                            for _f in (code_findings or []):
+                                for _fi in str(_f.get('item', '')).split(','):
+                                    _fi = _fi.strip()
+                                    if _fi:
+                                        _finding_item_set.add(_fi)
+
+                        def _is_excluded(_it):
+                            if item_excluded(_it, _excl_items):
+                                return True
+                            # 조건부 제외: RULE 미매칭(=code_findings에 없음)일 때만 제외
+                            if (_excl_unless and item_excluded(_it, _excl_unless)
+                                    and _it not in _finding_item_set):
+                                return True
+                            return False
                         top_item_names = []
                         _seen = set()
 
@@ -1641,7 +1661,7 @@ def main():
                         def _try_add(_it):
                             _it = str(_it).strip()
                             if (not _it) or (_it in _seen) or (_it not in merged_df.columns) or (not _has_png(_it)) \
-                                    or item_excluded(_it, _excl_items):
+                                    or _is_excluded(_it):
                                 return
                             _c2 = _cat2_of(_it)
                             if _c2 is not None and _c2 in _seen_cat2:   # 같은 CAT2 이미 채택 → 스킵(대표 1개만)
@@ -1675,7 +1695,7 @@ def main():
                             for m in _anom:
                                 _it = m['item']
                                 if (_it in _seen) or (_it not in merged_df.columns) or (not _has_png(_it)) \
-                                        or item_excluded(_it, _excl_items):
+                                        or _is_excluded(_it):
                                     continue
                                 _c2 = _cat2_of(_it)
                                 if _c2 is not None and _c2 in _seen_cat2:   # 같은 CAT2 이미 채택 → 스킵

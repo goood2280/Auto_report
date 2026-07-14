@@ -2541,6 +2541,16 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             print(f"[anomaly] 제외 키워드 PCHK {len(_meas_only)}개는 판정 제외, "
                   f"측정이상 추정 신호만 산출: {sorted(_meas_only)}")
 
+    # ── 조건부 제외(anomaly_exclude_unless_rule): built-in finding은 억제하되 항목은 분석에 남긴다 ──
+    #   해당 항목은 spec-out/Flier/산포 확대의 standalone finding을 태깅해 두었다가, 뒤의 RULE 평가
+    #   결과 그 항목을 참조·trigger한 rule이 매칭되면 살리고, 아니면 최종 반환 직전에 제거한다.
+    #   (hard-exclude(anomaly_exclude_items)에 이미 걸린 항목은 items에서 빠졌으므로 자동 제외 우선.)
+    _excl_unless = list(cfg('anomaly_exclude_unless_rule', []) or [])
+    _excl_unless_set = {it for it in items if _excl_unless and item_excluded(it, _excl_unless)}
+    if _excl_unless_set:
+        print(f"[anomaly] anomaly_exclude_unless_rule {len(_excl_unless_set)}개: "
+              f"built-in 판정 억제(단, RULE 매칭 시 부활): {sorted(_excl_unless_set)}")
+
     # ── PCHK 종류별 '검증 대상 CAT2' 매핑 (ANOMALY_KNOWLEDGE.md에서 관리) ──
     #   예) PCHK_LKG → [VTH, ...](CAT2 이름) : PCHK_LKG가 이 CAT2에 속한 항목들과 동일 PGM(pt)·shot
     #       에서 함께 spec-out일 때만 측정이상으로 본다. PCHK_RES는 다른 CAT2군.
@@ -3127,6 +3137,16 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 display_name=_disp(it), cat2=cat2_map.get(it, ''),
                 wafer_stats=dict(_wstats), rep_stddev=_rep_std, rep_median=_rep_med))
 
+    # ── 조건부 제외 항목의 built-in finding 태깅 ──
+    #   여기까지 findings에는 per-item built-in finding만 있다(RULE finding은 뒤에서 추가됨).
+    #   exclude_unless_rule 항목의 spec-out/Flier/산포 finding에 _excl_unless=True 표식을 달아
+    #   두고, RULE 평가 후 매칭 여부에 따라 최종적으로 유지/제거한다.
+    _EXCL_UNLESS_BUILTIN = {'SPEC_OUT', 'FLIER', 'DISPERSION'}
+    if _excl_unless_set:
+        for _f in findings:
+            if _f.get('item') in _excl_unless_set and _f.get('type') in _EXCL_UNLESS_BUILTIN:
+                _f['_excl_unless'] = True
+
     # ── 판단 근거 중간 데이터를 RUN/TEMP에 저장 (csv + json) ──
     try:
         import os, json
@@ -3659,6 +3679,38 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     # 호출자(Main)로 전체 rule 체크 결과 반환 — RUN/AI 파일 저장·PPT 반영에 사용
     if isinstance(rule_trace_out, list):
         rule_trace_out.extend(_rule_trace)
+
+    # ── 조건부 제외(anomaly_exclude_unless_rule) 최종 반영 ──
+    #   RULE 평가가 모두 끝난 시점. RULE(DEFECT_MODE/KNOWLEDGE) finding이 참조·trigger한 항목을
+    #   모아, 태깅된 built-in finding 중 그 항목의 것만 살리고 나머지는 제거한다(= 평소 제외).
+    #   RULE finding 자신은 그대로 유지되므로 '걸린' 항목은 RULE 결과로 요약/차트에 노출된다.
+    if _excl_unless_set:
+        _RULE_FINDING_TYPES = {'DEFECT_MODE', 'KNOWLEDGE'}
+        _rule_ref_forms = []   # RULE finding이 참조한 항목들의 name-form 집합
+        for _f in findings:
+            if _f.get('type') in _RULE_FINDING_TYPES:
+                _names = [str(_f.get('item', ''))]
+                _names += [str(_k) for _k in (_f.get('rule_matched_keys') or [])]
+                for _nm in _names:
+                    for _piece in _nm.split(','):
+                        _piece = _piece.strip()
+                        if _piece:
+                            _rule_ref_forms.append(_name_forms(_piece))
+
+        def _rule_hit(_item):
+            _euf = _name_forms(_item)
+            return any(_rf & _euf for _rf in _rule_ref_forms)
+
+        _kept, _suppressed = [], []
+        for _f in findings:
+            if _f.pop('_excl_unless', False) and not _rule_hit(_f.get('item', '')):
+                _suppressed.append(_f.get('item'))
+                continue
+            _kept.append(_f)
+        findings = _kept
+        if _suppressed:
+            print(f"[anomaly] exclude_unless_rule: RULE 미매칭으로 built-in finding "
+                  f"{len(_suppressed)}개 억제: {sorted(set(_suppressed))}")
 
     # ── Priority(우선순위) 명시적 수식 — 값이 클수록 우선(위에 정렬) ──
     #   이상(SPEC_OUT) : P = 20000 + 100·R_max + N_wf/100
