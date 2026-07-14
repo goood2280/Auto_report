@@ -578,12 +578,12 @@ class Config:
         self.wfmap_exclude_keywords = ['PCHK']
 
         # ── [0] Anomaly Trend Chart 우측 spec-out WF MAP ──
-        #   SPEC OUT(이상) 항목은 Trend 차트 우측에 spec-out(=flier) 칩맵을 최대한 많이 그린다.
-        #   (통과 칩=회색, spec 이탈 칩=빨강). target lot의 spec-out wafer는 '모두' 우선 표시하고
-        #   (lot 25매 전부 spec이면 25장 다 표시), 남는 칸은 다른 lot을 TKOUT_TIME 최신순으로 채운다.
-        #   anomaly_wfmap_max_count는 'target 외'를 포함한 총 표시 상한(target spec wafer는 상한과 무관하게 모두 표시).
+        #   SPEC OUT(이상) 항목은 Trend 차트 우측에 spec-out(=flier) 칩맵을 item별로 '전량' 그린다.
+        #   (통과 칩=회색, spec 이탈 칩=빨강). target lot의 spec-out wafer는 wafer_id 오름차순으로
+        #   '모두' 먼저 표시하고, 그 외 lot도 TKOUT_TIME 최신순으로 '전량' 표시한다.
+        #   anomaly_wfmap_max_count는 현재 spec-out WF MAP에는 적용되지 않는다(전량 표시).
         self.anomaly_wfmap_specout = True        # spec-out WF MAP 표시 on/off
-        self.anomaly_wfmap_max_count = 42        # 총 표시 상한(target spec wafer는 항상 전부 표시)
+        self.anomaly_wfmap_max_count = 42        # (현재 spec-out 전량 표시 — 미사용, 호환용 유지)
 
         # ── PPT Trend chart: 특정 항목은 site(모든 값) 대신 tkout_time 기준 집계점으로 표시 ──
         #   {항목명(ALIAS): 'P10'} 형식. 집계 스펙:
