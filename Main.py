@@ -2057,6 +2057,7 @@ def main():
                         _lg_flier_txt = (
                             f'① Flier — wafer median 대비 |값−median|이 보통 wafer 산포의 '
                             f'{_lg_fls:g}σ를 넘는 pt가 {_lg_fcnt_txt} wafer 존재'
+                            f' (REPORT DIRECTION 설정 시 해당 방향은 정상 감도, 반대 방향은 1.5배 완화)'
                             if _lg_fls > 0 else '① Flier — OFF')
                         _lg_gate_txt = (f'(절대 산포가 spec 폭의 {_lg_dgf * 100:g}% 이상일 때)'
                                         if _lg_dgf > 0 else '')

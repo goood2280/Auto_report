@@ -886,7 +886,8 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         "· [판정 기준]",
         "   - 이상(빨강): 해당 lot 측정값 중 spec 이탈 pt가 1개 이상. (median 이동은 판정에 사용하지 않음)",
         (f"   - 주의(주황) ① Flier: 설정된 spec 이탈은 없으나 wafer median 대비 |값-median|이 "
-         f"'보통 wafer 산포'의 {_fls:g}σ를 넘는 pt가 {_fcnt_txt}인 wafer 존재." if _fls > 0 else
+         f"'보통 wafer 산포'의 {_fls:g}σ를 넘는 pt가 {_fcnt_txt}인 wafer 존재. "
+         f"(REPORT DIRECTION 설정 시 해당 방향은 정상 감도, 반대 방향은 1.5배 완화 적용)" if _fls > 0 else
          "   - 주의(주황) ① Flier: OFF (anomaly_flier_sigma=0)"),
         (f"   - 주의(주황) ② 산포 확대: 특정 wafer의 내부 산포가 '보통 wafer 산포'의 {_dsp:g}배 초과"
          f"{_disp_gate_txt}."),
@@ -1542,9 +1543,9 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
       - 칩 색: spec 통과=회색(#bdbdbd), spec 이탈=빨강(#d32f2f).
       - 대상: spec-out 칩이 1개 이상 있는 측정(tkout)만.
       - 정렬/전량표시: ① target_lot(FAB_LOT_ID)의 spec-out wafer는 wafer_id 오름차순으로 '모두' 표시
-                   (lot 25매가 다 spec이면 25장 다 나옴),
-                   ② 그 외 lot의 spec-out wafer도 TKOUT_TIME 최신순으로 '전량' 표시
-                   (max_maps 상한 미적용 — item별 spec-out wafer를 빠짐없이 보여준다).
+                   (lot 25매가 다 spec이면 25장 다 나옴 — max_maps 상한 미적용),
+                   ② 그 외 lot의 spec-out wafer는 TKOUT_TIME 최신순으로 (max_maps - target 개수)
+                   만큼만 표시 (target이 이미 max_maps 이상이면 그 외 lot은 표시 안 함).
       - label = f"{ROOT_LOT_ID} #{WAFER_ID}".
     spec_low/spec_high는 호출부에서 REPORT DIRECTION을 이미 반영한 값(UPPER=하한 None,
     LOWER=상한 None)을 넘겨야 Trend의 SPEC OUT 판정과 일치한다.
@@ -1629,8 +1630,8 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
     rest = sorted([x for x in groups if not _is_tgt(x[0])],
                   key=lambda x: (x[0].get(ct) if pd.notna(x[0].get(ct)) else pd.Timestamp.min),
                   reverse=True)
-    # spec-out wafer는 item별로 전량 표시: target lot 먼저(wafer_id순), 그 외 tkout_time 최신순
-    ordered = tgt + rest
+    # target lot의 spec-out wafer는 전량 표시(max_maps 무관), 그 외 lot은 남는 칸만큼만 표시
+    ordered = tgt + rest[:max(0, max_maps - len(tgt))]
 
     # 전체 wafer 격자가 잘리지 않도록 공통 축범위 — chip layout이 있으면 전체 grid 기준
     gx0, gx1, gy0, gy1, xpad, ypad = _wfmap_grid_limits(d, cx, cy, main_vehicle=main_vehicle)

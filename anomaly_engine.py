@@ -2241,6 +2241,17 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     except Exception as e:
         print(f"[anomaly] spec dict 구성 실패: {e}")
 
+    # direction map {item: 'UPPER'|'LOWER'|'BOTH'} — REPORT DIRECTION 기반 flier 방향 감시용
+    direction_map = {}
+    try:
+        if spec_data is not None and 'REPORT DIRECTION' in getattr(spec_data, 'columns', []):
+            for _idx in spec_data.index:
+                _dv = spec_data.loc[_idx, 'REPORT DIRECTION']
+                _dv = str(_dv).strip().upper() if pd.notna(_dv) else 'BOTH'
+                direction_map[_idx] = _dv if _dv in ('UPPER', 'LOWER', 'BOTH') else 'BOTH'
+    except Exception as e:
+        print(f"[anomaly] REPORT DIRECTION 파싱 실패: {e}")
+
     # REPORT ORDER (spec-out 동순위 최종 tie-break용). spec_data는 ALIAS 인덱스.
     report_order = {}
     try:
@@ -2785,12 +2796,36 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 #   1개 이상이면 Flier 주의(flier_max_pts>0이면 그 개수 이하일 때만 — 초과는 산포 쪽).
                 #   MAD 기반 산포배수는 소수 pt에 둔감해 이 케이스를 못 잡으므로 상보적 판정.
                 if typ_wspread and flier_sigma > 0 and len(_s) >= 5:
-                    _fdev = (_s - float(_s.median())).abs() / typ_wspread
-                    _fcnt = int((_fdev > flier_sigma).sum())
+                    _smed = float(_s.median())
+                    _raw_dev = (_s - _smed) / typ_wspread  # 부호 있는 편차(양수=위, 음수=아래)
+                    _item_dir = direction_map.get(it, 'BOTH')
+
+                    if _item_dir == 'UPPER':
+                        # 상한 감시: 위쪽 flier는 정상 감도, 아래쪽은 1.5배 완화
+                        _fmask = (_raw_dev > flier_sigma) | (_raw_dev < -(flier_sigma * 1.5))
+                    elif _item_dir == 'LOWER':
+                        # 하한 감시: 아래쪽 flier는 정상 감도, 위쪽은 1.5배 완화
+                        _fmask = (_raw_dev < -flier_sigma) | (_raw_dev > (flier_sigma * 1.5))
+                    else:  # BOTH
+                        _fmask = _raw_dev.abs() > flier_sigma
+
+                    _fcnt = int(_fmask.sum())
+                    _fdev_abs = _raw_dev.abs()
+
+                    # 우선순위: spec 방향 flier의 최대 편차를 대표값으로
+                    if _item_dir == 'UPPER':
+                        _spec_dir_dev = _raw_dev[_raw_dev > 0]  # 상한 방향만
+                        _fdev_max = float(_spec_dir_dev.max()) if len(_spec_dir_dev) > 0 else float(_fdev_abs.max())
+                    elif _item_dir == 'LOWER':
+                        _spec_dir_dev = -_raw_dev[_raw_dev < 0]  # 하한 방향(절대값)
+                        _fdev_max = float(_spec_dir_dev.max()) if len(_spec_dir_dev) > 0 else float(_fdev_abs.max())
+                    else:
+                        _fdev_max = float(_fdev_abs.max())
+
                     if (_fcnt >= 1 and (flier_max_pts <= 0 or _fcnt <= flier_max_pts)
-                            and float(_fdev.max()) > worst_flier_dev):
+                            and _fdev_max > worst_flier_dev):
                         _wi = _waf_int(w)
-                        worst_flier_dev = float(_fdev.max())
+                        worst_flier_dev = _fdev_max
                         worst_flier_w = _wi if _wi is not None else w
                         worst_flier_cnt = _fcnt
             if worst_disp_ratio >= 1.3 and worst_disp_w is not None:
