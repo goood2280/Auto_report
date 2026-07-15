@@ -778,11 +778,15 @@ class Config:
         # 엔지니어가 이 dict를 직접 수정하여 DC layer ↔ step_id 매핑을 관리합니다.
         self.dc_step_to_ids = {'MFDC': ['test']}
         # dc_dict: 위 매핑으로부터 생성한 step_id → DC layer 역매핑
-        self.dc_dict = {
-            sid: dc
-            for dc, sids in self.dc_step_to_ids.items()
-            for sid in sids
-        }
+        #   같은 step_id가 여러 DC layer에 등록된 경우 '먼저 선언된 DC layer'로 매칭한다
+        #   (first-wins). dict comprehension은 last-wins라 나중 DC layer가 앞의 매칭을
+        #   덮어써, 예를 들어 {'MFDC': ['NU111'], 'M8DC': ['NU222','NU111']}에서 NU111이
+        #   M8DC로 뒤집혔다. 아래 in 가드로 첫 등장(MFDC)을 유지한다.
+        self.dc_dict = {}
+        for dc, sids in self.dc_step_to_ids.items():
+            for sid in sids:
+                if sid not in self.dc_dict:
+                    self.dc_dict[sid] = dc
 
         # .env 파일에서 환경 변수 로드
         self._load_env_variables()

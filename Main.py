@@ -1854,9 +1854,13 @@ def main():
                                         if _wf_on:
                                             try:
                                                 _slow, _shigh = _spec_bounds(item)
+                                                # target 판정 = 리포트의 lot_id + step_id 조합.
+                                                #   target_step을 빼면 같은 lot의 다른 step WF MAP까지
+                                                #   파란 테두리로 묶여 대상 step을 가린다.
                                                 _wfmaps = render_specout_wfmaps_b64(
                                                     _wfmap_src, item, spec_low=_slow, spec_high=_shigh,
-                                                    target_lot=target_lot_id, max_maps=_wf_max,
+                                                    target_lot=target_lot_id,
+                                                    target_step=target_DC_step_id, max_maps=_wf_max,
                                                     main_vehicle=vehicle)
                                                 if _wfmaps:
                                                     # PIL 합성: '해당 lot(target)' WF MAP은 왼쪽에 파란 테두리 블록으로
@@ -1905,26 +1909,23 @@ def main():
                                                         _cfont = _PILFont2.truetype(_cf, max(9, 10 * _hs))
                                                     except Exception:
                                                         _cfont = _PILFont2.load_default()
-                                                    # target lot 라벨용 bold 폰트(없으면 stroke로 두껍게 폴백)
-                                                    _cfont_b = None
-                                                    for _bf in ("NanumGothicBold.ttf", "malgunbd.ttf", "arialbd.ttf"):
-                                                        try:
-                                                            _cfont_b = _PILFont2.truetype(_bf, max(9, 10 * _hs))
-                                                            break
-                                                        except Exception:
-                                                            continue
                                                     _comp = _PILImg2.new('RGB', (_cw_total, _ch_total), (255, 255, 255))
                                                     _cdraw = _PILDraw2.Draw(_comp)
 
                                                     def _draw_wf_cell(_wf, _ox, _oy):
-                                                        """WF MAP 1셀(맵+라벨) 드로잉 — target lot 라벨은 파란색+bold."""
+                                                        """WF MAP 1셀(맵+라벨) 드로잉 — target lot 라벨은 파란색(bold 아님).
+
+                                                        라벨은 target/그 외 모두 일반(regular) 폰트로 그린다. 구분은
+                                                        색(파랑/회색) + target 블록의 파란 테두리로만 한다 — bold는
+                                                        같은 폭 셀에서 글자를 굵고 넓게 만들어 가독성이 떨어졌다.
+                                                        """
                                                         _lab, _b = _wf[0], _wf[1]
                                                         _is_tgt = _wf[2] if len(_wf) > 2 else False
                                                         _wf_img = _PILImg2.open(_io2.BytesIO(base64.b64decode(_b)))
                                                         _wf_img = _wf_img.resize((_map_sz, _map_sz), _PILImg2.LANCZOS)
                                                         _comp.paste(_wf_img, (_ox, _oy))
                                                         _lcolor = (0, 51, 204) if _is_tgt else (85, 85, 85)
-                                                        _lfont = (_cfont_b or _cfont) if _is_tgt else _cfont
+                                                        _lfont = _cfont
                                                         # 라벨 자간(letter-spacing) 조절 — step 접미사 "(XX)"가 붙어
                                                         # 라벨이 맵 셀 폭보다 넓어지면 이웃 라벨과 겹친다. 문자별로
                                                         # 그려 자간을 줄여 셀 pitch(_cell_w) 안에 맞춘다: 기본은
@@ -1943,19 +1944,9 @@ def main():
                                                             _trk = min(_trk, (_avail - _sum) / (_n - 1))
                                                         _total = _sum + max(0, _n - 1) * _trk
                                                         _ly = _oy + _map_sz + 1 * _hs
-                                                        _bold_stroke = (_is_tgt and _cfont_b is None)
                                                         _cx = _ox + (_map_sz - _total) / 2.0
                                                         for _ci, _ch in enumerate(_lab):
-                                                            if _bold_stroke:
-                                                                # bold 폰트가 없으면 stroke(외곽선)로 두껍게
-                                                                try:
-                                                                    _cdraw.text((_cx, _ly), _ch, fill=_lcolor, font=_lfont,
-                                                                                stroke_width=max(1, _hs // 2), stroke_fill=_lcolor)
-                                                                except TypeError:   # 구버전 Pillow → 1px offset 이중 드로잉
-                                                                    _cdraw.text((_cx, _ly), _ch, fill=_lcolor, font=_lfont)
-                                                                    _cdraw.text((_cx + 1, _ly), _ch, fill=_lcolor, font=_lfont)
-                                                            else:
-                                                                _cdraw.text((_cx, _ly), _ch, fill=_lcolor, font=_lfont)
+                                                            _cdraw.text((_cx, _ly), _ch, fill=_lcolor, font=_lfont)
                                                             _cx += _advs[_ci] + _trk
 
                                                     for _wi, _wf in enumerate(_wf_tgt):
@@ -2111,8 +2102,9 @@ def main():
                             f'{_lg_flier_txt} ② 산포 확대 — 특정 wafer의 내부 산포가 보통 wafer 산포의 '
                             f'{_lg_ratio:g}배 초과{_lg_gate_txt}<br>'
                             f'&nbsp;· <b>SPEC OUT WF MAP</b> : <span style="color:#0033cc; font-weight:bold;">파란 '
-                            f'테두리 박스(파란 bold 라벨) = 해당 측정 lot_id({target_lot_id})내 wafer</span>, '
-                            '<span style="color:#555555;">회색 라벨 = 그 외 tkout_time 기준 최근 '
+                            f'테두리 박스(파란 라벨) = 해당 측정 lot_id({target_lot_id}) + '
+                            f'step({target_DC_step_id})내 wafer</span>, '
+                            '<span style="color:#555555;">회색 라벨(테두리 없음) = 그 외 tkout_time 기준 최근 '
                             'spec-out WF MAP</span></div>')
                         html_content = html_content.replace(
                             '<div id="target0"></div>',

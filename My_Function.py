@@ -1538,13 +1538,17 @@ def render_wafer_wfmaps_b64(df, item, min_pts=50, lot_prefix=None,
 
 
 def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
-                              target_lot=None, max_maps=25,
+                              target_lot=None, target_step=None, max_maps=25,
                               size_in=0.62, dpi=None, main_vehicle=None):
     """spec-out(=flier) 칩맵을 측정(lot, wafer, tkout) 단위로 그려 [(label, b64), ...]로 반환.
 
     [0] Anomaly Trend Chart 의 SPEC OUT 항목 우측에 붙이는 용도.
       - 칩 색: spec 통과=회색(#bdbdbd), spec 이탈=빨강(#d32f2f).
       - 대상: spec-out 칩이 1개 이상 있는 측정(tkout)만.
+      - target 판정 = (FAB_LOT_ID == target_lot) AND (STEP_ID == target_step) — 리포트의 lot+step
+        조합에 해당하는 WF MAP만 target으로 본다. target_step을 넘기지 않으면 lot만으로 판정한다.
+        (같은 lot의 다른 step WF MAP까지 target으로 묶이면 파란 강조가 리포트 대상 step을 가리지
+        못하므로 step까지 일치시킨다.)
       - 정렬/전량표시: ① target_lot(FAB_LOT_ID)의 spec-out wafer는 wafer_id 오름차순으로 '모두' 표시
                    (lot 25매가 다 spec이면 25장 다 나옴 — max_maps 상한 미적용),
                    ② 그 외 lot의 spec-out wafer는 TKOUT_TIME 최신순으로 (max_maps - target 개수)
@@ -1626,7 +1630,14 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
         return []
 
     def _is_tgt(gd):
-        return target_lot is not None and clot is not None and str(gd.get(clot)) == str(target_lot)
+        """리포트 대상(lot_id + step_id) WF MAP인지 — 파란 테두리/파란 라벨 대상 판정."""
+        if target_lot is None or clot is None:
+            return False
+        if str(gd.get(clot)) != str(target_lot):
+            return False
+        if target_step is not None and cstep is not None:
+            return str(gd.get(cstep)) == str(target_step)
+        return True
 
     def _waf(gd):
         try:
@@ -1681,7 +1692,8 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
                 if _dcn:
                     _step2 = str(_dcn).strip()[:2]
         _label = f"{_root} #{_wv}" + (f" ({_step2})" if _step2 else "")
-        # (label, base64, is_target_lot) — target lot WF MAP은 HTML에서 라벨을 진한 파란색 강조
+        # (label, base64, is_target) — target(lot+step) WF MAP은 HTML에서 라벨 진한 파란색 +
+        #   파란 테두리 박스로 묶어 강조. 나머지는 회색 라벨 + 테두리 없음.
         res.append((_label, base64.b64encode(_png).decode('utf-8'), _is_tgt(gd)))
     return res
 
