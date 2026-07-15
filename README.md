@@ -536,11 +536,12 @@ python Main.py --convert-nl-rules-md   # 변환해서 바로 MD의 ANOMALY_RULES
 
 **spec-out WF MAP**(`render_specout_wfmaps_b64`):
 - 칩 색: 통과=회색(`#bdbdbd`), spec 이탈(flier)=빨강(`#d32f2f`).
-- **타깃 lot의 spec-out wafer는 전량 우선 표시**(25매 모두 spec이면 25장). 남는 칸만 다른 lot을 TKOUT_TIME 최신순으로.
+- **타깃 판정 = 리포트의 `lot_id` + `step_id` 조합**(`target_lot`/`target_step`). 타깃 WF MAP만 파란 테두리 박스로 묶고, 같은 lot이라도 **다른 step은 타깃이 아니며 테두리를 그리지 않습니다**.
+- **타깃의 spec-out wafer는 전량 우선 표시**(25매 모두 spec이면 25장). 남는 칸만 그 외(다른 lot·다른 step)를 TKOUT_TIME 최신순으로.
 - 상한은 `anomaly_wfmap_max_count`(=42)지만 **타깃 spec wafer는 상한과 무관하게 모두** 표시.
 - spec_low/high는 `REPORT DIRECTION`을 반영해 전달 → Trend의 SPEC OUT 판정과 일치.
 - **step_id 필터 없음** — 리포트 제품(`MASK==main_vehicle`)의 **모든 step_id**의 spec-out wafer를 표시합니다(Trend chart와 동일 스코프). 측정 단위(root_lot·fab_lot·wafer·tkout·**step_id**)로 그룹핑하므로 같은 wafer의 다른 step 측정은 별도 맵으로 분리됩니다.
-- **라벨** = `{ROOT_LOT_ID} #{WAFER_ID} ({XX})` — `XX`는 그 wafer의 `STEP_ID`를 `dc_dict`(step_id→DC step 매칭테이블, `get_dc_step_from_id`)로 변환한 값의 **앞 2자리**(미등록 step은 괄호 생략). 여러 step이 섞였을 때 어느 step의 spec-out wafer인지 구분합니다. 타깃 lot 라벨은 진파랑(`#0033cc`) bold, 그 외는 회색. 라벨이 맵 셀 폭을 넘으면 **자간을 자동으로 좁혀** 이웃 라벨과 겹치지 않게 그립니다.
+- **라벨** = `{ROOT_LOT_ID} #{WAFER_ID} ({XX})` — `XX`는 그 wafer의 `STEP_ID`를 `dc_dict`(step_id→DC step 매칭테이블, `get_dc_step_from_id`)로 변환한 값의 **앞 2자리**(미등록 step은 괄호 생략). 여러 step이 섞였을 때 어느 step의 spec-out wafer인지 구분합니다. 매칭테이블에 **같은 step_id가 여러 DC layer에 등록**되면 `dc_dict`는 **먼저 선언된 DC layer**로 매칭합니다(first-wins). 타깃 라벨은 진파랑(`#0033cc`) **일반 폰트**(bold 아님), 그 외는 회색. 라벨이 맵 셀 폭을 넘으면 **자간을 자동으로 좁혀** 이웃 라벨과 겹치지 않게 그립니다.
 
 **상태 스티커**: 각 Trend 차트 좌상단에 CSS 배지 — `SPEC OUT`(빨강) / `WARNING`(주황). PNG 자체는 수정하지 않으므로 PPT 차트에는 영향 없음(HTML [0]에만 적용).
 
