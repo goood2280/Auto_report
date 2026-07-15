@@ -1131,6 +1131,8 @@ def main():
                         _sb_lw.columns = pd.MultiIndex.from_tuples(
                             [(str(_l), int(float(_w))) for (_l, _w) in _sb_lw.columns])
                         VIP_group_lw = _sb_lw.reindex(VIP_group.index)   # 행=VIP_group 순서, 컬럼=(lot,wafer)
+                        # v9.3.x: 모든 index에 값이 없는 wafer 열 제거 (PPT Score Board)
+                        VIP_group_lw = VIP_group_lw.dropna(axis=1, how='all')
 
                         # VIP_group_HTML 생성 *VIP_group copy (HTML 카테고리 구분자는 CAT2 기준)
                         VIP_group_HTML = pd.merge(VIP_group_raw,reformatter[['CAT2','REPORT ORDER']].dropna(subset=['REPORT ORDER']).drop('REPORT ORDER',axis=1)\
@@ -1380,6 +1382,9 @@ def main():
                             _ordered_cols.extend(_wafs)
                         VIP_group_HTML = VIP_group_HTML[_ordered_cols]
                         VIP_group_HTML.index.names = ['category', 'Item']
+                        # v9.3.x: 모든 index에 값이 없는 wafer 열 제거 — 측정 데이터가 전혀 없는
+                        #   wafer는 회색 빈 열만 차지하므로 가독성을 위해 열 자체를 숨긴다.
+                        VIP_group_HTML = VIP_group_HTML.dropna(axis=1, how='all')
                         print("score board lots :", _lots_sorted)
 
                         # 측정값이 전혀 없는 행 제거 — PPT와 동일하게 lot-wafer reindex 후에도
