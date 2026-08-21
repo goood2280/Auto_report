@@ -709,6 +709,26 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
         for w in _wafs:
             order.append((_present[(_lot, w)], _lot, w))
 
+    # ---- 열 폭 결정(페이지 공통) --------------------------------------------
+    # wafer(점수) 열에는 "100.0" 정도의 값만 들어가므로 그만한 폭이면 충분하다.
+    # 다만 위 헤더의 lot_id가 그 lot의 wafer 열들에 가로 병합되어 들어가므로,
+    # lot당 wafer 수가 적고 lot_id가 길면 필요한 만큼만 넓힌다.
+    # 상한(_WAF_W_MAX)을 둬 lot_id가 아무리 길어도 열이 무한히 넓어지지 않게 한다.
+    # (Index Aggregation Table의 wafer 열 폭 규칙과 동일한 방식)
+    item_w = 2.65        # ITEM명 폭(나눔고딕 기준 4자 여유 추가)
+    _WAF_W_MIN = 0.40    # "100.0"(7pt) + 좌우 여백이면 충분한 기본 폭
+    _WAF_W_MAX = 0.72    # lot_id가 길어도 이 이상은 넓히지 않음(상한)
+    _LOT_CH_W = 0.072    # lot 헤더(8pt bold) 1자 대략 폭(inch)
+    _lot_need = 0.0      # lot_id 표기에 필요한 'wafer 열 1칸당' 폭
+    for _lot in _lots:
+        _n = sum(1 for _o in order if _o[1] == _lot)
+        if _n:
+            _lot_need = max(_lot_need, (len(str(_lot)) * _LOT_CH_W + 0.04) / _n)
+    ww = min(_WAF_W_MAX, max(_WAF_W_MIN, _lot_need))
+    # wafer 수가 많아 슬라이드 폭을 넘으면 기존처럼 남는 폭으로 균등 축소
+    ww = max(0.14, min(ww, (12.89 - item_w) / max(len(order), 1)))
+    tbl_w = item_w + ww * len(order)   # 표 폭 = 실제 열 폭 합(열이 좁으면 표도 좁게)
+
     chunk_size = 30
     total_pages = (len(VIP_group) - 1) // chunk_size + 1
 
@@ -732,10 +752,8 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
         nrows = len(chunk_df) + 2   # 헤더 2행(lot / wafer)
         table_height = Inches(min(6.4, 0.5 + len(chunk_df) * 0.18))
         tbl = slide.shapes.add_table(nrows, ncols, Inches(0.22), Inches(0.72),
-                                     Inches(12.89), table_height).table
+                                     Inches(tbl_w), table_height).table
 
-        item_w = 2.65   # ITEM명 폭(나눔고딕 기준 4자 여유 추가). 남는 폭은 wafer 열로 분배
-        ww = max(0.14, (12.89 - item_w) / max(len(order), 1))
         tbl.columns[0].width = Inches(item_w)
         for j in range(1, ncols):
             tbl.columns[j].width = Inches(ww)   # 모든 wafer 열 동일 너비
@@ -871,11 +889,51 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         _rc, _rm = float(radius_zones[0]), float(radius_zones[1])
     except Exception:
         _rc, _rm = 60.0, 100.0
-    _dsp = getattr(GLOBAL_CONFIG, 'anomaly_lot_dispersion_ratio', 2.0)
-    _fls = float(getattr(GLOBAL_CONFIG, 'anomaly_flier_sigma', 3.5) or 0)
-    _flm = int(getattr(GLOBAL_CONFIG, 'anomaly_flier_max_pts', 0) or 0)
-    _fodr = float(getattr(GLOBAL_CONFIG, 'anomaly_flier_offdir_relax', 2.0) or 1.0)
-    _dgf = float(getattr(GLOBAL_CONFIG, 'anomaly_disp_min_spec_frac', 0.0) or 0.0)
+    # Config.get()은 reformatter/config.yaml의 제품별 override까지 반영한다.
+    _cfg = GLOBAL_CONFIG.get
+    _dsp = float(_cfg('anomaly_lot_dispersion_ratio', 2.0) or 0)
+    _fls = float(_cfg('anomaly_flier_sigma', 3.5) or 0)
+    _flm = int(_cfg('anomaly_flier_max_pts', 0) or 0)
+    _fodr = float(_cfg('anomaly_flier_offdir_relax', 2.0) or 1.0)
+    _dgf = float(_cfg('anomaly_disp_min_spec_frac', 0.0) or 0.0)
+    _profile = str(_cfg('anomaly_detector_profile', 'legacy') or 'legacy').strip().lower()
+    _profiles = _cfg('anomaly_detector_profiles', {}) or {}
+    _enabled = _cfg('anomaly_enabled_detectors', None)
+    if _enabled is None:
+        _enabled = _profiles.get(_profile, _profiles.get('legacy', []))
+    if isinstance(_enabled, str):
+        _enabled = [x.strip() for x in _enabled.split(',') if x.strip()]
+    _enabled = {str(_x).strip().lower() for _x in (_enabled or []) if str(_x).strip()}
+    _sensitive = _profile == 'sensitive'
+
+    def _pcfg(_name, _default):
+        if _sensitive:
+            _v = _cfg(f'{_name}_sensitive', None)
+            if _v is not None:
+                return _v
+        return _cfg(_name, _default)
+
+    _series_note_lines = [
+        f"· detector profile = {_profile} ({', '.join(sorted(_enabled)) or 'none'})."
+    ]
+    if 'level_shift' in _enabled:
+        _series_note_lines.append(
+            f"   - 주의 ③ Level shift: 대상 lot 중앙값이 과거 robust 중심에서 "
+            f"{float(_pcfg('anomaly_level_shift_sigma', 3.0)):g}σ 이상 벗어나고, 대상값의 "
+            f"{float(_pcfg('anomaly_level_shift_min_fraction', 0.75)) * 100:g}% 이상이 같은 방향."
+        )
+    if 'trend' in _enabled:
+        _series_note_lines.append(
+            f"   - 주의 ④ Trend: 최근 {int(_pcfg('anomaly_trend_window', 12))}개 대표값의 robust 직선 변화폭이 "
+            f"{float(_pcfg('anomaly_trend_total_sigma', 3.0)):g}σ 이상, R²≥"
+            f"{float(_pcfg('anomaly_trend_min_r2', 0.60)):g}."
+        )
+    if 'spc_run' in _enabled:
+        _series_note_lines.append(
+            f"   - 주의 ⑤ SPC run: 연속 {int(_pcfg('anomaly_spc_same_side_points', 8))}점 같은 쪽, "
+            f"최근 3점 중 2점>{float(_pcfg('anomaly_spc_two_of_three_sigma', 2.0)):g}σ, 또는 "
+            f"최근 5점 중 4점>{float(_pcfg('anomaly_spc_four_of_five_sigma', 1.0)):g}σ."
+        )
     _fcnt_txt = "1개 이상" if _flm <= 0 else f"1~{_flm}개"
     _fdir_txt = (f"(REPORT DIRECTION=UPPER/LOWER: spec 방향 정상 감도, 반대 방향 {_fodr:g}배 완화 / BOTH: 양방향 동일)"
                  if _fodr != 1.0 else "(REPORT DIRECTION 방향 완화 없음)")
@@ -890,16 +948,19 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         "   - 이상(빨강): 해당 lot 측정값 중 spec 이탈 pt가 1개 이상. (median 이동은 판정에 사용하지 않음)",
         (f"   - 주의(주황) ① Flier: 설정된 spec 이탈은 없으나 wafer median 대비 |값-median|이 "
          f"'보통 wafer 산포'의 {_fls:g}σ를 넘는 pt가 {_fcnt_txt}인 wafer 존재. "
-         f"{_fdir_txt}" if _fls > 0 else
-         "   - 주의(주황) ① Flier: OFF (anomaly_flier_sigma=0)"),
+         f"{_fdir_txt}" if _fls > 0 and 'flier' in _enabled else
+         "   - 주의(주황) ① Flier: OFF"),
         (f"   - 주의(주황) ② 산포 확대: 특정 wafer의 내부 산포가 '보통 wafer 산포'의 {_dsp:g}배 초과"
-         f"{_disp_gate_txt}."),
+         f"{_disp_gate_txt}." if 'dispersion' in _enabled else
+         "   - 주의(주황) ② 산포 확대: OFF"),
+        *_series_note_lines,
         "   - 그 외: 참고.",
         "· [우선순위 P] — 값이 클수록 위에 정렬. R_max=최대 wafer spec-out 비율(out pt/측정 pt), "
         f"N_wf=spec-out wafer 수, D=최대 wafer 산포배수, F=Flier 최대 이탈 σ(임계 {_fls:g}σ 대비).",
         "   - 이상: P = 20000 + 100·R_max + N_wf/100      "
         f"- 주의(Flier): P = 10000 + 100·(F/{_fls:g})      "
-        "- 주의(산포): P = 10000 + 100·D      (동점 시 REPORT ORDER 오름차순)",
+        "- 주의(산포): P = 10000 + 100·D      "
+        "- 주의(시계열): P = 10000 + 100·detector score      (동점 시 REPORT ORDER 오름차순)",
     ]
 
     # ── 카테고리(cat2)별 그룹핑 — 우선순위 상 '첫 등장' 순으로 카테고리 배열, 카테고리 내는 우선순위 유지 ──
@@ -1065,6 +1126,9 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
                     r1.font.bold = True; r1.font.size = Pt(11)
                     r1.font.color.rgb = RGBColor(0x1A, 0x1A, 0x1A); r1.font.name = FONT
                 det = _strip(f.get("detail", ""))
+                _basis_txt = _strip(f.get("basis", ""))
+                if _basis_txt and _basis_txt not in det:
+                    det = (det + "  |  " if det else "") + "근거: " + _basis_txt
                 if det:
                     r2 = p.add_run(); r2.text = "  —  " + det
                     r2.font.size = Pt(9); r2.font.color.rgb = RGBColor(0x55, 0x55, 0x55); r2.font.name = FONT
@@ -1691,7 +1755,11 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
                 _dcn = GLOBAL_CONFIG.get_dc_step_from_id(str(_sid))
                 if _dcn:
                     _step2 = str(_dcn).strip()[:2]
-        _label = f"{_root} #{_wv}" + (f" ({_step2})" if _step2 else "")
+        _wf_label_tail = f"#{_wv}" + (f" ({_step2})" if _step2 else "")
+        if bool(GLOBAL_CONFIG.get('anomaly_wfmap_label_multiline', True)):
+            _label = f"{_root}\n{_wf_label_tail}"
+        else:
+            _label = f"{_root} {_wf_label_tail}"
         # (label, base64, is_target) — target(lot+step) WF MAP은 HTML에서 라벨 진한 파란색 +
         #   파란 테두리 박스로 묶어 강조. 나머지는 회색 라벨 + 테두리 없음.
         res.append((_label, base64.b64encode(_png).decode('utf-8'), _is_tgt(gd)))
@@ -2771,22 +2839,40 @@ def _render_item_charts(task):
                 root_style[_rt] = (_ROOT_COLORS[_i % len(_ROOT_COLORS)],
                                    _ROOT_MARKERS[_i % len(_ROOT_MARKERS)])
 
+        # ---- vehicle 구름대(1~99% 밴드 + 3-day median) 사전 계산 ----
+        #   차트 그리기(_draw_trend)와 Y축 범위 산정이 '같은 값'을 쓰도록 여기서 한 번만 계산한다.
+        #   trend_ylim_band_pct(My_config, 기본 25)로 지정한 중심 백분위(P25~P75)도 함께 구해,
+        #   Y축이 구름대 중심부·median 라인을 잘라먹지 않도록 하는 데 쓴다.
+        _band_pct = cfg.get('trend_ylim_band_pct', 25)
+        try:
+            _band_pct = float(_band_pct)
+        except (TypeError, ValueError):
+            _band_pct = 0.0
+        if not (0 < _band_pct < 50):
+            _band_pct = 0.0                      # 0/None/범위 밖 → 구름대 포함 OFF(종전 동작)
+        _band_roll = None
+        if len(veh_df) > 0:
+            _b = veh_df[['tkout_time', item_name]].dropna().sort_values('tkout_time')
+            if len(_b) > 0:
+                _b = _b.assign(date=_b['tkout_time'].dt.date)
+                _aggs = {'median': 'median',
+                         'q01': lambda x: x.quantile(0.01),
+                         'q99': lambda x: x.quantile(0.99)}
+                if _band_pct:
+                    _aggs['qlo'] = lambda x, _q=_band_pct / 100.0: x.quantile(_q)
+                    _aggs['qhi'] = lambda x, _q=1.0 - _band_pct / 100.0: x.quantile(_q)
+                _daily = _b.groupby('date')[item_name].agg(**_aggs).reset_index()
+                _daily['date'] = pd.to_datetime(_daily['date'])
+                _band_roll = _daily.set_index('date').sort_index().rolling('3D', min_periods=1).mean()
+
         def _draw_trend(ax):
             # vehicle 기준 1~99% 구름대 + median (main vehicle 데이터만)
-            if len(veh_df) > 0:
-                b = veh_df[['tkout_time', item_name]].dropna().sort_values('tkout_time')
-                if len(b) > 0:
-                    b = b.assign(date=b['tkout_time'].dt.date)
-                    daily = b.groupby('date')[item_name].agg(
-                        median='median',
-                        q01=lambda x: x.quantile(0.01),
-                        q99=lambda x: x.quantile(0.99)).reset_index()
-                    daily['date'] = pd.to_datetime(daily['date'])
-                    daily = daily.set_index('date').sort_index()
-                    roll = daily.rolling('3D', min_periods=1).mean()
-                    ax.fill_between(roll.index, roll['q01'], roll['q99'], color=C_BAND, alpha=0.6, label=f'{main_vehicle} 1~99%', zorder=1)
-                    # 3일 기준 rolling median 라인 (검정색)
-                    ax.plot(roll.index, roll['median'], color='black', linewidth=1.5, alpha=1.0, zorder=6, label='3-day median')
+            if _band_roll is not None and len(_band_roll) > 0:
+                ax.fill_between(_band_roll.index, _band_roll['q01'], _band_roll['q99'],
+                                color=C_BAND, alpha=0.6, label=f'{main_vehicle} 1~99%', zorder=1)
+                # 3일 기준 rolling median 라인 (검정색)
+                ax.plot(_band_roll.index, _band_roll['median'], color='black', linewidth=1.5,
+                        alpha=1.0, zorder=6, label='3-day median')
             # 색상/모양 규칙:
             #   · 리포트 lot_id = 빨강 원(o), 최상단 zorder — 다른 모든 마커 위에 확실히 표시
             #   · 형제 lot(리포트와 같은 root_lot_id) = 리포트 root 그룹의 색·모양(빨강 아님)
@@ -2852,9 +2938,11 @@ def _render_item_charts(task):
             if spec_high is not None:
                 ax.axhline(y=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
 
-            # ── y축 범위 자동 조정: 해당 lot 전량 + spec line 중심, 최대 확대 ──
-            #   target lot의 모든 데이터(flier 포함)와 spec line을 반드시 포함하되,
-            #   다른 lot(모집단)의 극단값은 Y축 범위 결정에서 제외하여 최대한 확대.
+            # ── y축 범위 자동 조정: 해당 lot 전량 + spec line + 구름대 중심부 ──
+            #   target lot의 모든 데이터(flier 포함)와 spec line은 반드시 포함하고,
+            #   여기에 vehicle 구름대의 중심 백분위(trend_ylim_band_pct, 기본 P25~P75)와
+            #   3-day median 라인까지 포함해 전체 Trend 흐름이 축 밖으로 잘리지 않게 한다.
+            #   구름대의 극단(1%/99%)과 다른 lot의 극단값은 계속 범위 결정에서 제외 → 확대 유지.
             if not log_scale:
                 try:
                     _tgt_y = _select_target_lot_frame(tdf, target_lot_id, target_root_lot_id, target_DC_step_id)
@@ -2871,6 +2959,14 @@ def _render_item_charts(task):
                     _yv.append(float(spec_low))
                 if spec_high is not None:
                     _yv.append(float(spec_high))
+                # vehicle 구름대 중심부(P{band}~P{100-band}) + 3-day median 라인 포함
+                if _band_roll is not None and len(_band_roll) > 0:
+                    for _c in (['median', 'qlo', 'qhi'] if _band_pct else ['median']):
+                        if _c not in _band_roll.columns:
+                            continue
+                        _bs = pd.to_numeric(_band_roll[_c], errors='coerce').dropna()
+                        if len(_bs):
+                            _yv += [float(_bs.min()), float(_bs.max())]
                 _yv = [v for v in _yv if pd.notna(v)]
                 if _yv:
                     _ylo, _yhi = min(_yv), max(_yv)
@@ -2879,9 +2975,13 @@ def _render_item_charts(task):
                     ax.set_ylim(_ylo - _pad, _yhi + _pad)
             ax.set_title("")
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
-            ax.tick_params(axis='x', rotation=0, labelsize=7)
+            _axis_tick_pt = float(cfg.get('trend_axis_tick_font_pt', 7.5) or 7.5)
+            ax.tick_params(axis='both', labelsize=_axis_tick_pt)
+            ax.tick_params(axis='x', rotation=0)
             ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=6))
-            _label_axes(ax, xlabel="DC tkout_time", ylabel=y_label, ylabel_size=5.5)  # y축명 잘림 방지 위해 축소
+            _label_axes(
+                ax, xlabel="DC tkout_time", ylabel=y_label,
+                ylabel_size=float(cfg.get('trend_yaxis_label_font_pt', 8.5) or 8.5))
             if log_scale: ax.set_yscale('log')
             # Trend 범례 좌상단 고정 — 흰 배경 + 옅은 테두리, 글자·항목 간격 축소(컴팩트)
             _leg = ax.legend(fontsize=6, loc='upper left', frameon=True, facecolor='white',
@@ -2905,10 +3005,14 @@ def _render_item_charts(task):
         try:
             run_temp = cfg.get('run_temp_dir') or os.path.join('RUN', 'TEMP')
             os.makedirs(run_temp, exist_ok=True)
-            fig_trend_png, ax_trend_png = plt.subplots(figsize=(4.55, 2.0))
+            # HTML Warning 표는 모든 Trend를 같은 비율로 배치하므로, ylabel 길이와
+            # 무관하게 고정 canvas/margin으로 저장한다. bbox_inches='tight'를 쓰면
+            # 항목마다 실제 PNG 크기가 달라져 표 높이가 흔들리고 축/선이 잘릴 수 있다.
+            fig_trend_png, ax_trend_png = plt.subplots(figsize=(4.8, 2.3))
+            fig_trend_png.subplots_adjust(left=0.17, right=0.98, bottom=0.22, top=0.97)
             _draw_trend(ax_trend_png)
             fig_trend_png.savefig(os.path.join(run_temp, f"{safe_name}.png"),
-                                  dpi=cfg.get('html_chart_dpi', 100), bbox_inches="tight")
+                                  dpi=cfg.get('html_chart_dpi', 100), facecolor='white')
             plt.close(fig_trend_png)
         except Exception as e:
             out['warnings'].append(f"Failed to save RUN/TEMP/{safe_name}.png: {e}")
@@ -3388,6 +3492,9 @@ def insert_plots(merged_df, prs, description_image_info_dict,
         'C_BAND': C_BAND, 'C_WV': C_WV, 'WV_PALETTE': WV_PALETTE, 'FONT': FONT,
         'main_vehicle': main_vehicle,
         'trend_tkout_agg': getattr(GLOBAL_CONFIG, 'trend_tkout_agg', {}) or {},
+        'trend_ylim_band_pct': getattr(GLOBAL_CONFIG, 'trend_ylim_band_pct', 25),
+        'trend_yaxis_label_font_pt': GLOBAL_CONFIG.get('trend_yaxis_label_font_pt', 8.5),
+        'trend_axis_tick_font_pt': GLOBAL_CONFIG.get('trend_axis_tick_font_pt', 7.5),
         'html_chart_dpi': getattr(GLOBAL_CONFIG, 'html_chart_dpi', 100),
         'run_temp_dir': os.path.abspath(os.path.join('RUN', 'TEMP')),
         # 좌표파일(Zone_Define) chip layout(main vehicle 필터 적용) — 워커의 WF MAP geometry 기준.

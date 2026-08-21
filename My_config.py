@@ -569,6 +569,60 @@ class Config:
         #      spec 폭(UCL−LCL)의 이 비율 미만이면 주의를 띄우지 않는다(spec 대비 무의미하게 작은
         #      산포 확대 오탐 억제). 0(기본)=게이트 OFF(산포배수만으로 판정). 단측 spec 미적용.
         self.anomaly_disp_min_spec_frac = 0.0
+
+        # ── Anomaly detector 조합 ───────────────────────────────────────────
+        #   기존 spec-out/Flier/산포 판정은 그대로 보존하고, 시계열 모양 기반 detector를
+        #   profile로 묶어 선택한다. config.yaml의 vehicle 블록에 같은 키를 두면 vehicle별
+        #   override 가능(anomaly_engine은 Config.get() 우선 조회).
+        #
+        #   legacy    : 기존 판정만 — spec_out, flier, dispersion
+        #   balanced  : legacy + level_shift(수준 이동) + trend(지속 기울기) + spc_run(연속 이상)
+        #   sensitive : balanced와 같은 detector, 아래 *_sensitive 임계값 사용
+        #   custom    : anomaly_enabled_detectors 목록을 그대로 사용
+        self.anomaly_detector_profile = 'legacy'
+        self.anomaly_detector_profiles = {
+            'legacy': ['spec_out', 'flier', 'dispersion'],
+            'balanced': ['spec_out', 'flier', 'dispersion', 'level_shift', 'trend', 'spc_run'],
+            'sensitive': ['spec_out', 'flier', 'dispersion', 'level_shift', 'trend', 'spc_run'],
+        }
+        self.anomaly_enabled_detectors = None   # None=profile 사용, list 지정 시 profile보다 우선(custom 용도)
+
+        # 시계열 detector 공통: raw site를 그대로 늘어놓지 않고 (lot, wafer, tkout)별 median 1점으로
+        # 축약한 뒤, target 이전 제품 이력을 baseline으로 사용한다. agg 항목은 기존 집계값을 그대로 사용.
+        self.anomaly_series_min_baseline = 20
+        self.anomaly_series_min_target = 3
+
+        # ① 수준 이동(level_shift): target 대표값이 과거 baseline 중심에서 Nσ 이상 벗어나고,
+        # target 측정점 중 같은 방향에 놓인 비율이 min_fraction 이상이면 검출.
+        self.anomaly_level_shift_sigma = 3.0
+        self.anomaly_level_shift_min_fraction = 0.75
+        self.anomaly_level_shift_sigma_sensitive = 2.3
+        self.anomaly_level_shift_min_fraction_sensitive = 0.65
+
+        # ② 지속 추세(trend): 최근 window개의 측정 대표점에 Theil-Sen 방식(모든 pair slope의
+        # 중앙값) robust 직선을 맞춘다. window 전체 변화량이 baseline 산포의 total_sigma배 이상,
+        # robust 직선 R²와 같은 방향 인접 변화 비율이 각각 기준 이상이면 검출.
+        self.anomaly_trend_window = 12
+        self.anomaly_trend_total_sigma = 3.0
+        self.anomaly_trend_min_r2 = 0.60
+        self.anomaly_trend_min_direction_fraction = 0.65
+        self.anomaly_trend_total_sigma_sensitive = 2.2
+        self.anomaly_trend_min_r2_sensitive = 0.45
+        self.anomaly_trend_min_direction_fraction_sensitive = 0.55
+
+        # ③ SPC 연속 이상(spc_run): baseline robust σ 기준 Western Electric 계열 규칙.
+        #   - 같은 쪽 연속 N점(마지막 점은 최소 min_last_sigma 이상)
+        #   - 최근 3점 중 같은 쪽 2점이 2σ 초과
+        #   - 최근 5점 중 같은 쪽 4점이 1σ 초과
+        self.anomaly_spc_same_side_points = 8
+        self.anomaly_spc_same_side_min_last_sigma = 0.8
+        self.anomaly_spc_two_of_three_sigma = 2.0
+        self.anomaly_spc_four_of_five_sigma = 1.0
+        self.anomaly_spc_same_side_points_sensitive = 6
+        self.anomaly_spc_same_side_min_last_sigma_sensitive = 0.5
+        self.anomaly_spc_two_of_three_sigma_sensitive = 1.7
+        self.anomaly_spc_four_of_five_sigma_sensitive = 0.8
+
         self.anomaly_median_low_sigma = 2.0      # 지식규칙 median_low(): target median이 제품 median 대비 이 σ 이상 낮으면 True
         # ── 통계 자동분석 제외 항목 ──
         #   여기에 넣은 ITEM(ALIAS)은 통계 자동분석(이상/주의 finding·우선순위·Anomaly Trend Chart)에서
@@ -579,7 +633,7 @@ class Config:
             'MAWIN_minus_margin', 'MAWIN_plus_margin', 'MAWIN_ovl_index', 'MAWIN_new',
         ]
         # ── 통계자동분석 '조건부' 제외 항목 (RULE에 걸리지 않으면 제외) ──
-        #   여기에 넣은 ITEM(ALIAS)은 built-in 자동판정(spec-out/Flier/산포 확대)으로는
+        #   여기에 넣은 ITEM(ALIAS)은 built-in 자동판정(spec-out/Flier/산포 확대/시계열 detector)으로는
         #   이상/주의를 띄우지 않는다(= 평소엔 제외). 단, ANOMALY_KNOWLEDGE.md의 [RULE]/NL_RULES가
         #   그 항목을 trigger/참조해 '걸리면' 그때만 finding으로 살아나 Trend chart·요약에 표시된다.
         #   용도: Kelvin RES처럼 WF MAP 컬러링을 위해 spec을 tight하게 잡아 spec-out이 한두 개씩
@@ -604,6 +658,12 @@ class Config:
         #   anomaly_wfmap_max_count는 현재 spec-out WF MAP에는 적용되지 않는다(전량 표시).
         self.anomaly_wfmap_specout = True        # spec-out WF MAP 표시 on/off
         self.anomaly_wfmap_max_count = 42        # (현재 spec-out 전량 표시 — 미사용, 호환용 유지)
+        # 사내 메일에서 라벨이 작게 보이는 문제를 config로 조정. 기존 실효값은 map=58px,
+        # label=10px였고 2026-07-15 변경은 bold 제거/자간 조절뿐이라 크기는 커지지 않았다.
+        self.anomaly_wfmap_map_size_px = 72
+        self.anomaly_wfmap_label_font_px = 12
+        self.anomaly_wfmap_label_height_px = 30
+        self.anomaly_wfmap_label_multiline = True  # lot_id / #wafer(step)을 2줄로 분리해 과도한 자간 축소 방지
 
         # ── PPT Trend chart: 특정 항목은 site(모든 값) 대신 tkout_time 기준 집계점으로 표시 ──
         #   {항목명(ALIAS): 'P10'} 형식. 집계 스펙:
@@ -613,6 +673,20 @@ class Config:
         #   이상/주의 판정(anomaly_engine)도 동일한 집계값 기준으로 이뤄진다.
         #   예: {'MAWIN': 'P10', 'VTH_N': 'P95', 'IDSAT_P': 'P05'}
         self.trend_tkout_agg = {'MAWIN': 'P10'}
+
+        # ── PPT/HTML Trend chart Y축 범위: vehicle 구름대(모집단)를 어디까지 함께 보이게 할지 ──
+        #   Y축은 기본적으로 '리포트 lot 전량(flier 포함) + spec line'을 담도록 최대 확대되는데,
+        #   그것만으로는 vehicle 구름대(1~99% 밴드)와 3-day median 라인이 축 밖으로 잘려
+        #   전체 Trend 흐름이 안 보이는 경우가 있다. 아래 값(백분위, %)만큼의 구름대 중심부와
+        #   median 라인은 Y축에 '항상' 들어오도록 범위를 넓힌다.
+        #     · 25 (기본) → 구름대 P25~P75(사분위 범위) + 3-day median 라인 포함
+        #     · 10 → P10~P90(더 넓게), 0 또는 None → 끄기(리포트 lot + spec만 기준, 종전 동작)
+        #   구름대 백분위는 일자별 값을 3일 rolling 평균한 값(차트에 그려지는 밴드와 동일 방식)으로 계산.
+        self.trend_ylim_band_pct = 25
+        # Trend chart 축 글자 크기(PPT/HTML 공통). 기존 y축명은 5.5pt로 강제 축소되어
+        # 사내 메일에서 ITEM명이 잘 안 보였으므로 config로 분리해 확대한다.
+        self.trend_yaxis_label_font_pt = 8.5
+        self.trend_axis_tick_font_pt = 7.5
 
         # ── 자연어 규칙(NL_RULES) 발행 시 바로 적용 여부 ──
         #   True(기본): NL_RULES의 자연어를 문구별 캐시(RUN/AI/nl_rules_map.json)로 변환해 발행 시
@@ -631,7 +705,7 @@ class Config:
         self.rule_digest_min_repeat = 3    # 제안 승격 최소 반복 리포트 수(미매칭 패턴 기준)
 
         # 불량 모드(Defect Mode) 판정/조합 해석은 코드가 하지 않는다.
-        #   - 코드는 각 Index의 단일 이상(spec-out / median·std 이탈)만 산출.
+        #   - 코드는 각 Index의 단일 이상(spec-out / Flier / 산포 / 수준 이동 / trend / SPC run)만 산출.
         #   - 불량 모드 우선순위 판정표는 ANOMALY_KNOWLEDGE.md('불량 모드 판정표')에서 관리하며,
         #     AI(use_gpt_summary)가 연결된 경우에만 상단 요약에 불량 모드를 해석/표기한다.
 
@@ -889,6 +963,16 @@ class Config:
 
         # 원본 설정 저장 (Store raw YAML settings)
         self.settings = config_data[item_name]
+
+        # ── 메일 수신 그룹 런타임 오버라이드 ──
+        # Scheduler.py의 수동 트리거(강제발행)는 정규 발행과 수신처를 달리해야 하므로
+        # 환경변수 AUTO_REPORT_EMAIL_RECEIVER(콤마 구분)로 config.yaml의 email_receiver를 덮어쓴다.
+        # 정규 순회 실행에는 이 변수가 없으므로 config.yaml 값이 그대로 쓰인다.
+        _recv_override = os.getenv('AUTO_REPORT_EMAIL_RECEIVER')
+        if _recv_override:
+            _groups = [g.strip() for g in _recv_override.split(',') if g.strip()]
+            if _groups:
+                self.settings['email_receiver'] = _groups
 
         # NOTE: dc_step_to_ids / dc_dict는 __init__에서 코드로 직접 선언합니다.
         #       (YAML 의존 없음)

@@ -348,6 +348,132 @@ def _move_aggregation_after_scoreboard(prs):
         print(f"[WARN] Aggregation 통계표 위치 이동 실패: {_e}")
 
 
+# ----------------------------------------------------------------------------------------------------------------------------------
+# Inline Table 데이터 가공
+#   Inline은 리포트의 부가 정보([2] Inline Table)이므로, 설정 미기입·쿼리 결과 없음·시트 형식
+#   이상 등으로 만들 수 없더라도 리포트 발행과 메일 발송은 그대로 진행되어야 한다.
+#   → 실패 시 예외를 올리지 않고 '열만 있는' 빈 표를 돌려준다.
+# ----------------------------------------------------------------------------------------------------------------------------------
+_INLINE_IDX_NAMES = ['Module', 'Step desc', 'ITEMNAME', 'Item']
+
+
+def _empty_inline_pivot():
+    """Inline Table용 '열(헤더)만 있는' 빈 pivot.
+
+    reset_index() 하면 Module / Step desc / ITEMNAME / Item / UCL / CL / LCL 열만 남고
+    행이 0개인 DataFrame이 되어, 렌더링 코드 수정 없이 헤더만 있는 표가 생성된다.
+    """
+    return pd.DataFrame(
+        columns=['UCL', 'CL', 'LCL'],
+        index=pd.MultiIndex.from_arrays([[], [], [], []], names=_INLINE_IDX_NAMES))
+
+
+def _build_inline_pivot(inlinedata, inline_file_path, inline_file_sheet, vehicle):
+    """Inline 측정 데이터 + INLINE 설정 시트 → Inline Table용 pivot(멀티인덱스).
+
+    Parameters
+    ----------
+    inlinedata : pd.DataFrame
+        inlinedata_query() 결과. 비어 있으면(설정 미기입/쿼리 실패) 빈 표를 반환.
+    inline_file_path, inline_file_sheet : str
+        INLINE 설정 엑셀 경로 / 시트명.
+    vehicle : str
+        현재 리포트 대상 vehicle (설정 시트 VEHICLE 필터용).
+
+    Returns
+    -------
+    pd.DataFrame
+        index=(Module, Step desc, ITEMNAME, Item), columns=[UCL, CL, LCL, wafer...].
+        데이터/설정이 없거나 가공 중 오류가 나면 _empty_inline_pivot()(열만 있는 빈 표).
+    """
+    if inlinedata is None or getattr(inlinedata, 'empty', True):
+        print("[WARN] Inline 데이터가 없습니다(설정 미기입 또는 쿼리 결과 없음) — Inline Table은 열만 표시합니다.")
+        return _empty_inline_pivot()
+
+    try:
+        inlinedata = inlinedata.copy()
+        inlinedata['ITEMNAME'] = inlinedata['ITEMNAME'].astype(str)
+        inlinedata['item_id'] = inlinedata['item_id'].astype(str)
+        inlinedata['STEP_DESC_ITEM_ID'] = inlinedata['ITEMNAME'] + "_" + inlinedata['item_id']
+
+        inlinedata_spec = inlinedata.groupby('STEP_DESC_ITEM_ID')[['spc_ctrl_spec_high', 'spc_ctrl_spec_limit', 'spc_ctrl_spec_low']].mean()
+
+        inlinedata_spec.rename(columns={'spc_ctrl_spec_high': 'UCL'}, inplace=True)
+        inlinedata_spec.rename(columns={'spc_ctrl_spec_limit': 'CL'}, inplace=True)
+        inlinedata_spec.rename(columns={'spc_ctrl_spec_low': 'LCL'}, inplace=True)
+
+        #spec이 음수인 경우 0으로 변환
+        cols_to_replace = ['UCL', 'CL', 'LCL']
+        for col in cols_to_replace:
+            inlinedata_spec[col] = inlinedata_spec[col].apply(replace_negatives_with_0)
+
+        inlinedata['fab_value'] = inlinedata['fab_value'].astype(float)
+        inlinedata['tkout_time'] = pd.to_datetime(inlinedata['tkout_time'], format='%Y-%m-%d %H:%M:%S')
+        inlinedata = inlinedata.sort_values(by='tkout_time', ascending=True)
+
+        inlinedata_pivot = inlinedata.pivot_table(values='fab_value',\
+                                                    index='wafer_id',\
+                                                    columns='STEP_DESC_ITEM_ID', aggfunc='mean',observed = True)
+
+        # 데이터프레임에 있는 열만 선택하여 새로운 리스트 생성
+        Inline_setting_file = pd.read_excel(inline_file_path, sheet_name=None, engine='openpyxl')
+        Inline1 = Inline_setting_file[inline_file_sheet]
+        # INLINE 설정 시트에 여러 vehicle이 섞여 있어도 현재 리포트 대상(vehicle)
+        # 행만 사용 — Inline Table에 다른 vehicle의 step_id/항목이 섞이지 않도록.
+        Inline1 = _filter_inline_by_vehicle(Inline1, vehicle)
+        inline_filtered = Inline1[Inline1['Key'] == True].copy()
+        if inline_filtered.empty:
+            # 설정 시트에 Key=True 행이 하나도 없음 → 표시할 Inline 항목 자체가 없다.
+            print("[WARN] INLINE 설정 시트에 Key=True 항목이 없습니다 — Inline Table은 열만 표시합니다.")
+            return _empty_inline_pivot()
+        inline_filtered['STEP_DESC_ITEM_ID'] = inline_filtered['ITEMNAME'] + '_' + inline_filtered['ITEM_ID']
+        inline_grouped  = inline_filtered.groupby('STEP_DESC_ITEM_ID')['Module'].last()
+        inline_grouped = inline_grouped.reset_index()
+        inline_grouped_dict = inline_grouped.set_index('STEP_DESC_ITEM_ID')['Module'].to_dict() #Inline ITEM과 Module Matching된 dict
+        inline_grouped_dict_ITEMNAME = inline_filtered.set_index('STEP_DESC_ITEM_ID')['ITEMNAME'].to_dict() #Inline ITEM과 ITEMNAME Matching된 dict
+        inline_grouped_dict_ITEM_ID = inline_filtered.set_index('STEP_DESC_ITEM_ID')['ITEM_ID'].to_dict() #Inline ITEM과 ITEM_ID Matching된 dict
+        # STEP_DESC 열이 있으면 'Step desc' 컬럼 소스로 사용(없으면 ITEMNAME fallback)
+        if 'STEP_DESC' in inline_filtered.columns:
+            inline_grouped_dict_STEP_DESC = inline_filtered.set_index('STEP_DESC_ITEM_ID')['STEP_DESC'].to_dict()
+        else:
+            inline_grouped_dict_STEP_DESC = inline_grouped_dict_ITEMNAME
+        inline_filtered_columns = sorted(inline_grouped['STEP_DESC_ITEM_ID'].unique().tolist(), key=lambda s: float(s.split()[0]))
+
+        valid_columns = [col for col in inline_filtered_columns if col in inlinedata_pivot.columns]
+        inlinedata_filtered = inlinedata_pivot[valid_columns]
+
+        inlinedata_filtered_pivot = inlinedata_filtered.transpose()
+
+        # 모든 컬럼명을 정수로 변경하기 위한 딕셔너리 생성
+        column_map = {old_col: int(old_col) for old_col in inlinedata_filtered_pivot.columns if str(old_col).isdigit()}
+        inlinedata_filtered_pivot = inlinedata_filtered_pivot.rename(columns=column_map)
+
+        sorted_columns = sorted([col for col in inlinedata_filtered_pivot.columns if str(col).isdigit()], key=lambda x: int(x))
+
+        inlinedata_filtered_pivot = inlinedata_filtered_pivot[sorted_columns]
+
+        inlinedata_filtered_pivot = pd.merge(inlinedata_spec, inlinedata_filtered_pivot, how='right', on='STEP_DESC_ITEM_ID')
+
+        # [PATCH] Inline Table 멀티 인덱스 (UCL 앞 4열: Module / Step desc / ITEMNAME / Item)
+        #  - Module    : inline setting의 실제 Module 열 (inline_grouped_dict)  → 첫번째 인덱스
+        #  - Step desc : STEP_DESC 열 (inline_grouped_dict_STEP_DESC)
+        #  - ITEMNAME  : inline setting의 ITEMNAME 열 (inline_grouped_dict_ITEMNAME)
+        #  - Item      : ITEM_ID 열
+        inlinedata_filtered_pivot['Module'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict)
+        inlinedata_filtered_pivot['Step_desc'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_STEP_DESC)
+        inlinedata_filtered_pivot['ITEMNAME'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_ITEMNAME)
+        inlinedata_filtered_pivot['ITEM_ID'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_ITEM_ID)
+        inlinedata_filtered_pivot = inlinedata_filtered_pivot.set_index(['Module', 'Step_desc', 'ITEMNAME', 'ITEM_ID'])
+        inlinedata_filtered_pivot.index.names = _INLINE_IDX_NAMES
+        return inlinedata_filtered_pivot
+
+    except Exception as _ie:
+        # Inline Table 하나 때문에 리포트/메일 전체가 중단되지 않도록 빈 표로 대체
+        print(f"[WARN] Inline Table 생성 실패 — 열만 표시합니다: {_ie}")
+        traceback.print_exc()
+        return _empty_inline_pivot()
+
+
 # ==================================================================================================================================
 # 전체 파이프라인 진입점
 #   ⚠️ 병렬 차트 렌더링(My_Function의 ProcessPoolExecutor, Windows spawn)이 워커 프로세스에서
@@ -723,6 +849,10 @@ def main():
 
         if trigger_flag:
             print("[INFO] 강제발행모드입니다. 쿼리 수행되지않고 현재 DB에서 리포팅만 실행합니다.")
+            # 수신처: Scheduler.py가 환경변수 AUTO_REPORT_EMAIL_RECEIVER로 지정하면 그 그룹에만 발송된다
+            #        (My_config.load_from_yaml에서 config.yaml의 email_receiver를 덮어씀)
+            if os.getenv('AUTO_REPORT_EMAIL_RECEIVER'):
+                print(f"[INFO] 트리거 수신 그룹 지정: {email_receiver}")
         print("[INFO] 리포팅 진행할 LOT LIST")
         dc_done_list = pd.DataFrame(dc_done_list)
 
@@ -1267,80 +1397,10 @@ def main():
 
                         et_log = et_log[['LOT ID','WAFER ID','DC STEP','DC 측정완료 여부','측정된 DCOP List','DC 측정완료 시간']]
 
-                        inlinedata['ITEMNAME'] = inlinedata['ITEMNAME'].astype(str)
-                        inlinedata['item_id'] = inlinedata['item_id'].astype(str)
-                        inlinedata['STEP_DESC_ITEM_ID'] = inlinedata['ITEMNAME'] + "_" + inlinedata['item_id']
-
-                        inlinedata_spec = inlinedata.groupby('STEP_DESC_ITEM_ID')[['spc_ctrl_spec_high', 'spc_ctrl_spec_limit', 'spc_ctrl_spec_low']].mean()
-
-                        inlinedata_spec.rename(columns={'spc_ctrl_spec_high': 'UCL'}, inplace=True)
-                        inlinedata_spec.rename(columns={'spc_ctrl_spec_limit': 'CL'}, inplace=True)
-                        inlinedata_spec.rename(columns={'spc_ctrl_spec_low': 'LCL'}, inplace=True)
-
-                        #spec이 음수인 경우 0으로 변환
-                        cols_to_replace = ['UCL', 'CL', 'LCL']
-                        for col in cols_to_replace:
-                            inlinedata_spec[col] = inlinedata_spec[col].apply(replace_negatives_with_0)
-
-                        inlinedata['fab_value'] = inlinedata['fab_value'].astype(float)
-                        inlinedata['tkout_time'] = pd.to_datetime(inlinedata['tkout_time'], format='%Y-%m-%d %H:%M:%S')
-                        inlinedata = inlinedata.sort_values(by='tkout_time', ascending=True)
-
-                        inlinedata_pivot = inlinedata.pivot_table(values='fab_value',\
-                                                                    index='wafer_id',\
-                                                                    columns='STEP_DESC_ITEM_ID', aggfunc='mean',observed = True)
-
-                        # 데이터프레임에 있는 열만 선택하여 새로운 리스트 생성
-                        Inline_setting_file = pd.read_excel(inline_file_path, sheet_name=None, engine='openpyxl')
-                        Inline1 = Inline_setting_file[inline_file_sheet]
-                        # INLINE 설정 시트에 여러 vehicle이 섞여 있어도 현재 리포트 대상(vehicle)
-                        # 행만 사용 — Inline Table에 다른 vehicle의 step_id/항목이 섞이지 않도록.
-                        Inline1 = _filter_inline_by_vehicle(Inline1, vehicle)
-                        inline_filtered = Inline1[Inline1['Key'] == True]
-                        inline_filtered['STEP_DESC_ITEM_ID'] = inline_filtered['ITEMNAME'] + '_' + inline_filtered['ITEM_ID'] 
-                        inline_grouped  = inline_filtered.groupby('STEP_DESC_ITEM_ID')['Module'].last()
-                        inline_grouped = inline_grouped.reset_index()
-                        inline_grouped_dict = inline_grouped.set_index('STEP_DESC_ITEM_ID')['Module'].to_dict() #Inline ITEM과 Module Matching된 dict
-                        inline_grouped_dict_ITEMNAME = inline_filtered.set_index('STEP_DESC_ITEM_ID')['ITEMNAME'].to_dict() #Inline ITEM과 ITEMNAME Matching된 dict
-                        inline_grouped_dict_ITEM_ID = inline_filtered.set_index('STEP_DESC_ITEM_ID')['ITEM_ID'].to_dict() #Inline ITEM과 ITEM_ID Matching된 dict
-                        # STEP_DESC 열이 있으면 'Step desc' 컬럼 소스로 사용(없으면 ITEMNAME fallback)
-                        if 'STEP_DESC' in inline_filtered.columns:
-                            inline_grouped_dict_STEP_DESC = inline_filtered.set_index('STEP_DESC_ITEM_ID')['STEP_DESC'].to_dict()
-                        else:
-                            inline_grouped_dict_STEP_DESC = inline_grouped_dict_ITEMNAME
-                        inline_filtered_columns = sorted(inline_grouped['STEP_DESC_ITEM_ID'].unique().tolist(), key=lambda s: float(s.split()[0]))
-
-                        valid_columns = [col for col in inline_filtered_columns if col in inlinedata_pivot.columns]
-                        inlinedata_filtered = inlinedata_pivot[valid_columns]
-
-
-
-                        inlinedata_filtered_pivot = inlinedata_filtered.transpose()
-
-                        # 모든 컬럼명을 정수로 변경하기 위한 딕셔너리 생성
-                        #column_map = {old_col: int(old_col) for old_col in inlinedata_filtered_pivot.columns}
-                        column_map = {old_col: int(old_col) for old_col in inlinedata_filtered_pivot.columns if old_col.isdigit()}
-                        inlinedata_filtered_pivot = inlinedata_filtered_pivot.rename(columns=column_map)
-
-                        #sorted_columns = sorted(inlinedata_filtered_pivot.columns, key=lambda x: int(x))
-                        #sorted_columns = sorted([col for col in inlinedata_filtered_pivot.columns if col.isdigit()], key=int)
-                        sorted_columns = sorted([col for col in inlinedata_filtered_pivot.columns if str(col).isdigit()], key=lambda x: int(x))
-
-                        inlinedata_filtered_pivot = inlinedata_filtered_pivot[sorted_columns]
-
-                        inlinedata_filtered_pivot = pd.merge(inlinedata_spec, inlinedata_filtered_pivot,how='right', on='STEP_DESC_ITEM_ID')
-
-                        # [PATCH] Inline Table 멀티 인덱스 (UCL 앞 4열: Module / Step desc / ITEMNAME / Item)
-                        #  - Module    : inline setting의 실제 Module 열 (inline_grouped_dict)  → 첫번째 인덱스
-                        #  - Step desc : STEP_DESC 열 (inline_grouped_dict_STEP_DESC)
-                        #  - ITEMNAME  : inline setting의 ITEMNAME 열 (inline_grouped_dict_ITEMNAME)
-                        #  - Item      : ITEM_ID 열
-                        inlinedata_filtered_pivot['Module'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict)
-                        inlinedata_filtered_pivot['Step_desc'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_STEP_DESC)
-                        inlinedata_filtered_pivot['ITEMNAME'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_ITEMNAME)
-                        inlinedata_filtered_pivot['ITEM_ID'] = inlinedata_filtered_pivot.index.map(inline_grouped_dict_ITEM_ID)
-                        inlinedata_filtered_pivot = inlinedata_filtered_pivot.set_index(['Module', 'Step_desc', 'ITEMNAME', 'ITEM_ID'])
-                        inlinedata_filtered_pivot.index.names = ['Module', 'Step desc', 'ITEMNAME', 'Item']
+                        # Inline Table pivot 생성 — 데이터/설정이 없으면 열만 있는 빈 표를 돌려주므로
+                        # (예외 없음) 리포트 발행·메일 발송은 그대로 진행된다.
+                        inlinedata_filtered_pivot = _build_inline_pivot(
+                            inlinedata, inline_file_path, inline_file_sheet, vehicle)
 
 
                         # HTML 생성부분 - Mail body
@@ -1873,8 +1933,11 @@ def main():
                                                     # 이어붙여 1장으로 만든다. (각 블록 2행 기준 그리드)
                                                     from PIL import Image as _PILImg2, ImageDraw as _PILDraw2, ImageFont as _PILFont2
                                                     import io as _io2
-                                                    _map_sz = 58 * _hs   # 맵 1개 px (supersample 적용)
-                                                    _lab_h = 14 * _hs    # 라벨 높이
+                                                    _map_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_map_size_px', 72) or 72)
+                                                    _label_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_label_font_px', 12) or 12)
+                                                    _lab_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_label_height_px', 30) or 30)
+                                                    _map_sz = max(40, _map_base) * _hs   # config 표시 px × supersample
+                                                    _lab_h = max(_label_base + 2, _lab_base) * _hs
                                                     _pad = 3 * _hs       # 셀 간격
                                                     _cell_w = _map_sz + _pad
                                                     _cell_h = _map_sz + _lab_h + _pad
@@ -1911,7 +1974,7 @@ def main():
                                                             _PILFont2.truetype(_cf, 10)
                                                         except Exception:
                                                             _cf = "arial.ttf"
-                                                        _cfont = _PILFont2.truetype(_cf, max(9, 10 * _hs))
+                                                        _cfont = _PILFont2.truetype(_cf, max(9, _label_base * _hs))
                                                     except Exception:
                                                         _cfont = _PILFont2.load_default()
                                                     _comp = _PILImg2.new('RGB', (_cw_total, _ch_total), (255, 255, 255))
@@ -1924,7 +1987,7 @@ def main():
                                                         색(파랑/회색) + target 블록의 파란 테두리로만 한다 — bold는
                                                         같은 폭 셀에서 글자를 굵고 넓게 만들어 가독성이 떨어졌다.
                                                         """
-                                                        _lab, _b = _wf[0], _wf[1]
+                                                        _lab, _b = str(_wf[0]), _wf[1]
                                                         _is_tgt = _wf[2] if len(_wf) > 2 else False
                                                         _wf_img = _PILImg2.open(_io2.BytesIO(base64.b64decode(_b)))
                                                         _wf_img = _wf_img.resize((_map_sz, _map_sz), _PILImg2.LANCZOS)
@@ -1940,19 +2003,24 @@ def main():
                                                                 return _cdraw.textlength(_ch, font=_lfont)
                                                             except Exception:
                                                                 return 6 * _hs
-                                                        _advs = [_adv(_c) for _c in _lab]
-                                                        _sum = sum(_advs)
-                                                        _n = len(_lab)
-                                                        _avail = _cell_w - 2 * _hs   # 이웃 라벨과 최소 간격 확보
-                                                        _trk = -0.5 * _hs            # 기본 소폭 좁힘
-                                                        if _n > 1:
-                                                            _trk = min(_trk, (_avail - _sum) / (_n - 1))
-                                                        _total = _sum + max(0, _n - 1) * _trk
-                                                        _ly = _oy + _map_sz + 1 * _hs
-                                                        _cx = _ox + (_map_sz - _total) / 2.0
-                                                        for _ci, _ch in enumerate(_lab):
-                                                            _cdraw.text((_cx, _ly), _ch, fill=_lcolor, font=_lfont)
-                                                            _cx += _advs[_ci] + _trk
+                                                        # lot_id와 #wafer(step)를 2줄로 그린다. 한 줄에 모두
+                                                        # 욱여넣던 방식보다 글자 크기를 유지하면서 셀 간 겹침을 막는다.
+                                                        _lines = _lab.splitlines() or [_lab]
+                                                        _line_h = max(_label_base + 1, 13) * _hs
+                                                        for _li, _line in enumerate(_lines[:2]):
+                                                            _advs = [_adv(_c) for _c in _line]
+                                                            _sum = sum(_advs)
+                                                            _n = len(_line)
+                                                            _avail = _cell_w - 2 * _hs
+                                                            _trk = -0.25 * _hs
+                                                            if _n > 1:
+                                                                _trk = min(_trk, (_avail - _sum) / (_n - 1))
+                                                            _total = _sum + max(0, _n - 1) * _trk
+                                                            _ly = _oy + _map_sz + _li * _line_h
+                                                            _cx = _ox + (_map_sz - _total) / 2.0
+                                                            for _ci, _ch in enumerate(_line):
+                                                                _cdraw.text((_cx, _ly), _ch, fill=_lcolor, font=_lfont)
+                                                                _cx += _advs[_ci] + _trk
 
                                                     for _wi, _wf in enumerate(_wf_tgt):
                                                         _draw_wf_cell(_wf, _x_t + (_wi % _nc_t) * _cell_w,
@@ -2074,13 +2142,13 @@ def main():
                         _chart_sub = (f'<div class="section-title" style="{_SEC_T} font-size:13px; margin-top:14px;">'
                                       'Anomaly Trend Chart</div>')
                         # ── 판정 로직 안내 박스(차트 위 고정 표기) — 임계값은 My_config에서 동적 반영 ──
-                        _lg_ratio = getattr(GLOBAL_CONFIG, 'anomaly_lot_dispersion_ratio', 2.0)
-                        _lg_fls = float(getattr(GLOBAL_CONFIG, 'anomaly_flier_sigma', 3.5) or 0)
-                        _lg_flm = int(getattr(GLOBAL_CONFIG, 'anomaly_flier_max_pts', 0) or 0)
-                        _lg_fodr = float(getattr(GLOBAL_CONFIG, 'anomaly_flier_offdir_relax', 2.0) or 1.0)
-                        _lg_dgf = float(getattr(GLOBAL_CONFIG, 'anomaly_disp_min_spec_frac', 0.0) or 0.0)
+                        _lg_ratio = GLOBAL_CONFIG.get('anomaly_lot_dispersion_ratio', 2.0)
+                        _lg_fls = float(GLOBAL_CONFIG.get('anomaly_flier_sigma', 3.5) or 0)
+                        _lg_flm = int(GLOBAL_CONFIG.get('anomaly_flier_max_pts', 0) or 0)
+                        _lg_fodr = float(GLOBAL_CONFIG.get('anomaly_flier_offdir_relax', 2.0) or 1.0)
+                        _lg_dgf = float(GLOBAL_CONFIG.get('anomaly_disp_min_spec_frac', 0.0) or 0.0)
                         _lg_agg = ', '.join(f'{k}={v}' for k, v in
-                                            (getattr(GLOBAL_CONFIG, 'trend_tkout_agg', {}) or {}).items())
+                                            (GLOBAL_CONFIG.get('trend_tkout_agg', {}) or {}).items())
                         _lg_agg_txt = (f' (집계 항목 {_lg_agg} 은 site가 아닌 집계값 기준)'
                                        if _lg_agg else '')
                         _lg_fcnt_txt = '1개 이상' if _lg_flm <= 0 else f'1~{_lg_flm}개'
@@ -2094,18 +2162,59 @@ def main():
                             if _lg_fls > 0 else '① Flier — OFF')
                         _lg_gate_txt = (f'(절대 산포가 spec 폭의 {_lg_dgf * 100:g}% 이상일 때)'
                                         if _lg_dgf > 0 else '')
+                        _lg_profile = str(GLOBAL_CONFIG.get('anomaly_detector_profile', 'legacy') or 'legacy')
+                        _lg_profiles = GLOBAL_CONFIG.get('anomaly_detector_profiles', {}) or {}
+                        _lg_enabled = GLOBAL_CONFIG.get('anomaly_enabled_detectors', None)
+                        if _lg_enabled is None:
+                            _lg_enabled = _lg_profiles.get(_lg_profile, ['spec_out', 'flier', 'dispersion'])
+                        if isinstance(_lg_enabled, str):
+                            _lg_enabled = [x.strip() for x in _lg_enabled.split(',') if x.strip()]
+                        _lg_enabled = {str(x).lower() for x in (_lg_enabled or [])}
+                        _lg_sensitive = _lg_profile.lower() == 'sensitive'
+                        _lg_spec_txt = ('해당 lot 측정값 중 spec 이탈 pt가 1개 이상'
+                                        if 'spec_out' in _lg_enabled else 'OFF')
+                        _lg_flier_txt = (
+                            f'① Flier — wafer median 대비 |값−median|이 보통 wafer 산포의 '
+                            f'{_lg_fls:g}σ를 넘는 pt가 {_lg_fcnt_txt} wafer 존재{_lg_dir_txt}'
+                            if _lg_fls > 0 and 'flier' in _lg_enabled else '① Flier — OFF')
+                        _lg_disp_txt = (
+                            f'② 산포 확대 — 특정 wafer의 내부 산포가 보통 wafer 산포의 '
+                            f'{_lg_ratio:g}배 초과{_lg_gate_txt}'
+                            if 'dispersion' in _lg_enabled else '② 산포 확대 — OFF')
+
+                        def _lg_cfg(_key, _default):
+                            if _lg_sensitive:
+                                _sv = GLOBAL_CONFIG.get(_key + '_sensitive', None)
+                                if _sv is not None:
+                                    return _sv
+                            return GLOBAL_CONFIG.get(_key, _default)
+
+                        _lg_series = []
+                        if 'level_shift' in _lg_enabled:
+                            _lg_series.append(
+                                f'수준 이동 {_lg_cfg("anomaly_level_shift_sigma", 3.0):g}σ 이상')
+                        if 'trend' in _lg_enabled:
+                            _lg_series.append(
+                                f'지속 trend 최근 {int(GLOBAL_CONFIG.get("anomaly_trend_window", 12) or 12)}점·'
+                                f'총 변화 {_lg_cfg("anomaly_trend_total_sigma", 3.0):g}σ 이상')
+                        if 'spc_run' in _lg_enabled:
+                            _lg_series.append(
+                                f'SPC 같은 쪽 {int(_lg_cfg("anomaly_spc_same_side_points", 8) or 8)}점 / '
+                                '2-of-3 / 4-of-5')
+                        _lg_series_txt = ('<br>&nbsp;· <b>시계열 detector</b> '
+                                          f'[{_lg_profile}] : ' + ' · '.join(_lg_series)
+                                          if _lg_series else '')
                         _chart_logic = (
                             '<div style="font-size:11px; color:#555555; background:#f7f8fa; '
                             'border:1px solid #e3e6ea; border-radius:4px; padding:6px 10px; '
                             'margin:4px 0 8px 0; line-height:1.7; text-align:left;">'
-                            '<b style="color:#003366;">판정 로직</b><br>'
+                            f'<b style="color:#003366;">판정 로직 · YAML profile = {_lg_profile}</b><br>'
                             f'&nbsp;· <span style="background:#d32f2f; color:#ffffff; font-weight:bold; '
-                            f'padding:0 5px; border-radius:2px;">SPEC OUT</span> : 해당 lot 측정값 중 '
-                            f'spec 이탈 pt가 1개 이상{_lg_agg_txt}<br>'
+                            f'padding:0 5px; border-radius:2px;">SPEC OUT</span> : '
+                            f'{_lg_spec_txt}{_lg_agg_txt}<br>'
                             f'&nbsp;· <span style="background:#f9a825; color:#1a1a1a; font-weight:bold; '
                             f'padding:0 5px; border-radius:2px;">WARNING</span> : 설정된 spec 이탈은 없으나 '
-                            f'{_lg_flier_txt} ② 산포 확대 — 특정 wafer의 내부 산포가 보통 wafer 산포의 '
-                            f'{_lg_ratio:g}배 초과{_lg_gate_txt}<br>'
+                            f'{_lg_flier_txt} · {_lg_disp_txt}{_lg_series_txt}<br>'
                             f'&nbsp;· <b>SPEC OUT WF MAP</b> : <span style="color:#0033cc; font-weight:bold;">파란 '
                             f'테두리 박스(파란 라벨) = 해당 측정 lot_id({target_lot_id}) + '
                             f'step({target_DC_step_id})내 wafer</span>, '

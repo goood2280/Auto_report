@@ -790,7 +790,13 @@ self.anomaly_exclude_unless_rule = [
 - **HTML Score Board**: 컬럼 = `(FAB_LOT_ID, WAFER_ID)`. 같은 root의 형제 lot을 평균으로 합치지 않고 **lot별로 분리** 표시(타깃 lot 맨 왼쪽·연녹 강조 → reference → 형제 lot, lot내 wafer 오름차순).
 - **wafer별 WF MAP 행**: 용량 문제로 HTML Score Board에서는 제거됨 — WF MAP은 PPT에서만 확인합니다.
 - **PPT Score Board**(`insert_score_board`): (lot, wafer) MultiIndex 헤더(lot 가로 병합), ITEM 세로 병합, 타깃 lot 먼저, 측정된 wafer만 표기. 셀 색은 HTML과 동일한 연속 보간(`score_color`) + 테두리.
+- **PPT wafer(점수) 열 폭**: 값이 `100.0` 정도라 기본 `0.40"`면 충분. lot_id가 그 lot의 wafer 열들에 가로 병합되므로 lot당 wafer 수가 적고 lot_id가 길면 필요한 만큼만 넓히되 **상한 `0.72"`**(lot_id가 아무리 길어도 열이 무한히 넓어지지 않음). wafer가 많아 슬라이드 폭을 넘으면 종전처럼 균등 축소(하한 `0.14"`). 표 전체 폭 = 실제 열 폭 합이라 wafer가 적으면 표도 좁게 나옵니다.
 - 색은 PPT·HTML 모두 `GLOBAL_CONFIG.score_color()`를 호출하므로 동일합니다.
+
+### Inline Table (데이터 없을 때)
+
+- `[2] Inline Table`은 부가 정보입니다. INLINE 설정 시트 미기입(`Key=True` 항목 없음)·쿼리 결과 없음·시트 형식 이상 등으로 만들 수 없으면 **예외를 올리지 않고 헤더(열)만 있는 빈 표**로 렌더링합니다(`Main._build_inline_pivot` → `_empty_inline_pivot`).
+- 즉 Inline 하나 때문에 리포트 발행·PPT·**메일 발송이 중단되지 않습니다**. 생략된 경우 로그에 `[WARN] Inline ...` 이 남습니다.
 
 ### PPT 차트 / 다중 lot
 
@@ -995,6 +1001,7 @@ print(label); print(stats['rules'])   # 규칙별 평가 trace
 | `analyze_commonality` 호출 | 통계 Finding 산출(HTML [0] + PPT 상세 공용) |
 | `interpret_with_ai` 호출 | (선택) AI 다단계 해석 |
 | [0] HTML 조립 | AI 블록 + 통계 요약 + Trend chart 그리드 |
+| `_build_inline_pivot` | Inline Table pivot 생성(데이터/설정 없으면 열만 있는 빈 표 반환 — 리포트·메일 계속) |
 
 ### My_Function.py
 | 함수 | 설명 |

@@ -11,7 +11,8 @@ ET 측정 데이터에서 이상 항목을 감지하고, 엔지니어가 여러 
 주요 기능:
     - analyze_commonality(): 각 Index 항목별 '한 개'의 이상 Finding 산출
         · spec-out(CRITICAL) → 이탈 개수/최대 이탈값
-        · spec 미초과 시 median 이탈(σ) 또는 std 산포 확대(배수) 중 하나 (WARNING)
+        · spec 미초과 시 Flier/wafer 산포 확대/수준 이동/trend/SPC run 중 하나 (WARNING)
+        · detector profile과 임계값은 My_config 또는 제품별 config.yaml에서 선택
         ※ 불량 모드(조합 해석)는 코드가 추정하지 않고, AI + ANOMALY_KNOWLEDGE.md('불량 모드 판정표')에 위임
     - render_findings_html(): Finding 리스트 → HTML(<ul>, severity별 색상)
 
@@ -127,6 +128,152 @@ def _finding(sev, ftype, item, title, detail="", **extra):
     d = {"severity": sev, "type": ftype, "item": item, "title": title, "detail": detail}
     d.update({k: v for k, v in extra.items() if v not in (None, "", [], {})})
     return d
+
+
+def detect_series_signals(history_values, target_values, timeline_values,
+                          enabled_detectors=None, settings=None):
+    """측정 대표값 시계열에서 수준 이동·지속 추세·SPC 연속 이상을 검출한다.
+
+    입력은 raw site가 아니라 호출부가 (lot, wafer, tkout)별 대표값으로 축약한 1차원 값이다.
+    history_values는 target 이전 baseline, target_values는 현재 리포트 lot, timeline_values는
+    target 시점까지 시간순 전체 대표값이다. 외부 ML 라이브러리 없이 NumPy/Pandas만 사용해
+    사내 이식 환경에서도 동일하게 동작한다.
+
+    반환: [{'type','score','title','basis','stats'}, ...]
+      - LEVEL_SHIFT : target cluster가 baseline 중심에서 통째로 이동
+      - TREND       : 최근 window에서 robust 직선 기울기가 지속
+      - SPC_RUN     : 같은 쪽 연속/2-of-3/4-of-5 규칙
+    """
+    import numpy as np
+
+    enabled = {str(x).strip().lower() for x in (enabled_detectors or [])}
+    cfg = dict(settings or {})
+
+    def _clean(values):
+        s = pd.to_numeric(pd.Series(values), errors='coerce').dropna().astype(float)
+        return s[np.isfinite(s.values)].to_numpy(dtype=float)
+
+    def _robust_np(values):
+        a = _clean(values)
+        if len(a) == 0:
+            return None, None
+        med = float(np.median(a))
+        spread = float(1.4826 * np.median(np.abs(a - med)))
+        if not np.isfinite(spread) or spread <= 0:
+            q25, q75 = np.quantile(a, [0.25, 0.75]) if len(a) > 1 else (med, med)
+            spread = float((q75 - q25) / 1.349) if q75 > q25 else 0.0
+        if (not np.isfinite(spread) or spread <= 0) and len(a) > 1:
+            spread = float(np.std(a, ddof=1))
+        return med, (spread if np.isfinite(spread) and spread > 0 else None)
+
+    history = _clean(history_values)
+    target = _clean(target_values)
+    timeline = _clean(timeline_values)
+    min_baseline = max(3, int(cfg.get('min_baseline', 20) or 20))
+    min_target = max(1, int(cfg.get('min_target', 3) or 3))
+    center, spread = _robust_np(history)
+    if len(history) < min_baseline or center is None or not spread:
+        return []
+
+    signals = []
+
+    # ① 수준 이동: target 중앙값 이탈 크기 + target 점들의 방향 일치율.
+    if 'level_shift' in enabled and len(target) >= min_target:
+        threshold = float(cfg.get('level_shift_sigma', 3.0) or 3.0)
+        min_fraction = float(cfg.get('level_shift_min_fraction', 0.75) or 0.75)
+        target_med = float(np.median(target))
+        delta = target_med - center
+        dev_sigma = abs(delta) / spread
+        direction = 1.0 if delta >= 0 else -1.0
+        same_fraction = float(np.mean((target - center) * direction > 0))
+        if dev_sigma >= threshold and same_fraction >= min_fraction:
+            side = '상향' if direction > 0 else '하향'
+            signals.append({
+                'type': 'LEVEL_SHIFT',
+                'score': float(dev_sigma / max(threshold, 1e-12)),
+                'title': f'수준 이동({side}) {dev_sigma:.1f}σ',
+                'criterion': (f'중앙값 이탈≥{threshold:g}σ & 같은 방향 비율≥{min_fraction:.0%}'),
+                'basis': (f'target median이 과거 baseline 대비 {side} {dev_sigma:.1f}σ, '
+                          f'같은 방향 측정점 {same_fraction:.0%}'),
+                'stats': {'deviation_sigma': round(dev_sigma, 3),
+                          'same_direction_fraction': round(same_fraction, 4),
+                          'baseline_center': center, 'baseline_spread': spread,
+                          'target_median': target_med},
+            })
+
+    # ② robust trend: 모든 pair slope의 중앙값(Theil-Sen 핵심 아이디어)으로 단발점 영향을 억제.
+    if 'trend' in enabled:
+        window = max(5, int(cfg.get('trend_window', 12) or 12))
+        y = timeline[-window:]
+        if len(y) >= min(window, 6):
+            x = np.arange(len(y), dtype=float)
+            slopes = [(y[j] - y[i]) / (j - i)
+                      for i in range(len(y) - 1) for j in range(i + 1, len(y))]
+            slope = float(np.median(slopes)) if slopes else 0.0
+            intercept = float(np.median(y - slope * x))
+            pred = intercept + slope * x
+            ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+            ss_res = float(np.sum((y - pred) ** 2))
+            r2 = max(0.0, 1.0 - ss_res / ss_tot) if ss_tot > 0 else 0.0
+            change_sigma = abs(slope) * max(1, len(y) - 1) / spread
+            diffs = np.diff(y)
+            nz = diffs[np.abs(diffs) > max(spread * 1e-6, 1e-15)]
+            if len(nz):
+                direction_fraction = float(max(np.mean(nz > 0), np.mean(nz < 0)))
+            else:
+                direction_fraction = 0.0
+            min_change = float(cfg.get('trend_total_sigma', 3.0) or 3.0)
+            min_r2 = float(cfg.get('trend_min_r2', 0.60) or 0.60)
+            min_dir = float(cfg.get('trend_min_direction_fraction', 0.65) or 0.65)
+            if change_sigma >= min_change and r2 >= min_r2 and direction_fraction >= min_dir:
+                side = '상승' if slope > 0 else '하락'
+                signals.append({
+                    'type': 'TREND',
+                    'score': float(change_sigma / max(min_change, 1e-12)),
+                    'title': f'지속 {side} trend {change_sigma:.1f}σ',
+                    'criterion': (f'최근 {len(y)}점 총 변화≥{min_change:g}σ & '
+                                  f'R²≥{min_r2:g} & 같은 방향 변화≥{min_dir:.0%}'),
+                    'basis': (f'최근 {len(y)}점 robust slope 기준 총 변화 {change_sigma:.1f}σ, '
+                              f'R²={r2:.2f}, 같은 방향 변화 {direction_fraction:.0%}'),
+                    'stats': {'window': int(len(y)), 'slope': slope,
+                              'total_change_sigma': round(change_sigma, 3),
+                              'r2': round(r2, 4),
+                              'direction_fraction': round(direction_fraction, 4)},
+                })
+
+    # ③ SPC run: Western Electric 계열의 지속/반복 신호. baseline은 target 이전 이력만 사용.
+    if 'spc_run' in enabled and len(timeline) >= 3:
+        z = (timeline - center) / spread
+        hits = []
+        same_n = max(3, int(cfg.get('spc_same_side_points', 8) or 8))
+        same_last = float(cfg.get('spc_same_side_min_last_sigma', 0.8) or 0.8)
+        if len(z) >= same_n:
+            tail = z[-same_n:]
+            if (np.all(tail > 0) or np.all(tail < 0)) and abs(float(tail[-1])) >= same_last:
+                hits.append(f'같은 쪽 {same_n}점 연속')
+        two_sigma = float(cfg.get('spc_two_of_three_sigma', 2.0) or 2.0)
+        if len(z) >= 3:
+            tail = z[-3:]
+            if max(int(np.sum(tail > two_sigma)), int(np.sum(tail < -two_sigma))) >= 2:
+                hits.append(f'3점 중 2점 {two_sigma:g}σ 초과')
+        four_sigma = float(cfg.get('spc_four_of_five_sigma', 1.0) or 1.0)
+        if len(z) >= 5:
+            tail = z[-5:]
+            if max(int(np.sum(tail > four_sigma)), int(np.sum(tail < -four_sigma))) >= 4:
+                hits.append(f'5점 중 4점 {four_sigma:g}σ 초과')
+        if hits:
+            max_tail = float(np.max(np.abs(z[-max(same_n, 5):])))
+            signals.append({
+                'type': 'SPC_RUN',
+                'score': max(1.0, max_tail / 3.0),
+                'title': 'SPC 연속 이상',
+                'criterion': (f'같은 쪽 {same_n}점 / 3점 중 2점>{two_sigma:g}σ / '
+                              f'5점 중 4점>{four_sigma:g}σ'),
+                'basis': ', '.join(hits) + f' (최근 최대 {max_tail:.1f}σ)',
+                'stats': {'rules': hits, 'max_tail_sigma': round(max_tail, 3)},
+            })
+
+    return sorted(signals, key=lambda x: float(x.get('score', 0.0)), reverse=True)
 
 
 def _convert_name(x, prefixes=None, suffixes=None, repl=None):
@@ -2162,7 +2309,49 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         {severity, type, item, title, detail}
     """
     def cfg(k, d):
-        return getattr(config, k, d) if config else d
+        """vehicle YAML → generated/default Config 순으로 조회."""
+        if config is None:
+            return d
+        try:
+            if hasattr(config, 'get'):
+                return config.get(k, d)
+        except Exception:
+            pass
+        return getattr(config, k, d)
+
+    # detector profile 해석. anomaly_enabled_detectors(list)가 있으면 profile보다 우선한다.
+    _profile = str(cfg('anomaly_detector_profile', 'legacy') or 'legacy').strip().lower()
+    _profiles = cfg('anomaly_detector_profiles', {}) or {}
+    _enabled_raw = cfg('anomaly_enabled_detectors', None)
+    if _enabled_raw is None:
+        _enabled_raw = _profiles.get(_profile) or ['spec_out', 'flier', 'dispersion']
+    if isinstance(_enabled_raw, str):
+        _enabled_raw = [x.strip() for x in _enabled_raw.split(',') if x.strip()]
+    _enabled_detectors = {str(x).strip().lower() for x in (_enabled_raw or [])}
+    _sensitive = _profile == 'sensitive'
+
+    def _profile_value(base_key, default):
+        """sensitive profile이면 *_sensitive 값을 우선, 없으면 일반 값을 사용."""
+        if _sensitive:
+            _sv = cfg(base_key + '_sensitive', None)
+            if _sv is not None:
+                return _sv
+        return cfg(base_key, default)
+
+    _series_settings = {
+        'min_baseline': cfg('anomaly_series_min_baseline', 20),
+        'min_target': cfg('anomaly_series_min_target', 3),
+        'level_shift_sigma': _profile_value('anomaly_level_shift_sigma', 3.0),
+        'level_shift_min_fraction': _profile_value('anomaly_level_shift_min_fraction', 0.75),
+        'trend_window': cfg('anomaly_trend_window', 12),
+        'trend_total_sigma': _profile_value('anomaly_trend_total_sigma', 3.0),
+        'trend_min_r2': _profile_value('anomaly_trend_min_r2', 0.60),
+        'trend_min_direction_fraction': _profile_value('anomaly_trend_min_direction_fraction', 0.65),
+        'spc_same_side_points': _profile_value('anomaly_spc_same_side_points', 8),
+        'spc_same_side_min_last_sigma': _profile_value('anomaly_spc_same_side_min_last_sigma', 0.8),
+        'spc_two_of_three_sigma': _profile_value('anomaly_spc_two_of_three_sigma', 2.0),
+        'spc_four_of_five_sigma': _profile_value('anomaly_spc_four_of_five_sigma', 1.0),
+    }
 
     disp_ratio = cfg('anomaly_lot_dispersion_ratio', 1.5)
     # ── 주의(WARNING) 세부 판정 설정 (My_config — HTML/PPT 안내문에도 동일 값이 동적 표기됨) ──
@@ -2700,7 +2889,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     _agg_label_map = {}   # {item: 'P10'/'MEDIAN'/... } — 요약 근거 문구용(agg 기준 표기)
     try:
         import numpy as _np
-        _agg_map = (getattr(config, 'trend_tkout_agg', {}) or {}) if config else {}
+        _agg_map = cfg('trend_tkout_agg', {}) or {}
 
         def _agg_fn_for(_it):
             # base ALIAS 키(예 'MAWIN')로 파생 컬럼(MAWIN_*)까지 매칭 — Trend 차트와 동일 규칙
@@ -2743,6 +2932,30 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                         _agg_label_map[_ai] = ''
     except Exception as _ae:
         print(f"[WARN] trend_tkout_agg 판정용 집계 실패: {_ae}")
+
+    def _series_representatives(frame, it, until=None):
+        """(lot, wafer, tkout)별 median 대표값을 시간순 1차원 시계열로 반환."""
+        if frame is None or len(frame) == 0 or it not in frame.columns:
+            return []
+        _cols = [c for c in [col_lot, col_waf, col_time, it] if c and c in frame.columns]
+        if it not in _cols:
+            return []
+        _d = frame[_cols].copy()
+        _d[it] = pd.to_numeric(_d[it], errors='coerce')
+        _d = _d.dropna(subset=[it])
+        if until is not None and col_time and col_time in _d.columns:
+            _d[col_time] = pd.to_datetime(_d[col_time], errors='coerce')
+            _d = _d[_d[col_time] <= until]
+        if len(_d) == 0:
+            return []
+        _gk = [c for c in [col_lot, col_waf, col_time] if c and c in _d.columns]
+        if _gk:
+            _s = _d.groupby(_gk, dropna=False)[it].median().reset_index()
+            if col_time and col_time in _s.columns:
+                _s[col_time] = pd.to_datetime(_s[col_time], errors='coerce')
+                _s = _s.sort_values(col_time, kind='stable')
+            return pd.to_numeric(_s[it], errors='coerce').dropna().tolist()
+        return pd.to_numeric(_d[it], errors='coerce').dropna().tolist()
 
     _basis = []      # 판단 근거 중간 데이터 (RUN/TEMP 저장용) — 전 Index 통합
     _rankinfo = {}   # 항목별 정렬 지표 (spec-out 비율/wafer 수/이탈 크기/REPORT ORDER)
@@ -2887,6 +3100,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         if it in _agg_item_set:
             worst_disp_ratio, worst_disp_w, disp_txt = 0.0, None, ''
             worst_flier_w, worst_flier_cnt, worst_flier_dev, flier_txt = None, 0, 0.0, ''
+        if 'flier' not in _enabled_detectors:
+            worst_flier_w, worst_flier_cnt, worst_flier_dev, flier_txt = None, 0, 0.0, ''
+        if 'dispersion' not in _enabled_detectors:
+            worst_disp_ratio, worst_disp_w, disp_txt = 0.0, None, ''
 
         # spec-out을 wafer별 pt개수로 그룹 + 순위지표(최고 wafer 비율/spec-out wafer 수) + PGM(pt)/zone
         specout_txt, n_out, specout_map = ('', 0, {})
@@ -2902,6 +3119,29 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         # agg 판정 항목은 raw metrics 폴백을 쓰지 않는다(집계값 기준 유지)
         if n_out == 0 and it not in _agg_item_set:
             n_out = int(metrics_dict.get(it, {}).get('spec_out_count', 0) or 0)
+
+        # ── 시계열 모양 detector: 수준 이동 / robust trend / SPC 연속 이상 ──
+        # target 이전 제품 이력만 baseline으로 쓰고, target 시점까지의 대표값을 시간순 평가한다.
+        _series_signals = []
+        if _enabled_detectors.intersection({'level_shift', 'trend', 'spc_run'}):
+            try:
+                _hist_frame = pop
+                if col_lot and col_lot in pop.columns:
+                    _hist_frame = pop[pop[col_lot].astype(str) != str(target_lot_id)]
+                _target_until = None
+                if col_time and col_time in tgt.columns and len(tgt):
+                    _target_until = pd.to_datetime(tgt[col_time], errors='coerce').max()
+                    if pd.isna(_target_until):
+                        _target_until = None
+                _hist_values = _series_representatives(_hist_frame, it, until=_target_until)
+                _target_values = _series_representatives(tgt, it, until=_target_until)
+                _timeline_values = _series_representatives(pop, it, until=_target_until)
+                _series_signals = detect_series_signals(
+                    _hist_values, _target_values, _timeline_values,
+                    enabled_detectors=_enabled_detectors, settings=_series_settings)
+            except Exception as _se:
+                print(f"[anomaly] 시계열 detector 실패({it}): {_se}")
+                _series_signals = []
 
         # PCHK 겹침(측정이상) 신호 — basis 기록용(AI가 측정이상 추정에 활용). finding/severity엔 미반영.
         #   PCHK 종류별 '검증 대상 ITEM'(매핑)으로 대조 범위를 한정한다.
@@ -2920,6 +3160,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'worst_med_dev': float(worst_med_dev),
             'worst_disp_ratio': float(worst_disp_ratio),
             'worst_flier_dev': float(worst_flier_dev),
+            'series_score': max([float(s.get('score', 0.0)) for s in _series_signals] or [0.0]),
             'report_order': report_order.get(it, 1e9),
         }
 
@@ -2937,6 +3178,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             _bits.append(flier_txt)
         if disp_txt:
             _bits.append(disp_txt)
+        if _series_signals:
+            _bits.extend(str(s.get('basis', '')) for s in _series_signals if s.get('basis'))
         detail = '. '.join(_bits)
 
         # ── 산포 확대 절대량 게이트: worst wafer의 절대 robust 산포(배수×보통 wafer 산포)가
@@ -2954,12 +3197,14 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         #                   ② 산포 확대(wafer 내부 산포가 보통 wafer 대비 disp_ratio배 초과,
         #                   disp_min_spec_frac>0이면 절대량 게이트도 통과)인 경우.
         #   그 외         : 참고(INFO).
-        if n_out > 0:
+        if n_out > 0 and 'spec_out' in _enabled_detectors:
             # 제외 키워드 PCHK는 이상(CRITICAL) 판정 대신 '측정이상 추정(NOTICE)' 신호만
             _sev = 'NOTICE' if it in _meas_only else 'CRITICAL'
         elif worst_flier_w is not None:
             _sev = 'INFO' if it in _meas_only else 'WARNING'
         elif worst_disp_ratio > disp_ratio and _disp_gate_ok:
+            _sev = 'INFO' if it in _meas_only else 'WARNING'
+        elif _series_signals:
             _sev = 'INFO' if it in _meas_only else 'WARNING'
         else:
             _sev = 'INFO'
@@ -3021,6 +3266,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'commonality': so_commonality or '', # repeat_shot/repeat_similar(ITEM)
             'ov_shots': int(ov_shots),           # meas_overlap(PCHK): 동일 shot 겹침 수
             'measured': tgt_it is not None,      # measured(ITEM): target lot 측정 존재
+            'series_signals': list(_series_signals),  # 수준 이동/trend/SPC detector trace
         }
 
         # ── AI 해석용 항목별 통계 요약(전 항목 — finding 유무 무관) ──
@@ -3043,6 +3289,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'flier_pt': int(worst_flier_cnt),
             'flier_max_dev_sigma': round(worst_flier_dev, 1) if worst_flier_dev else 0.0,
             'pattern': so_pattern,
+            'detector_profile': _profile,
+            'series_signals': list(_series_signals),
             # wafer별 median/std (AI 해석 입력 — 더 정확한 판단). rep_*는 룰/요약 대표값.
             'rep_stddev': _sig4(_rep_std),
             'rep_median': _sig4(_rep_med),
@@ -3081,6 +3329,9 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             'flier_wafer': worst_flier_w,                      # 플라이어 worst wafer
             'flier_pt': int(worst_flier_cnt),                  # 플라이어 pt 수(1~flier_max_pts)
             'flier_max_dev_sigma': round(worst_flier_dev, 2) if worst_flier_dev else 0.0,
+            'detector_profile': _profile,
+            'enabled_detectors': sorted(_enabled_detectors),
+            'series_signals': list(_series_signals),
             # 측정신뢰성(측정이상 추정, AI 전용) — 동일 shot 다른 항목 동시 spec-out 겹침
             'meas_target_items': _meas_target_tokens,       # 매핑에 적힌 검증 대상(원문 표기)
             'meas_target_resolved': _meas_target_resolved,  # 실제 매칭된 ITEM alias(None=전체)
@@ -3093,7 +3344,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
 
         # ── finding 산출 — 이상=spec-out only / 주의=wafer 산포 확대 only (median 판정 제거) ──
         #   display_name/cat2/위치/PGM(pt)/PCHK겹침은 AI 해석 입력용 부가정보(렌더러는 미사용).
-        if n_out > 0:
+        if n_out > 0 and 'spec_out' in _enabled_detectors:
             _extra = {
                 'display_name': _disp(it),
                 'cat2': cat2_map.get(it, ''),
@@ -3119,9 +3370,10 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             else:
                 _b_side = 'spec 이탈'
             if it in _agg_item_set:
-                _extra['basis'] = f"{_agg_label_map.get(it) or '집계'} 집계값이 {_b_side}"
+                _extra['basis'] = (f"profile={_profile} · detector=spec_out · "
+                                   f"{_agg_label_map.get(it) or '집계'} 집계값이 {_b_side}")
             else:
-                _extra['basis'] = f"측정값이 {_b_side}"
+                _extra['basis'] = f"profile={_profile} · detector=spec_out · 측정값이 {_b_side}"
             if is_pchk:
                 _extra.update({
                     'is_pchk': True,
@@ -3158,7 +3410,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 f"Flier : {_disp(it)} - #{worst_flier_w} {worst_flier_cnt}pt "
                 f"(최대 {worst_flier_dev:.1f}σ)", "",
                 display_name=_disp(it), cat2=cat2_map.get(it, ''),
-                basis=(f"spec 이내지만 wafer median 대비 보통 wafer 산포의 "
+                basis=(f"profile={_profile} · detector=flier · spec 이내지만 "
+                       f"wafer median 대비 보통 wafer 산포의 "
                        f"{flier_sigma:g}σ 초과 pt {worst_flier_cnt}개"),
                 wafer_stats=dict(_wstats), rep_stddev=_rep_std, rep_median=_rep_med))
             continue
@@ -3170,13 +3423,34 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 "WARNING", "DISPERSION", it,
                 f"산포 확대 : {_disp(it)} - #{worst_disp_w} 산포 {worst_disp_ratio:.1f}배", "",
                 display_name=_disp(it), cat2=cat2_map.get(it, ''),
+                basis=(f"profile={_profile} · detector=dispersion · 관측 {worst_disp_ratio:.1f}배 "
+                       f"> 기준 {disp_ratio:g}배"),
+                wafer_stats=dict(_wstats), rep_stddev=_rep_std, rep_median=_rep_med))
+            continue
+
+        # ── 주의③ 시계열 모양: 수준 이동 / 지속 trend / SPC 연속 이상 ──
+        # 동일 항목에서 여러 detector가 걸려도 finding·차트는 1개만 만들고 trace는 모두 보존한다.
+        if _series_signals:
+            _primary = _series_signals[0]
+            _other = [s.get('title', s.get('type', '')) for s in _series_signals[1:]]
+            _trace = (f"profile={_profile} · detector={str(_primary.get('type', '')).lower()} · "
+                      f"기준: {_primary.get('criterion', '')} · 결과: {_primary.get('basis', '')}")
+            _detail = _trace
+            if _other:
+                _detail += '. 동시 신호: ' + ', '.join(str(x) for x in _other if x)
+            findings.append(_finding(
+                "WARNING", str(_primary.get('type', 'SERIES_ANOMALY')), it,
+                f"{_primary.get('title', '시계열 이상')} : {_disp(it)}", _detail,
+                display_name=_disp(it), cat2=cat2_map.get(it, ''),
+                basis=_trace, detector_profile=_profile,
+                detector_signals=list(_series_signals),
                 wafer_stats=dict(_wstats), rep_stddev=_rep_std, rep_median=_rep_med))
 
     # ── 조건부 제외 항목의 built-in finding 태깅 ──
     #   여기까지 findings에는 per-item built-in finding만 있다(RULE finding은 뒤에서 추가됨).
     #   exclude_unless_rule 항목의 spec-out/Flier/산포 finding에 _excl_unless=True 표식을 달아
     #   두고, RULE 평가 후 매칭 여부에 따라 최종적으로 유지/제거한다.
-    _EXCL_UNLESS_BUILTIN = {'SPEC_OUT', 'FLIER', 'DISPERSION'}
+    _EXCL_UNLESS_BUILTIN = {'SPEC_OUT', 'FLIER', 'DISPERSION', 'LEVEL_SHIFT', 'TREND', 'SPC_RUN'}
     if _excl_unless_set:
         for _f in findings:
             if _f.get('item') in _excl_unless_set and _f.get('type') in _EXCL_UNLESS_BUILTIN:
@@ -3758,6 +4032,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     #        F = 플라이어 최대 이탈 σ, kσ = anomaly_flier_sigma (임계 대비 배수 — 산포배수 D와 동일 스케일)
     #   주의(DISPERSION): P = 10000 + 100·D
     #        D = 항목 내 '최대 wafer 산포배수' = max_wafer(wafer 내부 robust 산포 / 보통 wafer 산포)
+    #   주의(LEVEL_SHIFT/TREND/SPC_RUN): P = 10000 + 100·S
+    #        S = detector 임계 대비 score(1.0=임계 통과선, 클수록 강한 신호)
     #   참고(그 외)     : P = 100·D
     #   → 이상(20000+) > 주의(10000+) > 참고(<수백) 순이 항상 보장. 동점 시 REPORT ORDER 오름차순.
     def _priority(f):
@@ -3774,6 +4050,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                                       if flier_sigma > 0 else 0.0)
         if t == 'DISPERSION':
             return 10000.0 + 100.0 * ri.get('worst_disp_ratio', 0.0)
+        if t in ('LEVEL_SHIFT', 'TREND', 'SPC_RUN'):
+            return 10000.0 + 100.0 * ri.get('series_score', 0.0)
         return 100.0 * ri.get('worst_disp_ratio', 0.0)
 
     for _f in findings:
