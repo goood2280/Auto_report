@@ -659,11 +659,11 @@ class Config:
         self.anomaly_wfmap_specout = True        # spec-out WF MAP 표시 on/off
         self.anomaly_wfmap_max_count = 42        # (현재 spec-out 전량 표시 — 미사용, 호환용 유지)
         # 사내 메일에서 root lot / wafer / step 라벨이 충분히 읽히도록 셀과 폰트를 키운다.
-        # 합성 이미지가 너무 넓어 메일 클라이언트에서 통째로 축소되지 않게 블록별 열 수도 제한한다.
-        self.anomaly_wfmap_map_size_px = 80
-        self.anomaly_wfmap_label_font_px = 15
-        self.anomaly_wfmap_label_height_px = 40
-        self.anomaly_wfmap_grid_max_cols = 4
+        # 레이아웃은 Main.py에서 target/그 외 블록 각각 2행으로 고정한다.
+        self.anomaly_wfmap_map_size_px = 88
+        self.anomaly_wfmap_label_font_px = 22
+        self.anomaly_wfmap_label_height_px = 58
+        self.anomaly_wfmap_label_font_path = ''  # 비우면 OS별 한글 폰트 경로를 자동 탐색
         self.anomaly_wfmap_label_multiline = True  # lot_id / #wafer(step)을 2줄로 분리해 과도한 자간 축소 방지
 
         # ── PPT Trend chart: 특정 항목은 site(모든 값) 대신 tkout_time 기준 집계점으로 표시 ──

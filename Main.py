@@ -1667,7 +1667,7 @@ def main():
                             if _ai_on:
                                 code_summary_html = render_findings_count_html(code_findings)
                             else:
-                                code_summary_html = render_findings_html(code_findings)
+                                code_summary_html = render_findings_html(code_findings, top_n=5)
                         except Exception as ce:
                             print(f"[WARN] findings 렌더 스킵 (오류): {ce}")
 
@@ -1930,15 +1930,12 @@ def main():
                                                 if _wfmaps:
                                                     # PIL 합성: '해당 lot(target)' WF MAP은 왼쪽에 파란 테두리 블록으로
                                                     # 묶어 표시하고, 오른쪽에 나머지 lot(tkout_time 최신순) 그리드를
-                                                    # 이어붙여 1장으로 만든다. 메일에서 합성 이미지가 지나치게
-                                                    # 넓어져 자동 축소되지 않도록 블록별 최대 열 수를 제한한다.
+                                                    # 이어붙여 1장으로 만든다. 각 블록은 항상 2행을 유지한다.
                                                     from PIL import Image as _PILImg2, ImageDraw as _PILDraw2, ImageFont as _PILFont2
                                                     import io as _io2
-                                                    _map_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_map_size_px', 80) or 80)
-                                                    _label_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_label_font_px', 15) or 15)
-                                                    _lab_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_label_height_px', 40) or 40)
-                                                    _grid_max_cols = max(1, int(GLOBAL_CONFIG.get(
-                                                        'anomaly_wfmap_grid_max_cols', 4) or 4))
+                                                    _map_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_map_size_px', 88) or 88)
+                                                    _label_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_label_font_px', 22) or 22)
+                                                    _lab_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_label_height_px', 58) or 58)
                                                     _map_sz = max(40, _map_base) * _hs   # config 표시 px × supersample
                                                     _lab_h = max(_label_base + 2, _lab_base) * _hs
                                                     _pad = 3 * _hs       # 셀 간격
@@ -1951,10 +1948,10 @@ def main():
                                                     _gap = 7 * _hs if (_wf_tgt and _wf_rest) else 0   # 블록 간 간격
 
                                                     def _grid_dims(_n):
-                                                        """메일 폭을 넘지 않도록 최대 열 수가 제한된 그리드."""
+                                                        """기존 메일 레이아웃과 동일한 2행 기준 그리드."""
                                                         if _n <= 0:
                                                             return 0, 0, 0, 0
-                                                        _nc = min(_grid_max_cols, _n)
+                                                        _nc = max(1, -(-_n // 2))
                                                         _nr = -(-_n // _nc)
                                                         return (_nc, _nr,
                                                                 (_nc - 1) * _cell_w + _map_sz,
@@ -1970,16 +1967,35 @@ def main():
                                                                  else (_x_t + _w_t + _bpad + _pad))
                                                     _ch_total = max(_y0 + _h_t + (_bpad if _wf_tgt else 0),
                                                                     _y0 + _h_r) + _pad
-                                                    # 폰트
-                                                    try:
-                                                        _cf = "NanumGothic.ttf"
+                                                    # 폰트 — 실행 환경에서 파일명을 못 찾으면 PIL 기본 폰트로
+                                                    # 떨어져 설정한 px와 무관하게 매우 작아진다. Windows/Linux의
+                                                    # 실제 한글 폰트 경로를 순서대로 시도하고, 마지막 기본 폰트도
+                                                    # 지원되는 Pillow에서는 요청 크기로 로드한다.
+                                                    def _load_wf_label_font(_px):
+                                                        _configured = str(GLOBAL_CONFIG.get(
+                                                            'anomaly_wfmap_label_font_path', '') or '').strip()
+                                                        _font_candidates = [
+                                                            _configured,
+                                                            'NanumGothic.ttf',
+                                                            r'C:\Windows\Fonts\malgun.ttf',
+                                                            r'C:\Windows\Fonts\arial.ttf',
+                                                            '/usr/share/fonts/truetype/nanum/NanumGothic.ttf',
+                                                            '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+                                                            'DejaVuSans.ttf',
+                                                        ]
+                                                        for _cf in _font_candidates:
+                                                            if not _cf:
+                                                                continue
+                                                            try:
+                                                                return _PILFont2.truetype(_cf, _px)
+                                                            except Exception:
+                                                                continue
                                                         try:
-                                                            _PILFont2.truetype(_cf, 10)
-                                                        except Exception:
-                                                            _cf = "arial.ttf"
-                                                        _cfont = _PILFont2.truetype(_cf, max(9, _label_base * _hs))
-                                                    except Exception:
-                                                        _cfont = _PILFont2.load_default()
+                                                            return _PILFont2.load_default(size=_px)
+                                                        except TypeError:
+                                                            return _PILFont2.load_default()
+
+                                                    _cfont = _load_wf_label_font(max(12, _label_base * _hs))
                                                     _comp = _PILImg2.new('RGB', (_cw_total, _ch_total), (255, 255, 255))
                                                     _cdraw = _PILDraw2.Draw(_comp)
 

@@ -4089,9 +4089,11 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
 
 def render_findings_html(findings, top_n=5, detail_ref="PPT의 Score Board 다음 'Anomaly 상세(통계)' 페이지",
                          kind='stat', tail_note='', empty_msg=None):
-    """Finding 리스트를 HTML로 렌더링 (상위 top_n건만, 나머지는 PPT 상세 참조 안내).
+    """Finding 리스트를 카테고리별 대표 1건으로 줄여 상위 top_n건만 HTML로 렌더링.
 
     findings는 analyze_commonality에서 severity(우선순위) 순으로 정렬되어 들어온다.
+    cat2가 같은 finding은 첫 번째(=가장 높은 우선순위)만 표시한다. cat2가 없으면 서로
+    다른 독립 finding으로 보존한다.
     kind='stat'      : 통계 자동 분석(이상/주의 건수 head).
     kind='knowledge' : 지식판정(RULE) 매칭 결과(매칭 N건 head) — AI 연결 시 Anomaly Summary용.
     tail_note        : 목록 아래에 덧붙일 안내(예: 일반 이상 N건은 PPT 상세 참조).
@@ -4116,23 +4118,47 @@ def render_findings_html(findings, top_n=5, detail_ref="PPT의 Score Board 다�
                 f'<b>통계 기반 자동 분석</b>: '
                 f'{_sev_dot("CRITICAL")} {_SEV_HEAD["CRITICAL"]} {n_crit}건{_div}'
                 f'{_sev_dot("WARNING")} {_SEV_HEAD["WARNING"]} {n_warn}건</div>')
-    shown = findings[:top_n]
+    # 같은 CAT2에서는 이미 우선순위 정렬된 첫 finding 하나만 Anomaly Summary에 표시한다.
+    # CAT2가 비어 있는 RULE/기타 finding까지 한 카테고리로 오인하지 않도록 빈 값은 dedup하지 않는다.
+    summary_findings = []
+    seen_categories = set()
+    for f in findings:
+        _cat = str(f.get('cat2', '') or '').strip()
+        _cat_key = _cat.casefold() if _cat and _cat.lower() != 'nan' else None
+        if _cat_key is not None:
+            if _cat_key in seen_categories:
+                continue
+            seen_categories.add(_cat_key)
+        summary_findings.append(f)
+
+    shown = summary_findings[:top_n]
     lis = []
     for f in shown:
+        _cat = str(f.get('cat2', '') or '').strip()
+        _cat_html = (f'<span style="color:#1f4e79; font-size:11px;">[{_cat}]</span> '
+                     if _cat and _cat.lower() != 'nan' else '')
+        _summary_text = ' '.join(str(f.get('basis') or f.get('detail') or '').split())
+        if len(_summary_text) > 220:
+            _summary_text = _summary_text[:217].rstrip() + '...'
         lis.append(
             f'<li style="margin-bottom:5px; list-style:none;">'
             f'{_sev_badge(f["severity"])} '
-            f'<b>{f["title"]}</b>'
+            f'{_cat_html}<b>{f["title"]}</b>'
             # 요약은 간결 근거(basis)만 — 어느 샷/wafer에서 spec-out인지 줄글 나열은 하지 않음.
             # basis 없으면(예: 산포 확대) 생략(제목에 이미 요지 포함). 상세 위치는 PPT 상세 페이지 참조.
-            + (f'<br><span style="color:#555; font-size:12px;">근거: {f["basis"]}</span>'
-               if f.get("basis") else "")
+            + (f'<br><span style="color:#555; font-size:12px;">요약 근거: {_summary_text}</span>'
+               if _summary_text else "")
             + '</li>')
     more = ""
-    if len(findings) > top_n:
+    _deduped = len(findings) - len(summary_findings)
+    if len(summary_findings) > top_n:
         more = (f'<div style="font-size:12px; color:#555; margin:4px 0 0;">'
-                f'… 우선순위 상위 {top_n}건만 표시. 전체 {len(findings)}건의 상세는 '
+                f'… 같은 카테고리는 최우선 1건만 선별하여 우선순위 상위 {top_n}건을 표시했습니다. '
+                f'전체 {len(findings)}건의 상세는 '
                 f'<b>{detail_ref}</b>를 참조하세요.</div>')
+    elif _deduped > 0:
+        more = (f'<div style="font-size:12px; color:#555; margin:4px 0 0;">'
+                f'같은 카테고리 {_deduped}건은 우선순위가 가장 높은 대표 항목으로 요약했습니다.</div>')
     return head + ('<ul style="font-size:13px; color:#333; margin:5px 0 8px; padding-left:4px; list-style:none;">'
                    + "".join(lis) + '</ul>') + more + (tail_note or '')
 
