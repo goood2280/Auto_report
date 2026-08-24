@@ -2730,23 +2730,32 @@ def _render_item_charts(task):
             CELL = max(int(dpi), 200)
         _gx = max(2, int(CELL * 0.05))                 # 열 간격
         _gy = max(2, int(CELL * 0.06))                 # 행 간격
-        _lab_h = max(16, int(CELL * 0.30))             # 하단 wafer# 라벨 영역(큰 번호가 잘리지 않게)
+        # 25열 전체 합성 이미지는 PPT에서 좌열 폭에 맞춰 크게 축소된다. 최종 표시 기준
+        # 약 8.5pt가 되도록 내부 wafer# 글자를 CELL의 40%, 라벨 영역을 50%로 확보한다.
+        _lab_h = max(22, int(CELL * 0.50))
         _lab_w = max(12, int(CELL * 0.16)) if _multi_pgm else 2   # 좌측 PGM(pt) 라벨 폭
         _cw = _lab_w + grid_cols * CELL + (grid_cols - 1) * _gx
         _ch = grid_rows * CELL + (grid_rows - 1) * _gy + _lab_h
         _canvas = _PImg.new('RGB', (_cw, _ch), 'white')
         _dr = _PDraw.Draw(_canvas)
 
-        def _pick_font(px):
-            for _fn in ('NanumGothic.ttf', 'malgun.ttf', 'arial.ttf', 'DejaVuSans.ttf'):
+        def _pick_font(px, bold=False):
+            _fonts = (('NanumGothicBold.ttf', 'malgunbd.ttf', 'arialbd.ttf', 'DejaVuSans-Bold.ttf')
+                      if bold else
+                      ('NanumGothic.ttf', 'malgun.ttf', 'arial.ttf', 'DejaVuSans.ttf'))
+            for _fn in _fonts:
                 try:
                     return _PFont.truetype(_fn, px)
                 except Exception:
                     continue
-            return _PFont.load_default()
-        _fw = _pick_font(max(12, int(CELL * 0.24)))    # wafer# 폰트 — PPT에서 잘 보이도록 확대
+            try:
+                return _PFont.load_default(size=px)
+            except TypeError:
+                return _PFont.load_default()
+        _fw = _pick_font(max(18, int(CELL * 0.40)), bold=True)  # wafer# — PPT 최종 표시 약 8.5pt
         _fp = _pick_font(max(8, int(CELL * 0.13)))     # PGM(pt) 폰트
-        _lab_rgb = tuple(int(v * 255) for v in _to_rgb(C_NEUTRAL))
+        _wafer_lab_rgb = (0, 0, 0)
+        _pgm_lab_rgb = tuple(int(v * 255) for v in _to_rgb(C_NEUTRAL))
 
         for r in range(grid_rows):
             for c in range(grid_cols):
@@ -2760,7 +2769,7 @@ def _render_item_charts(task):
                     _canvas.paste(_cim, (_x0, _y0))
                 if r == grid_rows - 1:   # 맨 아래 행에만 wafer 번호(#1~25)
                     _dr.text((_x0 + CELL / 2.0, _ch - _lab_h / 2.0), f"#{c + 1}",
-                             fill=_lab_rgb, font=_fw, anchor='mm')
+                             fill=_wafer_lab_rgb, font=_fw, anchor='mm')
             # 다중 PGM이면 각 행 좌측에 PGM(pt) 라벨(세로). 형식: step_seq(pt수), '_1.0'·'pt' 제거
             if _multi_pgm:
                 sub_grp0, _w0, sub_name0 = cell_map[(r, 0)]
@@ -2773,7 +2782,7 @@ def _render_item_charts(task):
                 _pl = re.sub(r'(\d+)\s*pt\)', r'\1)', _pl)       # "(137pt)" → "(137)"
                 _ti = _PImg.new('RGBA', (CELL, _lab_w), (0, 0, 0, 0))
                 _PDraw.Draw(_ti).text((CELL / 2.0, _lab_w / 2.0), _pl,
-                                      fill=_lab_rgb + (255,), font=_fp, anchor='mm')
+                                      fill=_pgm_lab_rgb + (255,), font=_fp, anchor='mm')
                 _ti = _ti.rotate(90, expand=True)
                 _yc = r * (CELL + _gy) + (CELL - _ti.size[1]) // 2
                 _canvas.paste(_ti, (0, max(0, _yc)), _ti)
