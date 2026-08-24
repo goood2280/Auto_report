@@ -3362,6 +3362,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             _extra = {
                 'display_name': _disp(it),
                 'cat2': cat2_map.get(it, ''),
+                'affected_wafer_ids': list(_item_ctx[it].get('so_wafer_ids') or []),
                 'spec_out_pgm': so_pgms,
                 'spec_out_zone': so_zones,
                 'spec_out_pattern': so_pattern,
@@ -3426,6 +3427,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 f"Flier : {_disp(it)} - #{worst_flier_w} {worst_flier_cnt}pt "
                 f"(최대 {worst_flier_observed:.1f}σ)", "",
                 display_name=_disp(it), cat2=cat2_map.get(it, ''),
+                affected_wafer_ids=[worst_flier_w],
                 basis=(f"spec 이내 · 관측 최대 이탈 {worst_flier_observed:.1f}σ > "
                        f"기준 {worst_flier_limit:g}σ "
                        f"(wafer median 대비 보통 wafer 산포), 초과 {worst_flier_cnt}pt"),
@@ -3439,6 +3441,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 "WARNING", "DISPERSION", it,
                 f"산포 확대 : {_disp(it)} - #{worst_disp_w} 산포 {worst_disp_ratio:.1f}배", "",
                 display_name=_disp(it), cat2=cat2_map.get(it, ''),
+                affected_wafer_ids=[worst_disp_w],
                 basis=(f"관측 wafer 내부 산포 {worst_disp_ratio:.1f}배 > "
                        f"기준 {disp_ratio:g}배 (보통 wafer 내부 산포 대비)"),
                 wafer_stats=dict(_wstats), rep_stddev=_rep_std, rep_median=_rep_med))
@@ -4133,20 +4136,49 @@ def render_findings_html(findings, top_n=5, detail_ref="PPT의 Score Board 다�
 
     shown = summary_findings[:top_n]
     lis = []
+
+    def _summary_title(f):
+        """메일 Summary 제목은 유형·항목·wafer만 표시하고 수치 상세는 근거로 내린다."""
+        _type_labels = {
+            'SPEC_OUT': 'Spec-out', 'FLIER': 'Flier', 'DISPERSION': '산포 확대',
+            'LEVEL_SHIFT': '수준 이동', 'TREND': '지속 Trend', 'SPC_RUN': 'SPC 연속 이상',
+            'MEAS_SUSPECT': '측정이상 추정',
+        }
+        _ftype = str(f.get('type', '') or '').upper()
+        if _ftype not in _type_labels:
+            return str(f.get('title', '') or '')
+        _name = str(f.get('display_name') or f.get('item') or '').strip()
+        _title = f"{_type_labels[_ftype]}: {_name}" if _name else _type_labels[_ftype]
+        _wids = list(f.get('affected_wafer_ids') or f.get('so_wafer_ids') or [])
+        _clean_wids = []
+        for _w in _wids:
+            if _w in (None, '') or str(_w).lower() == 'nan':
+                continue
+            try:
+                _wv = str(int(float(_w)))
+            except (TypeError, ValueError):
+                _wv = str(_w)
+            if _wv not in _clean_wids:
+                _clean_wids.append(_wv)
+        if _clean_wids:
+            _cap = 8
+            _wf_text = ', '.join('#' + _w for _w in _clean_wids[:_cap])
+            if len(_clean_wids) > _cap:
+                _wf_text += f" 외 {len(_clean_wids) - _cap}매"
+            _title += f" · wafer {_wf_text}"
+        return _title
+
     for f in shown:
-        _cat = str(f.get('cat2', '') or '').strip()
-        _cat_html = (f'<span style="color:#1f4e79; font-size:11px;">[{_cat}]</span> '
-                     if _cat and _cat.lower() != 'nan' else '')
         _summary_text = ' '.join(str(f.get('basis') or f.get('detail') or '').split())
         if len(_summary_text) > 220:
             _summary_text = _summary_text[:217].rstrip() + '...'
         lis.append(
             f'<li style="margin-bottom:5px; list-style:none;">'
             f'{_sev_badge(f["severity"])} '
-            f'{_cat_html}<b>{f["title"]}</b>'
+            f'<b>{_summary_title(f)}</b>'
             # 요약은 간결 근거(basis)만 — 어느 샷/wafer에서 spec-out인지 줄글 나열은 하지 않음.
             # basis 없으면(예: 산포 확대) 생략(제목에 이미 요지 포함). 상세 위치는 PPT 상세 페이지 참조.
-            + (f'<br><span style="color:#555; font-size:12px;">요약 근거: {_summary_text}</span>'
+            + (f'<br><span style="color:#555; font-size:12px;">근거: {_summary_text}</span>'
                if _summary_text else "")
             + '</li>')
     more = ""

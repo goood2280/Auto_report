@@ -2369,10 +2369,11 @@ def _render_item_charts(task):
     def _remove_spines(ax):
         for spine in ['top', 'right']:
             ax.spines[spine].set_visible(False)
-        ax.spines['left'].set_color(C_SPINE)
-        ax.spines['bottom'].set_color(C_SPINE)
-        ax.spines['left'].set_linewidth(0.6)
-        ax.spines['bottom'].set_linewidth(0.6)
+        # Box/Trend/Radius/Cumulative 공통 주축: 옅은 회색 대신 검정색으로 조금 진하게.
+        for spine in ['left', 'bottom']:
+            ax.spines[spine].set_color('#000000')
+            ax.spines[spine].set_linewidth(0.9)
+        ax.tick_params(axis='both', which='major', color='#000000', width=0.8)
 
     def _label_axes(ax, xlabel=None, ylabel=None, ylabel_size=7, xlabel_size=7):
         if xlabel is not None:
@@ -2582,25 +2583,29 @@ def _render_item_charts(task):
         ax_box.set_xticklabels([f"#{i}" + ("*" if i in _tgt_wafnums else "") for i in range(1, 26)])
         ax_box.set_xlim(0.5, 25.5)
         ax_box.tick_params(axis='x', rotation=45, labelsize=7)
+        _target_blue = '#0033CC'
+        for _widx, _tick_label in enumerate(ax_box.get_xticklabels(), start=1):
+            if _widx in _tgt_wafnums:
+                # Matplotlib tick 한 개 안에서 '*'만 별도 색칠하기 어려우므로 대상 wafer의
+                # '#번호*' 전체를 파란색·볼드로 표시해 별표가 확실히 보이게 한다.
+                _tick_label.set_color(_target_blue)
+                _tick_label.set_fontweight('bold')
         if _tgt_wafnums:
             # box plot '바깥 아래'(축 아래, x라벨 밑)에 '*: lot_id' 범례를 우측 정렬로 배치
             #  (y<0 = 축 영역 밖 아래, 오른쪽 끝을 box plot 우측에 맞춤)
             ax_box.text(1.0, -0.5, f"*: {target_lot_id}", transform=ax_box.transAxes,
-                        ha='right', va='top', fontsize=6, color=C_NEUTRAL, fontstyle='italic')
+                        ha='right', va='top', fontsize=6, color=_target_blue,
+                        fontstyle='italic', fontweight='bold')
         _label_axes(ax_box, xlabel="Wafer #", ylabel=y_label)
         _remove_spines(ax_box)
         ax_box.set_axisbelow(True)
         if log_scale:
-            # 로그 스케일: 데이터 범위가 한 decade 미만이어도 10의 거듭제곱마다 y축 선이 나오도록
-            # major(10^n) + minor(2~9×10^n) locator를 명시하고 둘 다 grid 표시.
-            from matplotlib.ticker import LogLocator, NullFormatter
+            # 로그 스케일은 10의 거듭제곱 major tick/grid만 표시한다.
+            from matplotlib.ticker import LogLocator
             ax_box.set_yscale('log')
             ax_box.yaxis.set_major_locator(LogLocator(base=10.0, numticks=15))
-            ax_box.yaxis.set_minor_locator(
-                LogLocator(base=10.0, subs=(2, 3, 4, 5, 6, 7, 8, 9), numticks=15))
-            ax_box.yaxis.set_minor_formatter(NullFormatter())
+            ax_box.minorticks_off()
             ax_box.grid(True, which='major', axis='both', color=C_GRID, linestyle='-', linewidth=0.6)
-            ax_box.grid(True, which='minor', axis='y', color=C_GRID, linestyle='-', linewidth=0.35, alpha=0.6)
         else:
             ax_box.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
             ax_box.grid(True, which='major', axis='both', color=C_GRID, linestyle='-', linewidth=0.5)
@@ -2725,7 +2730,7 @@ def _render_item_charts(task):
             CELL = max(int(dpi), 200)
         _gx = max(2, int(CELL * 0.05))                 # 열 간격
         _gy = max(2, int(CELL * 0.06))                 # 행 간격
-        _lab_h = max(12, int(CELL * 0.22))             # 하단 wafer# 라벨 영역 높이
+        _lab_h = max(16, int(CELL * 0.30))             # 하단 wafer# 라벨 영역(큰 번호가 잘리지 않게)
         _lab_w = max(12, int(CELL * 0.16)) if _multi_pgm else 2   # 좌측 PGM(pt) 라벨 폭
         _cw = _lab_w + grid_cols * CELL + (grid_cols - 1) * _gx
         _ch = grid_rows * CELL + (grid_rows - 1) * _gy + _lab_h
@@ -2739,7 +2744,7 @@ def _render_item_charts(task):
                 except Exception:
                     continue
             return _PFont.load_default()
-        _fw = _pick_font(max(9, int(CELL * 0.16)))     # wafer# 폰트
+        _fw = _pick_font(max(12, int(CELL * 0.24)))    # wafer# 폰트 — PPT에서 잘 보이도록 확대
         _fp = _pick_font(max(8, int(CELL * 0.13)))     # PGM(pt) 폰트
         _lab_rgb = tuple(int(v * 255) for v in _to_rgb(C_NEUTRAL))
 
@@ -3867,7 +3872,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 for _r, _lbl in enumerate(_stat_rows):
                     _rr = 2 + _r
                     _bg = RGBColor(245, 247, 250) if _r % 2 == 0 else _WH
-                    _stat_style(table_shape.cell(_rr, 0), _lbl, _bg, _BK, False, 8, PP_ALIGN.LEFT)
+                    _stat_style(table_shape.cell(_rr, 0), _lbl, _bg, _BK, False, 8, PP_ALIGN.CENTER)
                     for _j, (_lot, _w) in enumerate(order_lw):
                         _vals = _slw.get((_lot, _w))
                         _txt = _vals[_r] if (_vals and _r < len(_vals)) else "-"
@@ -3895,7 +3900,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
                 for r_idx in range(1, 5):
                     _bg = RGBColor(245, 247, 250) if r_idx % 2 == 1 else _WH
                     _stat_style(table_shape.cell(r_idx, 0), _stat_rows[r_idx - 1] if r_idx - 1 < len(_stat_rows) else "",
-                                _bg, _BK, False, 7, PP_ALIGN.LEFT)
+                                _bg, _BK, False, 7, PP_ALIGN.CENTER)
 
             # ---- 3. 렌더링된 차트 이미지 삽입 (워커가 만든 jpg bytes) ----
             imgs = res['imgs']

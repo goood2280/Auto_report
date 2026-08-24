@@ -542,6 +542,7 @@ class Config:
         #     metrics_dict 기반 코드 우선순위로 이상 Trend chart를 첨부합니다.
         self.show_anomaly_trend_chart = True
         self.anomaly_trend_chart_top_n = 3   # 이상 Trend chart 최대 개수(이상+주의 합산, 통계 자동분석 상위와 동일)
+        self.anomaly_trend_mail_width_px = 460  # 메일 Anomaly Summary의 Trend 차트 표시 폭
         self.anomaly_deviation_sigma = 1.5   # 코드 이상판정 임계: 평균 이탈도(sigma) 초과 시 이상
 
         # ──────────────────────────────────────────────────────
@@ -660,9 +661,9 @@ class Config:
         self.anomaly_wfmap_max_count = 42        # (현재 spec-out 전량 표시 — 미사용, 호환용 유지)
         # 사내 메일에서 root lot / wafer / step 라벨이 충분히 읽히도록 셀과 폰트를 키운다.
         # 레이아웃은 Main.py에서 target/그 외 블록 각각 2행으로 고정한다.
-        self.anomaly_wfmap_map_size_px = 88
-        self.anomaly_wfmap_label_font_px = 22
-        self.anomaly_wfmap_label_height_px = 58
+        self.anomaly_wfmap_map_size_px = 76
+        self.anomaly_wfmap_label_font_px = 18
+        self.anomaly_wfmap_label_height_px = 48
         self.anomaly_wfmap_label_font_path = ''  # 비우면 OS별 한글 폰트 경로를 자동 탐색
         self.anomaly_wfmap_label_multiline = True  # lot_id / #wafer(step)을 2줄로 분리해 과도한 자간 축소 방지
 

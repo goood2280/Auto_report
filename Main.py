@@ -1898,6 +1898,8 @@ def main():
                                             return 'data:image/png;base64,' + base64.b64encode(raw).decode('utf-8')
 
                                     _spec_rows, _warn_items = [], []
+                                    _trend_mail_w = max(320, int(GLOBAL_CONFIG.get(
+                                        'anomaly_trend_mail_width_px', 460) or 460))
                                     for item in top_item_names:
                                         safe_item = re.sub(r'[\\/:*?"<>|]', '_', str(item))
                                         img_path = f"RUN/TEMP/{safe_item}.png"
@@ -1905,7 +1907,7 @@ def main():
                                             continue
                                         with open(img_path, "rb") as f:
                                             img_b64 = _img_datauri(f.read())   # 상한 이하 인라인 data URI(첨부 분리 방지)
-                                        _tw, _th = _img_px(img_path, 380)   # 포워딩용 고정 px(가로 380)
+                                        _tw, _th = _img_px(img_path, _trend_mail_w)
                                         _is_spec = metrics_dict.get(item, {}).get('spec_out_count', 0) > 0
                                         if not _is_spec:
                                             # 주의 항목은 블록 생성을 미룬다 — 이상 유무(=_spec_rows)에 따라
@@ -1933,9 +1935,9 @@ def main():
                                                     # 이어붙여 1장으로 만든다. 각 블록은 항상 2행을 유지한다.
                                                     from PIL import Image as _PILImg2, ImageDraw as _PILDraw2, ImageFont as _PILFont2
                                                     import io as _io2
-                                                    _map_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_map_size_px', 88) or 88)
-                                                    _label_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_label_font_px', 22) or 22)
-                                                    _lab_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_label_height_px', 58) or 58)
+                                                    _map_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_map_size_px', 76) or 76)
+                                                    _label_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_label_font_px', 18) or 18)
+                                                    _lab_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_label_height_px', 48) or 48)
                                                     _map_sz = max(40, _map_base) * _hs   # config 표시 px × supersample
                                                     _lab_h = max(_label_base + 2, _lab_base) * _hs
                                                     _pad = 3 * _hs       # 셀 간격
@@ -2053,9 +2055,12 @@ def main():
                                                             [_x_t - _bpad, _y0 - _bpad,
                                                              _x_t + _w_t + _bpad - 1, _y0 + _h_t + _bpad - 1],
                                                             outline=(0, 51, 204), width=_bw2)
-                                                    # 최종 크기 (supersample → 표시용 축소)
-                                                    _disp_w = _cw_total // _hs
-                                                    _disp_h = _ch_total // _hs
+                                                    # root lot/wafer 라벨을 포함한 WF MAP 전체 높이를 Trend와
+                                                    # 정확히 맞춘다. 종횡비를 유지해 맵/글씨가 찌그러지지 않는다.
+                                                    _natural_w = max(1, _cw_total // _hs)
+                                                    _natural_h = max(1, _ch_total // _hs)
+                                                    _disp_h = max(1, _th)
+                                                    _disp_w = max(1, round(_natural_w * _disp_h / _natural_h))
                                                     _cbuf = _io2.BytesIO()
                                                     _comp.save(_cbuf, format='PNG', optimize=True)
                                                     _wf_src = _img_datauri(_cbuf.getvalue())   # 상한 이하 인라인(첨부 분리 방지)
@@ -2091,7 +2096,7 @@ def main():
                                     # 없을 때만 이름을 붙여, 이상+주의가 섞인 제품에선 주의 차트에 항목명이
                                     # 표시되지 않는 문제가 있었다. → 이상 유무와 무관하게 항상 표기.)
                                     _warn_blocks = []
-                                    _warn_col_w = 380   # 주의 차트 폭(= _img_px(...,380)) — 그리드 고정폭용
+                                    _warn_col_w = _trend_mail_w
                                     for _wit, _wb64, _ww, _wh in _warn_items:
                                         _blk = _trend_block(_wit, False, _wb64, _ww, _wh)
                                         # 항목명 헤더는 좌측 정렬(전역 td{text-align:center} 상속 차단).
