@@ -1930,12 +1930,15 @@ def main():
                                                 if _wfmaps:
                                                     # PIL 합성: '해당 lot(target)' WF MAP은 왼쪽에 파란 테두리 블록으로
                                                     # 묶어 표시하고, 오른쪽에 나머지 lot(tkout_time 최신순) 그리드를
-                                                    # 이어붙여 1장으로 만든다. (각 블록 2행 기준 그리드)
+                                                    # 이어붙여 1장으로 만든다. 메일에서 합성 이미지가 지나치게
+                                                    # 넓어져 자동 축소되지 않도록 블록별 최대 열 수를 제한한다.
                                                     from PIL import Image as _PILImg2, ImageDraw as _PILDraw2, ImageFont as _PILFont2
                                                     import io as _io2
-                                                    _map_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_map_size_px', 72) or 72)
-                                                    _label_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_label_font_px', 12) or 12)
-                                                    _lab_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_label_height_px', 30) or 30)
+                                                    _map_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_map_size_px', 80) or 80)
+                                                    _label_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_label_font_px', 15) or 15)
+                                                    _lab_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_label_height_px', 40) or 40)
+                                                    _grid_max_cols = max(1, int(GLOBAL_CONFIG.get(
+                                                        'anomaly_wfmap_grid_max_cols', 4) or 4))
                                                     _map_sz = max(40, _map_base) * _hs   # config 표시 px × supersample
                                                     _lab_h = max(_label_base + 2, _lab_base) * _hs
                                                     _pad = 3 * _hs       # 셀 간격
@@ -1948,10 +1951,10 @@ def main():
                                                     _gap = 7 * _hs if (_wf_tgt and _wf_rest) else 0   # 블록 간 간격
 
                                                     def _grid_dims(_n):
-                                                        """2행 기준 그리드 (열수, 행수, 콘텐츠 w, 콘텐츠 h)."""
+                                                        """메일 폭을 넘지 않도록 최대 열 수가 제한된 그리드."""
                                                         if _n <= 0:
                                                             return 0, 0, 0, 0
-                                                        _nc = max(1, -(-_n // 2))
+                                                        _nc = min(_grid_max_cols, _n)
                                                         _nr = -(-_n // _nc)
                                                         return (_nc, _nr,
                                                                 (_nc - 1) * _cell_w + _map_sz,
@@ -2201,14 +2204,13 @@ def main():
                             _lg_series.append(
                                 f'SPC 같은 쪽 {int(_lg_cfg("anomaly_spc_same_side_points", 8) or 8)}점 / '
                                 '2-of-3 / 4-of-5')
-                        _lg_series_txt = ('<br>&nbsp;· <b>시계열 detector</b> '
-                                          f'[{_lg_profile}] : ' + ' · '.join(_lg_series)
+                        _lg_series_txt = ('<br>&nbsp;· <b>시계열 판정</b> : ' + ' · '.join(_lg_series)
                                           if _lg_series else '')
                         _chart_logic = (
                             '<div style="font-size:11px; color:#555555; background:#f7f8fa; '
                             'border:1px solid #e3e6ea; border-radius:4px; padding:6px 10px; '
                             'margin:4px 0 8px 0; line-height:1.7; text-align:left;">'
-                            f'<b style="color:#003366;">판정 로직 · YAML profile = {_lg_profile}</b><br>'
+                            '<b style="color:#003366;">판정 기준</b><br>'
                             f'&nbsp;· <span style="background:#d32f2f; color:#ffffff; font-weight:bold; '
                             f'padding:0 5px; border-radius:2px;">SPEC OUT</span> : '
                             f'{_lg_spec_txt}{_lg_agg_txt}<br>'

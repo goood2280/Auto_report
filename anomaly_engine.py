@@ -3024,6 +3024,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         worst_med_dev, worst_med_w, worst_med_val = 0.0, None, None
         worst_disp_ratio, worst_disp_w = 0.0, None
         worst_flier_w, worst_flier_cnt, worst_flier_dev = None, 0, 0.0
+        worst_flier_observed, worst_flier_limit = 0.0, 0.0
         _wstats = {}    # wafer별 {median, std, n} — 이상/주의 항목의 wafer 통계(요청: findings·AI·룰에 포함)
         _rws = []       # wafer별 robust 산포(1.4826×MAD) — rstd/rstd_asc 룰 원자용
         if tgt_it is not None:
@@ -3071,20 +3072,33 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                     _fcnt = int(_fmask.sum())
                     _fdev_abs = _raw_dev.abs()
 
-                    # 우선순위: spec 방향 flier의 최대 편차를 대표값으로
+                    # 우선순위는 기존대로 spec 방향 최대 편차를 사용한다. 표시 근거는 실제로
+                    # 임계를 넘긴 pt의 관측값/적용 기준을 별도 보존해 사람이 바로 비교하게 한다.
                     if _item_dir == 'UPPER':
-                        _spec_dir_dev = _raw_dev[_raw_dev > 0]  # 상한 방향만
+                        _spec_dir_dev = _raw_dev[_raw_dev > 0]
                         _fdev_max = float(_spec_dir_dev.max()) if len(_spec_dir_dev) > 0 else float(_fdev_abs.max())
                     elif _item_dir == 'LOWER':
-                        _spec_dir_dev = -_raw_dev[_raw_dev < 0]  # 하한 방향(절대값)
+                        _spec_dir_dev = -_raw_dev[_raw_dev < 0]
                         _fdev_max = float(_spec_dir_dev.max()) if len(_spec_dir_dev) > 0 else float(_fdev_abs.max())
                     else:
                         _fdev_max = float(_fdev_abs.max())
+
+                    _fired = _raw_dev[_fmask]
+                    _f_observed = float(_fired.abs().max()) if len(_fired) else 0.0
+                    _fired_peak = float(_fired.loc[_fired.abs().idxmax()]) if len(_fired) else 0.0
+                    if _item_dir == 'UPPER':
+                        _f_limit = flier_sigma if _fired_peak > 0 else flier_sigma * flier_offdir_relax
+                    elif _item_dir == 'LOWER':
+                        _f_limit = flier_sigma if _fired_peak < 0 else flier_sigma * flier_offdir_relax
+                    else:
+                        _f_limit = flier_sigma
 
                     if (_fcnt >= 1 and (flier_max_pts <= 0 or _fcnt <= flier_max_pts)
                             and _fdev_max > worst_flier_dev):
                         _wi = _waf_int(w)
                         worst_flier_dev = _fdev_max
+                        worst_flier_observed = _f_observed
+                        worst_flier_limit = float(_f_limit)
                         worst_flier_w = _wi if _wi is not None else w
                         worst_flier_cnt = _fcnt
             if worst_disp_ratio >= 1.3 and worst_disp_w is not None:
@@ -3099,9 +3113,9 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         #   에서 모두 제외한다. spec-out(CRITICAL) 판정은 agg 집계값 기준으로 그대로 유지된다.
         if it in _agg_item_set:
             worst_disp_ratio, worst_disp_w, disp_txt = 0.0, None, ''
-            worst_flier_w, worst_flier_cnt, worst_flier_dev, flier_txt = None, 0, 0.0, ''
+            worst_flier_w, worst_flier_cnt, worst_flier_dev, worst_flier_observed, worst_flier_limit, flier_txt = None, 0, 0.0, 0.0, 0.0, ''
         if 'flier' not in _enabled_detectors:
-            worst_flier_w, worst_flier_cnt, worst_flier_dev, flier_txt = None, 0, 0.0, ''
+            worst_flier_w, worst_flier_cnt, worst_flier_dev, worst_flier_observed, worst_flier_limit, flier_txt = None, 0, 0.0, 0.0, 0.0, ''
         if 'dispersion' not in _enabled_detectors:
             worst_disp_ratio, worst_disp_w, disp_txt = 0.0, None, ''
 
@@ -3369,11 +3383,13 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 _b_side = f'spec 상한({float(hi):.4g}) 초과'
             else:
                 _b_side = 'spec 이탈'
+            _b_count = f"이탈 {n_out}pt" + (f" / {so_n_wafers}개 wafer" if so_n_wafers > 0 else "")
             if it in _agg_item_set:
-                _extra['basis'] = (f"profile={_profile} · detector=spec_out · "
-                                   f"{_agg_label_map.get(it) or '집계'} 집계값이 {_b_side}")
+                _extra['basis'] = (f"{_agg_label_map.get(it) or '집계'} 집계값이 {_b_side}"
+                                   f" · {_b_count}")
             else:
-                _extra['basis'] = f"profile={_profile} · detector=spec_out · 측정값이 {_b_side}"
+                _extra['basis'] = (f"측정값이 {_b_side}"
+                                   f" · {_b_count}")
             if is_pchk:
                 _extra.update({
                     'is_pchk': True,
@@ -3408,11 +3424,11 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
             findings.append(_finding(
                 "WARNING", "FLIER", it,
                 f"Flier : {_disp(it)} - #{worst_flier_w} {worst_flier_cnt}pt "
-                f"(최대 {worst_flier_dev:.1f}σ)", "",
+                f"(최대 {worst_flier_observed:.1f}σ)", "",
                 display_name=_disp(it), cat2=cat2_map.get(it, ''),
-                basis=(f"profile={_profile} · detector=flier · spec 이내지만 "
-                       f"wafer median 대비 보통 wafer 산포의 "
-                       f"{flier_sigma:g}σ 초과 pt {worst_flier_cnt}개"),
+                basis=(f"spec 이내 · 관측 최대 이탈 {worst_flier_observed:.1f}σ > "
+                       f"기준 {worst_flier_limit:g}σ "
+                       f"(wafer median 대비 보통 wafer 산포), 초과 {worst_flier_cnt}pt"),
                 wafer_stats=dict(_wstats), rep_stddev=_rep_std, rep_median=_rep_med))
             continue
 
@@ -3423,8 +3439,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
                 "WARNING", "DISPERSION", it,
                 f"산포 확대 : {_disp(it)} - #{worst_disp_w} 산포 {worst_disp_ratio:.1f}배", "",
                 display_name=_disp(it), cat2=cat2_map.get(it, ''),
-                basis=(f"profile={_profile} · detector=dispersion · 관측 {worst_disp_ratio:.1f}배 "
-                       f"> 기준 {disp_ratio:g}배"),
+                basis=(f"관측 wafer 내부 산포 {worst_disp_ratio:.1f}배 > "
+                       f"기준 {disp_ratio:g}배 (보통 wafer 내부 산포 대비)"),
                 wafer_stats=dict(_wstats), rep_stddev=_rep_std, rep_median=_rep_med))
             continue
 
@@ -3433,8 +3449,8 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
         if _series_signals:
             _primary = _series_signals[0]
             _other = [s.get('title', s.get('type', '')) for s in _series_signals[1:]]
-            _trace = (f"profile={_profile} · detector={str(_primary.get('type', '')).lower()} · "
-                      f"기준: {_primary.get('criterion', '')} · 결과: {_primary.get('basis', '')}")
+            _trace = (f"관측: {_primary.get('basis', '')} · "
+                      f"판정 기준: {_primary.get('criterion', '')}")
             _detail = _trace
             if _other:
                 _detail += '. 동시 신호: ' + ', '.join(str(x) for x in _other if x)
