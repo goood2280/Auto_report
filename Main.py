@@ -1932,7 +1932,8 @@ def main():
                                                 if _wfmaps:
                                                     # PIL 합성: '해당 lot(target)' WF MAP은 왼쪽에 파란 테두리 블록으로
                                                     # 묶어 표시하고, 오른쪽에 나머지 lot(tkout_time 최신순) 그리드를
-                                                    # 이어붙여 1장으로 만든다. 각 블록은 항상 2행을 유지한다.
+                                                    # 이어붙여 1장으로 만든다. 표시 크기 안정화를 위해 합성 캔버스는
+                                                    # 항상 2행 높이를 유지하되, 파란 테두리는 실제 target 셀만 감싼다.
                                                     from PIL import Image as _PILImg2, ImageDraw as _PILDraw2, ImageFont as _PILFont2
                                                     import io as _io2
                                                     _map_base = int(GLOBAL_CONFIG.get('anomaly_wfmap_map_size_px', 76) or 76)
@@ -1964,6 +1965,11 @@ def main():
 
                                                     _nc_t, _nr_t, _w_t, _h_t = _grid_dims(len(_wf_tgt))
                                                     _nc_r, _nr_r, _w_r, _h_r = _grid_dims(len(_wf_rest))
+                                                    # 캔버스용 _h_t는 빈 둘째 행까지 포함하지만 target이 1개면
+                                                    # 파란 테두리까지 2행 높이로 늘리지 않는다.
+                                                    _nr_t_used = (-(-len(_wf_tgt) // _nc_t)) if _nc_t else 0
+                                                    _h_t_box = (((_nr_t_used - 1) * _cell_h + _map_sz + _lab_h)
+                                                                if _nr_t_used else 0)
                                                     # 두 블록의 맵 상단은 같은 높이로 정렬(테두리 여백은 target 블록만)
                                                     _y0 = _pad + (_bpad if _wf_tgt else 0)
                                                     _x_t = _pad + (_bpad if _wf_tgt else 0)
@@ -2056,7 +2062,8 @@ def main():
                                                     if _wf_tgt:
                                                         _cdraw.rectangle(
                                                             [_x_t - _bpad, _y0 - _bpad,
-                                                             _x_t + _w_t + _bpad - 1, _y0 + _h_t + _bpad - 1],
+                                                             _x_t + _w_t + _bpad - 1,
+                                                             _y0 + _h_t_box + _bpad - 1],
                                                             outline=(0, 51, 204), width=_bw2)
                                                     # root lot/wafer 라벨을 포함한 WF MAP 전체 높이를 Trend와
                                                     # 정확히 맞춘다. 종횡비를 유지해 맵/글씨가 찌그러지지 않는다.
