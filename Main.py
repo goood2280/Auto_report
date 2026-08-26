@@ -1950,11 +1950,14 @@ def main():
                                                     _gap = 7 * _hs if (_wf_tgt and _wf_rest) else 0   # 블록 간 간격
 
                                                     def _grid_dims(_n):
-                                                        """기존 메일 레이아웃과 동일한 2행 기준 그리드."""
+                                                        """WF MAP 수와 무관하게 높이가 고정된 2행 그리드."""
                                                         if _n <= 0:
                                                             return 0, 0, 0, 0
                                                         _nc = max(1, -(-_n // 2))
-                                                        _nr = -(-_n // _nc)
+                                                        # 1개뿐이어도 빈 두 번째 행을 캔버스에 포함한다.
+                                                        # 합성 이미지는 아래에서 Trend 높이에 맞춰 표시되므로,
+                                                        # 실제 높이가 1행이면 단일 WF MAP만 2배 가까이 확대된다.
+                                                        _nr = 2
                                                         return (_nc, _nr,
                                                                 (_nc - 1) * _cell_w + _map_sz,
                                                                 (_nr - 1) * _cell_h + _map_sz + _lab_h)
