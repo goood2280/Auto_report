@@ -3478,7 +3478,7 @@ def analyze_commonality(merged_df, target_lot_id, metrics_dict, spec_data,
     # ── 판단 근거 중간 데이터를 RUN/TEMP에 저장 (csv + json) ──
     try:
         import os, json
-        _outdir = os.path.join('RUN', 'TEMP')
+        _outdir = os.getenv('AUTO_REPORT_TEMP_DIR') or os.path.join('RUN', 'TEMP')
         os.makedirs(_outdir, exist_ok=True)
         _safe_lot = str(report_key or target_lot_id).replace('/', '_').replace('\\', '_')
         _base = os.path.join(_outdir, f"anomaly_basis_{_safe_lot}")

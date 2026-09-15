@@ -1,11 +1,64 @@
 # ET Auto Report System
 
+## 처음 읽는 분: 그림으로 전체 흐름 보기
+
+**[가이드 열기 — docs/guide/index.html](docs/guide/index.html)** · [Markdown / Mermaid 가이드](docs/guide/auto-report-architecture.md)
+
+`setup.py`를 실행하면 가이드도 함께 설치됩니다. 설치 폴더의 `docs/guide/index.html`을 브라우저로 열면 인터넷 연결 없이 그림과 설명을 볼 수 있습니다. 위 링크는 설치 폴더 기준입니다. GitHub에서는 아래 Mermaid 전체 흐름도를 읽고, 상세 가이드는 `setup.py`로 추출하세요.
+
+```mermaid
+flowchart LR
+    ET["ET · WIP 원천"] -->|AUTO 순회 시 적재| DB[("공유 측정 DB")]
+    DB --> A["Auto Report<br/>완료 Lot · Step 분석"]
+    DB --> D["Daily Trend<br/>전체 선택 항목 추세"]
+    DB --> M["ML Insight<br/>유의한 변화 선별"]
+    A --> R["분석 HTML + PPT"]
+    D --> R
+    M -->|탐지 시| R
+    OPS[("운영 기록<br/>실행 · 생성 · 저장 · 메일")] --> W["Watchdog<br/>미발행 · 실패 · 지연 확인"]
+    W --> O["운영 HTML + CSV"]
+```
+
+| 읽는 순서 | 이해할 내용 |
+|---|---|
+| 1. 전체 흐름 | Auto Report · Daily Trend · ML Insight · Watchdog의 역할 |
+| 2. 실행 구조 | Scheduler와 별도 Main 프로세스, 공유 데이터·운영 기록 |
+| 3. 리포트 생성 | 측정 조회 → 대상 선택 → 분석 → 차트 → 저장 → 메일 |
+| 4. 추세·ML | 전체 항목 검토와 유의한 변화 선별의 차이 |
+| 5. 발송·복구 | 성공·재시도 가능·응답 불확실 상태의 처리 |
+
+가이드는 2026-09-13 코드 기준입니다. 현재 Watchdog은 운영 **HTML/CSV**, Daily Trend와 ML Insight는 분석 **HTML/PPT**를 제공합니다. 아래에 남아 있는 이전 Watchdog 분석/PPT 설명보다 가이드의 역할 구분을 우선 참고하세요.
+
+### Scheduler 하나로 시작하기
+
+설치 폴더에서 `python Scheduler.py`를 실행하면 제품 순회와 **활성화 조건을 충족한 독립 서비스**를 함께 시작합니다.
+
+| 경로 | 자동 기동 조건 | 기본값 |
+|---|---|---|
+| Auto Report | Scheduler의 제품 그룹 설정 | 설정된 제품 순회 |
+| Watchdog | `My_config.py`의 `watchdog.enabled=True` | 감시 활성, 수신처 없음 → 메일 미발송 |
+| Daily Trend | `daily_trend.enabled=True` + `products` + `recipients` | 비활성 |
+| ML Insight | `mlmode.enabled=True` + `products` + `recipients` | 비활성 |
+
+Watchdog의 기본 일일 보고 시각은 09:00, Daily Trend는 09:30, ML Insight는 10:00이며 운영 서버의 로컬 시각을 사용합니다. 수신처는 서비스별로 지정합니다. 기본 Auto Report 메일은 제품 설정의 `use_email_send`도 확인하세요. `--once` / `--drain`은 독립 서비스를 자동 기동하지 않습니다.
+
+설정 변경 후 Scheduler를 다시 시작하세요. 이미 실행 중인 독립 타이머는 설정을 주기적으로 읽으며, Scheduler 종료와 별개로 계속 실행될 수 있습니다. 서버 자체가 꺼지면 Watchdog도 동작할 수 없습니다.
+
+### ML Insight 차트 읽기
+
+ML은 메일에서 항목별 전체 폭으로, PPT에서는 차트 한 개를 한 슬라이드에 표시합니다. Trend와 공간 상세는 각각의 비율을 유지하며 범례는 차트 밖에 표시합니다.
+
+- **Trend**: 색은 제품/Split, 검정 테두리는 이전 성공 발행 이후 신규·변경 관측(첫 발행은 당일 측정)입니다. 검정선은 전체 그룹의 **일별 중앙값을 3일 이동평균한 참고선**입니다. 항목별 Y축 범위는 다를 수 있습니다.
+- **공간 상세**: 왼쪽은 신규 관측의 위치별 중앙값(모든 Split 합성), 가운데는 신규와 과거의 차이, 오른쪽은 Split별 반경 중앙값과 3차 근사선입니다. 가운데의 빨강/파랑은 증가/감소이며 Spec 불량 표시가 아닙니다.
+- **탐지 근거**: q는 여러 검정을 보정한 유의확률이며 불량률이 아닙니다. 탐지 여부는 q와 효과 크기 조건을 함께 사용합니다. 표본·좌표·공정시간 누락은 본문의 확인 사항과 첨부 목록을 함께 확인하세요.
+
 > 반도체 **DC(ET) 측정 결과 자동 분석 → 자동 리포트 → 불량 해석**까지 한 번에 이어지는 시스템
 > ET(Electrical Test) 측정 데이터 → 통계 자동 해석 → 불량(Anomaly)·원인 해석 → PPT/HTML 리포트 → 메일 발송.
 
 ---
 
 ## 📋 목차
+- [운영 안정성·속도·일일 Watchdog](#운영-안정성속도일일-watchdog-2026-09-12)
 - [개요](#개요)
 - [주요 개선 사항 (이전 대비)](#주요-개선-사항-이전-대비)
 - [저장소 구성 (setup.py 번들)](#저장소-구성-setuppy-번들)
@@ -18,9 +71,7 @@
   - [지표(metrics) 계산식](#지표metrics-계산식)
   - [신호등 3색 등급](#신호등-3색-등급)
   - [Anomaly Trend Chart & spec-out WF MAP](#anomaly-trend-chart--spec-out-wf-map)
-- [AI 다단계 해석 (선택)](#ai-다단계-해석-선택)
-  - [ANOMALY_KNOWLEDGE.md — 페르소나·답변 스타일](#anomaly_knowledgemd--페르소나답변-스타일)
-  - [LLM 연결 / 토글](#llm-연결--토글)
+- [LLM 연결 제거](#llm-연결-제거)
 - [설정 가이드 (My_config.py)](#설정-가이드-my_configpy)
 - [리포트 구성 요소](#리포트-구성-요소)
   - [Score Board / WF MAP](#score-board--wf-map)
@@ -36,6 +87,96 @@
 
 ---
 
+## 운영 안정성·속도·일일 Watchdog (2026-09-12)
+
+Scheduler는 Main의 종료 코드와 요청별 결과 JSON을 함께 확인합니다. 측정 완료와 리포트
+생성·저장·메일 발송은 별도 상태로 기록하며, `RUN/OPS/operations.sqlite`에 prime key별
+측정 이력, 발행 시도, 단계별 소요 시간, 미발행 사유, 수신처별 발송 결과를 보관합니다.
+
+### Watchdog 설정과 실행
+
+기존 `reformatter/scheduler.yaml`에 다음 블록을 추가합니다. 없는 키는 코드 기본값을 사용합니다.
+수신처는 자동 추정하지 않습니다. `recipients: []`이면 발송하지 않고 미리보기만 저장합니다.
+
+```yaml
+watchdog:
+  enabled: true
+  daily_time: '09:00'          # 한국시간으로 설정된 운영 서버의 로컬 시간
+  recipients: []              # ['user@example.com'] 또는 ['정확한_메일링_시트명']
+  mail_vehicle: ''            # 메일 API/발신자 설정 제품; 빈 값이면 첫 순회 제품
+  poll_sec: 30
+  stale_sec: 180              # loop heartbeat 무응답 경고
+  progress_stale_sec: 1800    # Main 단계 장기 체류 → 처리 지연 표시
+  immediate_alerts: false    # true면 상태 이상/복구 때 추가 알림
+  analysis_days: 14
+  active_days: 3
+  min_lots: 3
+  low_score_pct: 95
+  spec_out_pct: 1
+  shift_sigma: 2
+  shift_min_spec_frac: 0.02
+  trend_correlation: 0.7
+```
+
+```bash
+python Scheduler.py                       # 상시 Scheduler + 독립 watchdog 자동 기동
+python Scheduler.py --watchdog            # watchdog만 독립 실행
+python Scheduler.py --watchdog-preview    # 실제 메일 없이 HTML/PPT 생성
+python Scheduler.py --watchdog-once       # 1회 점검; 일일 발송 조건이면 발송
+```
+
+Watchdog은 Scheduler의 자식 작업 처리와 분리된 프로세스입니다. Scheduler 종료 후에도
+감시를 계속하며, 마지막 응답·최초 감지·명시적 종료 시각을 구분합니다. 정확히 확인되지 않은
+중단 시각을 단정하지 않습니다. Main이 오래 처리 중이면 Scheduler 정지와 별도로 표시합니다.
+동일 날짜의 일일 발송 성공은 영속 상태로 중복 방지하며, 주소·시간·임계값은 매 점검마다 다시 읽습니다.
+`--once`/`--drain`은 독립 watchdog을 자동 기동하지 않습니다.
+서버 자체 종료나 네트워크 단절 동안에는 같은 서버의 watchdog도 메일을 보낼 수 없습니다.
+서버 재부팅 후 자동 시작은 운영 서버의 서비스/작업 스케줄러에 위 명령을 등록해야 합니다.
+
+### 일일 보고 내용
+
+- 정상 동작/정지 의심/명시적 종료/장기 처리 지연 및 감시 구간의 상태 변화 시각.
+- 신규·갱신 측정 제품/lot/prime key와 측정 시각.
+- prime key별 생성·저장 확인, 메일 성공/실패/응답 불확실/비활성, 시도 수, 소요 시간, 미발행 사유.
+- 조회·피벗/ADDP·좌표 병합·분석·차트·저장·메일 단계별 시간 및 실행 실패.
+- 제품별 반복 Spec out, 지속 저점수, 분포 중심 변화 표와 첨부 PPT 페이지 번호.
+
+비교는 제품·Step·프로그램·온도·FULL/13pt·Spec/집계 규칙이 같은 집단 안에서만 수행합니다.
+재측정은 prime key별 최신 측정을 사용하여 동일 lot 반복 실행이 반복 이상으로 집계되지 않습니다.
+최근 기본 3개 lot의 연속 Spec out ≥ 1%, 연속 점수 < 95%, 또는 최소 6개 lot의
+중심 변화 ≥ 2σ와 지속 방향/상관 조건을 사용합니다. 양측 Spec이면 Spec 폭 2%의 변화량
+게이트도 적용합니다. 점수는 wafer별 Spec pass 비율 평균이며 집계 항목은 설정된 집계값 기준입니다.
+표본 부족·Spec 없음·관측 이력 없음은 정상 판정과 구분합니다.
+
+PPT는 해당 항목의 lot 중앙값 Trend, 전체 값 분포와 Spec 경계, Spec out 비율을 표시합니다.
+Spec 밖 히스토그램 막대는 진한 붉은색입니다. 분포 그림은 24-bin 요약을 재구성한 근사 그림이고,
+Spec out 수치는 원자료(집계 항목은 집계값)에서 계산합니다. 첨부 PPT는 10MB 미만으로 압축합니다.
+관측 자료는 리포팅 데이터 처리 시 갱신되며, 새 발행 대상이 없는 사이클은 기존 자료를 사용합니다.
+첫 설치 때 운영 성공 이력은 소급 추정하지 않으며, 기존 측정 로그의 첫 관측과 실제 신규 측정은
+표의 측정 시각으로 구분할 수 있습니다.
+
+### 안정성 및 재시도
+
+- CSV/Parquet/HTML/PPT는 임시 파일 완성 후 원자적으로 교체합니다. ET 로그는 원시 파티션 저장 후 확정합니다.
+- 실행별 임시 폴더와 제품별 OS 잠금으로 중복 실행의 파일 충돌을 막습니다.
+- 원본 발행 파일을 `RUN/OPS/artifacts`에 보관하여 메일 재시도에 재사용합니다.
+- 메일 연결/응답 timeout 기본 10/90초. 연결 전 timeout만 안전한 재시도 후보입니다.
+  응답 유실, 연결 단절, 5xx는 발송 여부 불확실로 기록하고 자동 재전송하지 않습니다.
+- 자동 발행 실패는 운영 이력에 확인된 대상만 다음 사이클에 재시도합니다(기본 총 3회).
+  이미 성공한 수신처는 재발송하지 않습니다. 수동 트리거는 기존 Scheduler 재시도 설정을 따릅니다.
+- 쿼리는 오류 최대 3회 후 실패 처리합니다. timeout된 스레드를 남겨둔 채 겹치는 쿼리를 계속 시작하지 않습니다.
+- `RUN/OPS`에는 재시도 근거가 있으므로 운영 중 임의 삭제하지 않습니다. 발송 여부 불확실은 서버 수신 이력 확인이 필요합니다.
+
+### 속도 개선 및 설정
+
+- ET 조회는 최초/설정 변경/주기적 전체 갱신 외에는 최근 변경 기간만 조회합니다.
+  `et_refresh_days=2`, `et_full_refresh_days=7`이 기본이며 지연 유입 특성에 맞게 조정합니다.
+- 일별 Parquet에서 필요한 REAL 입력과 메타 컬럼만 조회합니다. 날짜 파티션의 크기/수정시각이 바뀌면 캐시를 무효화합니다.
+- ADDP는 전체 피벗 결과를 캐시하여 행 전체를 참조하는 계산 의미를 유지합니다.
+- 비교군 Trend 통계와 항목별 렌더 결과를 캐시합니다. 데이터·Spec·대상 lot·렌더 설정·코드 변경을 키에 반영합니다.
+- 캐시는 기본 14일/2GB 상한으로 정리합니다. 운영/발송 이력 및 원본 산출물은 캐시 정리 대상이 아닙니다.
+- 실제 개선 폭은 일일 보고의 단계별 시간으로 확인합니다. 샘플 테스트 시간은 운영 환경 성능 보장이 아닙니다.
+
 ## 개요
 
 Python 기반 반도체 **DC(ET) 측정 데이터 자동 분석 · 리포트 생성 · 불량 해석** 시스템입니다.
@@ -49,7 +190,7 @@ DC 측정 결과를 자동으로 통계 분석하고, 리포트를 자동 생성
 - **PPT / HTML 리포트** 자동 생성 및 메일 발송
 
 설계 목표 두 가지:
-1. **AI-optional** — GPT가 있으면 서술이 풍부해지지만, **없거나 실패해도 코드만으로 동일한 통계 분석**이 나온다.
+1. **코드 기반 분석** — 외부 LLM 연결 없이 통계 분석과 차트를 생성한다.
 2. **준실시간** — 한 lot 리포트를 끝까지 처리하는 데 목표 20분 이내(현 데모 약 1분).
 
 ---
@@ -66,7 +207,7 @@ DC 측정 결과를 자동으로 통계 분석하고, 리포트를 자동 생성
 ### 🔬 이상(Anomaly) 분석 정밀도
 - **WF MAP을 이상 분석에 연동** — ① [0] Anomaly Trend Chart의 이상 항목 **우측에 spec-out WF MAP**(통과=회색/이탈=빨강, 타깃 wafer 전량 우선, **모든 step_id**의 spec-out wafer를 표시하고 라벨에 step 매칭값 2자리 `(XX)` 표기) ② Score Board에 **wafer별 WF MAP 행**을 붙여 공간 패턴(엣지/센터/재발)을 바로 확인.
 - **통계 자동 분석을 'wafer 단위'로 재설계** — 예전에는 *lot median vs 제품 chip median*으로 봤지만, 이제 **target lot의 각 wafer**를 **제품 전체의 'wafer별' 기준**과 비교합니다. spec-out은 **wafer별 이탈 비율**로 순위를 매기고, 주의(median/산포)는 **제품 wafer 분포 대비 wafer 이탈**로 판정 → lot 전체 평균에 묻히던 국소 이상을 잡아냅니다. → [analyze_commonality](#analyze_commonality--코드-단독-동작).
-- **PCHK를 일반 Index로 통합** — PCHK도 spec-out이면 동일하게 **이상(CRITICAL)**. '측정이상 추정'은 코드가 겹침 신호만 basis에 남기고 **AI가 판정**(억지 규칙 제거).
+- **PCHK를 일반 Index로 통합** — PCHK도 spec-out이면 동일하게 **이상(CRITICAL)**. '측정이상 추정'은 코드가 겹침 신호만 basis에 남기고 basis에만 보관합니다(자동 원인 단정 없음).
 - **주의(Flier) 방향 감시** — spec 이내지만 trend에서 튄 pt를 잡되, **`REPORT DIRECTION`에 맞는 spec 방향**은 `anomaly_flier_sigma`(정상 감도), **반대 방향**은 `anomaly_flier_sigma × anomaly_flier_offdir_relax`(기본 2.0배 완화 = 이상이 매우 클 때만) 초과 시에만 Flier로 봅니다. `BOTH`는 방향 개념이 없어 양방향 동일 감도(+ 산포 병행). 판정은 항목 자신의 '보통 wafer 산포' 기준 **비율(σ)** 이라 값 scale(1e-15~수백만)과 무관합니다. → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
 - **통계 분석 제외 항목 설정** — `anomaly_exclude_items`(무조건 완전 제외) / `anomaly_exclude_unless_rule`(**RULE에 걸릴 때만 부활하는 조건부 제외**)로 파생/마진 컬럼·tight-spec 항목 등을 **우선순위에서 제외**해 노이즈를 줄입니다(와일드카드 지원). → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
 - **판정 규칙 = `[RULE]` 자연어 한 줄** — 엔지니어는 `ANOMALY_KNOWLEDGE.md`의 `NL_RULES` 마커 사이에 **`[RULE] ...` 자연어 한 줄**씩만 적습니다. 발행 시 코드가 이를 **JSON 조건식으로 컴파일**(AI 우선, 미연결 시 키워드 fallback, 원문 sha256 캐시로 결정론 유지)해 **모든 규칙을 전부 점검하고, 조건을 만족하는 규칙마다 각각 코멘트**를 남깁니다(다중 매칭 전부 표기). **엔지니어의 룰 관리 지점 = md 파일 하나**. 매 발행마다 전 규칙 체크 결과를 터미널 `[RULE CHECK]` + `RUN/AI/anomaly_rule_check_*.txt/.json`으로 기록. → [지식 규칙 엔진](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용).
@@ -109,8 +250,7 @@ python setup.py            # 현재 폴더에 6개 파일 추출
 ### 사내 이식 시 (중요)
 
 - **코어 코드는 `Main.py` / `My_config.py` / `My_Function.py` / `anomaly_engine.py` 4개 + `ANOMALY_KNOWLEDGE.md`** 뿐입니다.
-- `bigdataquery`(DB 쿼리), `gpt_oss_client`(LLM 클라이언트)는 **로컬 테스트용 mock**이며, **사내 환경에는 실제 모듈이 이미 존재**하므로 번들에 포함하지 않습니다.
-  - `Main.py`는 `gpt_oss_client`를 `try/except`로 감싸 없으면 AI 해석만 비활성화하고 정상 동작합니다.
+- `bigdataquery`(DB 쿼리)는 사내 환경 모듈로 번들에 포함하지 않습니다. LLM 클라이언트는 사용하지 않습니다.
   - `bigdataquery`는 `Main.py`/`My_Function.py`가 직접 import 하므로, 사내든 로컬이든 **해당 모듈이 경로에 있어야** 합니다.
 - 과거 `templates/report.html`로 분리돼 있던 HTML 템플릿은 추가 파일이 따라가지 않도록 `My_config.py`의 `_REPORT_HTML_TEMPLATE` 상수로 **내장**했습니다.
 
@@ -147,8 +287,8 @@ python Main.py --rule-digest           # 규칙 제안 다이제스트 미리보
 ### 1) 요구사항
 
 - **Python 3.9+**
-- **패키지**: `pandas`, `numpy`, `duckdb`, `pyarrow`, `python-pptx`, `matplotlib`, `openpyxl`, `requests`, `pyyaml`, `openai`(AI 사용 시), `Pillow`
-- **사내 전용 모듈**(번들 미포함, 경로에 있어야 함): `bigdataquery`(ET/inline/WIP 쿼리). `gpt_oss_client`는 로컬 mock이며 없으면 AI만 비활성.
+- **패키지**: `pandas`, `numpy`, `duckdb`, `pyarrow`, `python-pptx`, `matplotlib`, `openpyxl`, `requests`, `pyyaml`, `Pillow`
+- **사내 전용 모듈**(번들 미포함, 경로에 있어야 함): `bigdataquery`(ET/inline/WIP 쿼리).
 - 설명 슬라이드 삽입은 이제 **python-pptx로 직접 복사** — PowerPoint(win32com) 설치 불필요.
 
 ### 2) 설치 (소스 추출)
@@ -164,7 +304,7 @@ python setup.py              # 현재 폴더에 전체 소스 추출 (기존 파
 |---|---|---|
 | `reformatter/config.yaml` | ✅ | vehicle별 설정(쿼리 파라미터·기간·토글 등) |
 | `reformatter/<vehicle>_reformatter.csv` | ✅ | 항목 정의(REAL/ADDP), SPEC·`REPORT DIRECTION`·`SCALE FACTOR`·`CAT1/CAT2`·`PPT_ONLY` 등 |
-| `.env` | AI/메일 시 | `GPT_API_BASE_URL`, `GPT_CREDENTIAL_KEY`(AI), 메일/S3 자격 등 |
+| `.env` | 메일/S3 사용 시 | 메일/S3 자격 등 (GPT 설정은 미사용) |
 | `HOL_Auto_Report_Description.pptx` | 선택 | CAT2별 설명 간지. 있으면 해당 슬라이드를 리포트에 직접 복사 삽입(없어도 진행) |
 | 좌표 xlsx(zone define) | 선택 | WF MAP 실좌표(flat-zone) 보정용 |
 | `ANOMALY_KNOWLEDGE.md` | 선택 | **판정 규칙(`[RULE]`)·PCHK 매핑** + AI 페르소나·답변 스타일 |
@@ -173,7 +313,7 @@ python setup.py              # 현재 폴더에 전체 소스 추출 (기존 파
 
 ### 4) 설정 (My_config.py)
 
-- **AI 토글**: `use_gpt_summary`(마스터), `use_gpt_multistep`(다단계), `ai_stage_mode`(`'multi'`/`'single'`).
+- **LLM 제거**: 기존 AI 토글은 호환성용이며 Main 발행에서 활성화할 수 없습니다.
 - **규칙 컴파일**: `anomaly_nl_autocompile`(True — NL_RULES 자연어 규칙을 발행 시 자동 변환/적용).
 - **분석 민감도**: `anomaly_lot_dispersion_ratio`(↑=덜 민감), 플라이어 `anomaly_flier_sigma`/`anomaly_flier_max_pts`/`anomaly_flier_offdir_relax`(반대 방향 완화 배수), 산포 절대량 게이트 `anomaly_disp_min_spec_frac`, 지식 규칙용 `anomaly_median_low_sigma`. **통계 우선순위 제외**: `anomaly_exclude_items`(완전 제외) / `anomaly_exclude_unless_rule`(RULE 매칭 시 부활, 와일드카드). → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
 - **WF MAP**: `wfmap_exclude_keywords`(예: `['PCHK']`).
@@ -190,13 +330,52 @@ python Main.py _TRIGGER_<vehicle>_<lot>_<step> # 특정 LOT 즉시 강제 발행
 #              예) _TRIGGER_vehicle_A_T6677.1_test
 ```
 
-### 6) AI 사용 설정 (선택)
+### 6) 수동 트리거 모드 (2026-09-11)
 
-1. `.env`에 `GPT_API_BASE_URL`, `GPT_CREDENTIAL_KEY` 설정.
-2. `My_config.use_gpt_summary=True`, `use_gpt_multistep=True`.
-3. 사내 환경은 `Main._build_llm_fn`이 자동으로 `gpt_client`(gpt-oss-120b) 사용. 로컬은 `gpt_oss_client.mock_llm`.
-4. `.env`나 연결이 없으면 **AI만 비활성**되고 코드 통계 분석으로 정상 리포트 생성.
-   (자세한 호출 흐름은 [AI 다단계 해석](#ai-다단계-해석-선택) 참조.)
+기존 TRIGGER를 유지하며 다음 모드를 추가합니다. 맨 앞 `_`는 생략해도 됩니다.
+`vehicle`은 `reformatter/<vehicle>_reformatter.csv` 파일명과 일치해야 합니다.
+`lot` / `step`에 `_`는 사용할 수 없습니다. vehicle과 메일 주소·그룹명의 `_`는 지원합니다.
+명령 인수는 아래처럼 따옴표로 감싸서 실행하세요.
+
+```bash
+python Main.py "_TRIGGER_vehicle_A_T6677.1_test"
+python Main.py "_TRIGGER_FORCE_user@example.com_vehicle_A_T6677.1_test"
+python Main.py "_TRIGGER_NORMAL_vehicle_A_T6677.1_test"
+python Main.py "_TRIGGER_ALL_user@example.com_vehicle_A_T6677.1_test"
+# mail에 메일링 엑셀의 정확한 시트명도 사용 가능
+python Main.py "_TRIGGER_ALL_POWER_USER_vehicle_A_T6677.1_test"
+```
+
+| 모드 | 데이터 / 리포트 | 수신처 |
+|---|---|---|
+| TRIGGER | 기존 조회 기간의 전체 shot, 일반 리포트 | 기존 config / Scheduler 환경변수 |
+| TRIGGER_FORCE_{mail} | 일반 리포트. 대상 lot+step의 prime key 진행날짜가 조회 기간보다 오래되면 그 날짜 **2일 전**까지 조회 시작일을 확장 | 지정 mail만 |
+| TRIGGER_NORMAL | Extractor 좌표 파일 `Zone_Define`의 **13pt 열이 O / y / true**인 shot만 포함한 일반 리포트 | 기존 config / Scheduler 환경변수 |
+| TRIGGER_ALL_{mail} | **CAT2(category)가 비어 있지 않은 모든 항목**의 Trend만, category별 HTML/PPTX | 지정 mail만 |
+
+모든 트리거는 쿼리를 재실행하지 않고 현재 daily DB를 사용합니다. 실제 메일 발송은
+`use_email_send=True`여야 합니다. `{mail}`은 실제 이메일 주소(여러 주소는 콤마 구분) 또는
+메일링 엑셀의 정확한 시트명입니다. 없는 시트는 오류로 처리하며 기본 그룹으로 대체하지 않습니다.
+Scheduler JSON 규약은 기존 TRIGGER 그대로 유지됩니다. 추가 모드는 위 Main CLI로 실행합니다.
+
+- **FORCE**: `Final_et_log`의 대상 lot+step 진행날짜를 사용하며, 여러 prime key이면 가장 오래된
+  날짜를 포함합니다. 확장 전/후 시작일과 일수를 로그에 남깁니다. 이미 기간 내이면 그대로 유지합니다.
+  날짜가 없으면 오류로 중단하며, 보관되지 않은 원시 DB를 복원하거나 다시 쿼리하지 않습니다.
+- **NORMAL**: 대소문자와 앞뒤 공백을 무시합니다. `1`, `yes`, 빈 값은 포함하지 않습니다.
+  MASK + CHIP_X_POS + CHIP_Y_POS + FLAT_ZONE_POS로 shot을 매칭하여 대상·비교 trend 모두 필터합니다.
+  Point 집계 전에 적용합니다. 13pt 열이 없으면 오류로 중단합니다.
+- **ALL**: REPORT ORDER나 PPT_ONLY 여부에 관계없이 CAT2가 있는 REAL/ADDP 및 그 파생 항목을
+  포함합니다. 조회 기간 내 데이터가 없는 항목은 로그에 남기고 생략합니다. 표·WF Map·설명 간지·
+  이상 분석 없이 category별로 슬라이드당 최대 6개 Trend를 배치합니다.
+  HTML의 모든 이미지는 base64 data URI입니다. **메일 HTML 본문 UTF-8 크기 < 2,000,000 bytes,
+  PPTX 파일 크기 < 10,000,000 bytes**를 직렬화 후 검사하며 초과하면 전체 차트 해상도/품질을
+  단계적으로 줄입니다. 항목 수를 줄여 맞추지 않으며 한계에 도달하면 발송을 중단합니다.
+  첨부 PPTX를 포함한 메일 전체의 2MB 제한을 뜻하지 않습니다.
+  파일명은 `<날짜>-<vehicle>-<lot>-<step>-ALL-Trends.html/.pptx`이며 기존 HTML/PPT 폴더에 저장합니다.
+  ALL 산출물은 메일용이며 S3 업로드 및 별도 다이제스트 발송을 하지 않습니다.
+
+Trend는 PPT/HTML 모두 고정 canvas와 여백을 사용합니다. 긴 Y축 제목은 작은 글씨로 줄이고
+극단적으로 긴 경우 잘라 표시하며, 제목 길이 때문에 플롯 높이를 압축하지 않습니다.
 
 ### 7) 출력물
 
@@ -249,7 +428,7 @@ auto report/
 ## 불량 통계 자동 분석 (핵심)
 
 리포트 최상단 **`■ [0] Anomaly Summary`** 섹션의 핵심 엔진입니다.
-**AI(GPT) 사용 여부와 무관하게 항상 코드로 동작**하며, AI가 켜져 있으면 그 위에 자연어 해석을 얹습니다.
+**외부 연결 없이 코드로 동작**합니다.
 
 [0] 섹션은 위에서부터 다음 순서로 조립됩니다(`Main.py`):
 
@@ -300,9 +479,7 @@ finding type과 우선순위(값이 클수록 위에 정렬)는 다음과 같습
 > **여러 Index 조합→불량 모드 판정은 코드가 deterministic하게 수행**합니다(지식 규칙 엔진).
 > `ANOMALY_KNOWLEDGE.md`의 `NL_RULES` 마커에 **`[RULE]` 자연어 한 줄**씩 적으면 코드가 JSON 조건식으로
 > 컴파일해 **모든 규칙을 전부 점검, 매칭되는 규칙마다 각각** `DEFECT_MODE` finding을 만듭니다.
-> ⚠️ 단, 이 지식판정(RULE) 경로는 **AI 연결 시에만 활성**됩니다(`use_gpt_summary`·`use_gpt_multistep`
-> on + LLM 연결 — Main.py가 `json_rules`를 AI on일 때만 전달). AI 미연결이면 이상/주의 통계 판정만 동작합니다.
-> → [지식 규칙 엔진](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용).
+> 지식판정(RULE)은 과거 AI 연결 경로의 기능으로 현재 발행에서는 비활성입니다. 이하 엔진 설명은 코드 참고용입니다.
 
 ### 지식 규칙 엔진 — `[RULE]` 단일 포맷 (코드 조합 판정 + AI 불량 모드 판정 공용)
 
@@ -331,13 +508,12 @@ AI가 규칙에 없는 모드명을 만들어도 코드 검증에서 걸러져 �
 - **컴파일**: 발행 시(`anomaly_nl_autocompile=True`) `compile_nl_to_json`이 자연어를 **JSON 규칙**
   (`{items, condition, not_items, trend_items, link, comment}`)으로 변환 — AI(gpt-oss-120b) 우선,
   미연결 시 키워드 fallback. 결과는 `RUN/AI/nl_rules_json.json`에 **원문 sha256과 함께 캐시**되어
-  같은 규칙 텍스트면 LLM 재호출 없이 재사용(결정론·감사 가능, 규칙을 고치면 자동 무효화).
+  같은 규칙 텍스트면 캐시를 재사용(결정론·감사 가능, 규칙을 고치면 자동 무효화).
 - **판정**(`evaluate_json_rules`): **모든 `[RULE]`을 전부 점검하고, 조건을 만족하는 규칙마다 각각**
   `DEFECT_MODE` finding을 만듭니다(하나만 고르지 않음 — 다중 매칭 전부 표기). 각 finding에는
   근거 자연어("A가 이상 수준이고 B도 이상 수준이므로 **BB불량** 판정"), spec-out wafer 번호(`[#1, #3]`),
   규칙의 링크가 붙습니다.
-- ⚠️ **지식판정(RULE)은 AI 연결 시에만 동작**: Main.py가 `use_gpt_summary`·`use_gpt_multistep` on +
-  LLM 연결일 때만 `json_rules`를 판정 엔진에 전달합니다. AI 미연결이면 통계(이상/주의) 판정만 나옵니다.
+- 현재 Main은 통계(이상/주의) 판정만 사용하고, 지식 불량모드 판정은 호출하지 않습니다.
 
 **JSON 조건(condition) 필드** — 자연어 표현이 아래로 변환됩니다(작성 가이드 표는 `ANOMALY_KNOWLEDGE.md`에 동일 매핑):
 
@@ -449,25 +625,12 @@ python Main.py --convert-nl-rules-md   # 변환해서 바로 MD의 ANOMALY_RULES
 > 같은 매핑이 컴파일 프롬프트(`NL_PATTERN_HINTS`)에도 주입되어 **가이드대로 쓰면 변환이 사실상
 > 결정적**으로 됩니다.
 
-**공통 파이프라인 = LLM 1회 생성 → 코드(결정론) 검증 → 실패 시 오류 피드백 재시도 1회 → 유효 규칙만 적용**:
-
-1. **생성**: 조건 함수 카탈로그(`RULE_FUNCTION_SPEC`) 전체를 프롬프트에 넣고 "카탈로그의 키·원자만
-   사용, 표현 불가하면 `# 변환불가:` 주석만" 지시 → LLM이 규칙 출력.
-2. **검증(코드)**: 파싱 + 조건식의 모든 원자를 평가기 문법과 1:1 미러인 정적 패턴
-   (`_ATOM_VALID_PATTERNS`)으로 확인. **환각 함수(카탈로그 밖 문법)는 여기서 걸러짐.**
-3. **재시도**: 검증 오류 문구를 그대로 프롬프트에 붙여 1회 재생성(자가 수정). 그래도 실패한 규칙은
-   제외하고 유효 규칙만 적용(경고 출력).
-4. **캐시/감사**: JSON 경로는 `nl_rules_json.json`(원문 sha256 일치 시 재사용), CLI [RULE] 경로는
-   `nl_rules_map.json`(문구별 매핑 — 같은 문구는 항상 같은 코드, 엔지니어가 직접 수정 가능).
-   **자연어 원문이 같으면 LLM을 다시 호출하지 않음** → 발행마다 규칙이 달라지지 않는 결정론 유지.
-
-- **AI-optional(변환)**: LLM 미연결이면 **키워드 fallback**(명시적 표현만 best-effort 변환, 애매하면
-  '변환불가'로 보류)이 동작하므로 캐시 없이도 기본 규칙은 변환됩니다. 단 **판정 자체는 AI 연결 시에만**
-  활성화됩니다(위 참조).
+현재는 키워드 규칙 변환과 코드 검증만 사용합니다. 명확히 해석할 수 없는 표현은
+변환하지 않습니다. 과거 AI 연결에 종속된 지식 불량모드 판정은 발행에서 비활성입니다.
 
 ### 규칙 제안 다이제스트 (1일 1회, POWER_USER)
 
-발행이 끝날 때마다 실행 말미에 **규칙 현황과 개선 제안을 하루 1회** 생성합니다(`build_rule_digest` —
+일반 자동 발행에서 `rule_digest_enabled=True`일 때 **규칙 현황과 개선 제안을 하루 1회** 생성합니다 (수동 트리거에서는 생략)(`build_rule_digest` —
 `RUN/ARCHIVE` 스냅샷을 `rule_digest_window_days`(14일) 윈도우로 집계, `rule_digest_state.json`으로 중복 방지):
 
 1. **규칙 현황** — 설정된 `[RULE]`별 최근 N일 매칭 건수/리포트(0회 규칙 = 정리 후보)
@@ -480,20 +643,10 @@ python Main.py --convert-nl-rules-md   # 변환해서 바로 MD의 ANOMALY_RULES
 4. **좌표 재발 확인 요청** — 같은 index의 **동일 chip 좌표** spec-out이 `min_repeat`개 리포트 이상
    반복되면 안내(findings의 `spec_out_positions` 집계 — 특이맵 판정 OFF여도 동작, 리포트당 상한
    20pt 표본). **불량 모드와 연결되지 않아도** 레티클/프로브핀/척 등 systematic 후보 인사이트로 전달.
-5. **(LLM 연결 시) AI 총평** 한 단락.
 
 산출: `RUN/AI/rule_digest_<날짜>.txt` 저장 + 메일링 xlsx에 **`POWER_USER` 시트**가 있고
 `use_email_send=True`면 그 수신처로 발송(시트가 없으면 파일만 — 기본 그룹으로 오발송하지 않음).
 미리보기는 `python Main.py --rule-digest`. 스냅샷·규칙·수신처가 없어도 각 단계가 안전하게 축소 동작합니다.
-
-> **왜 다단계 AI(LangGraph식 분해)가 아니라 단일 호출인가** — 이 변환은 "작은 DSL로의 번역"이고,
-> **정답 판정기가 코드로 존재**합니다(파서+원자 문법 검증). 이런 구조에서는
-> `생성(LLM 1회) → 검증(코드) → 오류 피드백 재시도` 루프가 정석입니다:
-> - 다단계 분해(의도 파싱→항목 매핑→조건 조합을 각각 AI에 시키는 방식)는 호출 3배 비용에
->   **단계 간 오류 전파**가 생기는 반면, 얻는 건 약한 모델에서의 안정성뿐입니다.
-> - 여기선 검증이 AI가 아니라 **결정론적 코드**라서, 실패 원인이 정확한 문구("조건 'xxx' 인식 불가")로
->   피드백되어 1회 재시도로 대부분 수렴합니다. 남는 실패는 규칙 단위로 격리 폐기되어 안전합니다.
-> - 규칙 컴파일은 **시작 시 1회 + 캐시**라 지연·비용 민감도도 낮습니다.
 
 ### 지표(metrics) 계산식
 
@@ -547,128 +700,13 @@ python Main.py --convert-nl-rules-md   # 변환해서 바로 MD의 ANOMALY_RULES
 
 ---
 
-## AI 다단계 해석 (선택)
+## LLM 연결 제거
 
-> **한 줄 요약**: AI는 **1회 호출이 아니라 3단계(triage→root-cause→final) 순차 호출**로 사용됩니다.
-> 입력은 **코드가 계산한 통계 Finding + `ANOMALY_KNOWLEDGE.md`(페르소나/스타일) 텍스트**뿐이며,
-> **원측정 raw 데이터/reformatter는 AI에 넘기지 않습니다.** 출력은 [0] 섹션 상단에 붙는 HTML `<ul>` 참고 요약입니다.
-> AI가 없거나 어느 단계든 실패하면 **None → [0] 섹션엔 코드 통계 분석만** 표시됩니다(AI-optional).
-
-### 1) AI 연결 셋업 (프로그램 시작 시 1회 — `Main.py`)
-
-`Main.py` 상단에서 **import 시점에 딱 한 번** LLM transport를 구성합니다.
-
-- `.env`에서 `GPT_API_BASE_URL`, `GPT_CREDENTIAL_KEY`를 읽습니다.
-- 둘 다 있으면 OpenAI 호환 클라이언트 생성 후 **연결 테스트("Hi" 전송)** → 성공 시 `GPT_CONNECT=True`.
-  ```python
-  gpt_client = OpenAI(api_key="dummy", base_url=GPT_API_BASE_URL,
-                      default_headers={"x-dep-ticket": GPT_CREDENTIAL_KEY, ...})  # model: gpt-oss-120b
-  ```
-- `_build_llm_fn()`이 **transport 함수**를 반환합니다 — 이 함수가 실제 LLM 호출의 유일한 창구:
-  - 연결됨 → `gpt_client.chat.completions.create(model="gpt-oss-120b", messages=[{system},{user}], temperature=0.3)`의 응답 텍스트 반환.
-  - 미연결 → `gpt_oss_client.mock_llm`(로컬 mock)이 있으면 사용, 없으면 `None`.
-- `_ANOMALY_KNOWLEDGE_TEXT` = `ANOMALY_KNOWLEDGE.md` 전체 텍스트(`My_config.anomaly_knowledge_path`)를 미리 읽어 둡니다.
-
-즉 실제 LLM API는 `_LLM_FN(system, user) -> str` **한 개 시그니처**로 추상화되어, 사내 gpt_client든 로컬 mock이든 동일 코드로 동작합니다.
-
-### 2) AI 호출 조건 (리포트마다 — `Main.py` [0] 섹션)
-
-lot 리포트 생성 루프에서 아래를 **모두** 만족할 때만 AI를 호출합니다.
-
-```python
-if GLOBAL_CONFIG.use_gpt_summary and GLOBAL_CONFIG.use_gpt_multistep \
-   and code_findings and _LLM_FN is not None:
-    ai_html = interpret_with_ai(code_findings, metrics_dict,
-                                _ANOMALY_KNOWLEDGE_TEXT, _LLM_FN,
-                                config=GLOBAL_CONFIG, target_lot_id=target_lot_id,
-                                item_stats=anomaly_item_stats,     # 전 항목 wafer 기준 통계 요약
-                                defect_modes=_defect_modes)        # [RULE]의 판정명 목록(검증용)
-```
-
-- `code_findings` = `analyze_commonality()`가 **AI와 무관하게 이미 산출**한 통계 Finding 리스트.
-- `defect_modes` = NL→JSON `[RULE]`들의 `"판정명"`(comment) 목록 — AI Final의 `defect_mode`를 이
-  목록과 대조해 **규칙에 없는 모드명은 표기하지 않습니다**(할루시네이션 차단).
-- 하나라도 조건 불충족(토글 off / Finding 없음 / LLM 없음)이면 AI 호출 자체를 건너뜁니다.
-
-### 3) `interpret_with_ai` — 다단계/단일 호출 (`anomaly_engine.py`)
-
-**호출 모드 = `My_config.ai_stage_mode`**:
-- `'multi'`(기본): Triage → Root-cause → Final **3회 호출**. 앞 단계 출력이 다음 단계 입력.
-  단계별로 일을 쪼개 **약한 모델에서 품질이 안정적**이지만 비용/지연 3배 + 단계간 오류 전파 위험.
-- `'single'`: **Final 1회 호출** — findings JSON·[항목 통계]·지식베이스·판정 예시를 한 번에 주고
-  바로 구조화 JSON 판정. 비용/지연 1/3, 오류 전파 없음(충분히 강한 모델 권장).
-- 어느 모드든 Final 응답이 JSON이 아니면 **같은 입력으로 1회 자동 재시도**(형식 지시 강화),
-  그래도 실패하면 텍스트/HTML 폴백. 모든 호출은 `RUN/AI/ai_input_<lot>_<step_id>.md`에 그대로 남습니다.
-
-| 단계 | system 프롬프트 | user 입력 | 출력 | 비고 |
-|---|---|---|---|---|
-| ① **Triage** | "CAT2가 같은 항목은 한 현상으로 묶어 3~6개로 정리" | `target_lot` + **findings JSON**(severity/type/item/**display_name/cat2**/title/detail/**spec_out_pgm/zone/pattern/positions/meas_overlap_\***) + **[항목 통계]** | 현상 정리 텍스트 | PCHK(측정 의심) 최상단 + 겹친 wafer·좌표·PGM(pt) 명시 |
-| ② **Root-cause** | "**[지식베이스]** 근거로 추정 원인·확인 포인트" + `ANOMALY_KNOWLEDGE.md` 텍스트 | ① 결과 | 추정 원인 텍스트 | 지식 텍스트가 여기서 주입됨 |
-| ③ **Final** | "종합 판단 + 불량 모드 판정, **JSON 객체로만 출력**" + 지식 텍스트 + (있으면) **[판정 예시]**(RUN/EXAMPLE) | spec-out Index 조합 + ① + ② + [항목 통계] | **구조화 JSON** | 코드가 검증 후 HTML 조립(아래) |
-
-- **③ Final은 구조화 JSON**: `{"defect_mode", "basis_items", "summary", "phenomenon", "actions", "meas_suspect"}`.
-  코드(`_assemble_final_html`)가 검증 후 **평문 서술형 문장(핵심만 볼드)** 으로 조립합니다:
-  - **판정 문장은 코드 deterministic**: 코드가 `[RULE]`을 전부 평가해 **매칭된 모든 불량 모드를 각각 한 줄**로
-    렌더합니다 — "A가 이상 수준이고 B도 이상 수준이므로 **BB불량** 판정 [#1, #3]. **확인/조치**: 관련 링크"
-    형태(근거 자연어 + spec-out wafer 번호 + 그 규칙의 링크). AI의 단일 `defect_mode`는 코드 판정이 없을
-    때만 폴백으로 쓰이며, `[RULE]`에 정의된 판정명과 매칭되지 않으면 **"지식 규칙 미매칭 — 수동 검토 필요"만
-    표시**합니다(**md에 정의된 규칙만 표기** — AI 임의 모드명·링크는 리포트에 나오지 않음).
-  - **종합 판단(summary)은 표시하지 않습니다**(2026-07-09 결정 — 판정 문장으로 충분). `meas_suspect`가
-    있으면 "**측정이상 가능성**: ~ 불량 단정 전 **재측정으로 재현성 확인**을 우선하세요."를 덧붙입니다.
-  - JSON 파싱 실패/비-JSON 응답이어도 **RULE 판정 문장은 항상 렌더**됩니다(응답 텍스트는 폴백 활용).
-- **AI에 전달되는 것**: (a) findings JSON(코드 산출 — 표시명·CAT2·위치·특이맵 패턴·PGM(pt)·PCHK 겹침 포함), (b) [항목 통계](전 항목 wafer 기준 요약 — median 백분위·산포배수·패턴), (c) `ANOMALY_KNOWLEDGE.md` 텍스트(②③ system), (d) RUN/EXAMPLE 판정 예시(③, 있으면), (e) target_lot_id.
-  → **측정 raw/피벗 데이터, reformatter, 이미지는 전달하지 않습니다.** 토큰·보안 관점에서 "코드가 요약한 Finding"만 넘깁니다.
-- **어느 단계든 예외/`llm_fn is None`이면 즉시 `None` 반환** → [0]엔 코드 분석만.
-
-### 4) 결과 반영
-
-`interpret_with_ai`의 HTML은 상단에 *"※ AI가 자동 생성한 참고용 요약"* 안내와 함께 감싸져,
-[0] Anomaly Summary 섹션 **맨 위**에 코드 통계 요약보다 앞서 배치됩니다.
-
-```
-[0] Anomaly Summary
-├─ (AI 있으면) AI 다단계 해석 결과      ← interpret_with_ai (RULE 판정 문장 + 측정이상 가능성)
-├─ 통계 기반 자동 분석                  ← AI on: 건수 한 줄 / AI off: 상위 목록 (코드, AI 무관 항상)
-└─ Anomaly Trend Chart + spec-out WF MAP
-```
-
-### 호출 흐름 요약
-
-```
-[프로그램 시작] .env → gpt_client 연결테스트 → _build_llm_fn() → _LLM_FN
-                ANOMALY_KNOWLEDGE.md 읽기 → _ANOMALY_KNOWLEDGE_TEXT
-        │
-[리포트마다] analyze_commonality() → code_findings (AI 없이 항상)
-        │   토글/조건 만족?
-        ▼ (yes)
-interpret_with_ai(findings, metrics, knowledge_text, _LLM_FN, ...)
-   ①LLM(triage) → ②LLM(root-cause, +지식) → ③LLM(final, +지식) → 검증 → 서술형 HTML
-        │ (실패/None)                              │
-        ▼                                          ▼
-   [0]엔 코드 분석만                       [0] 최상단에 AI 요약 삽입
-```
-
-### ANOMALY_KNOWLEDGE.md — 페르소나·답변 스타일
-
-②③ 단계 system 프롬프트에 주입되는 **페르소나·응답 스타일 + 판정 지식(해석 규칙)** 가이드입니다(`My_config.anomaly_knowledge_path`).
-
-- AI의 **말투/형식/태도**(간결·객관·근거 기반, 평문 서술형, 재측정 우선 등)를 정의합니다.
-- **판정 규칙·불량 모드는 같은 파일의 `NL_RULES` 마커 안 `[RULE]` 자연어 한 줄**로 관리합니다
-  (코드 지식 판정과 AI 불량 모드 검증 공용 — [지식 규칙 엔진](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용) 참조).
-  엔지니어 수정 지점은 md 안에 `🔴 ✏️ 수정 영역 ①`(NL_RULES)·`🟠 ✏️ 수정 영역 ②`(PCHK_ITEM_MAP)로 표시돼 있습니다.
-- **해석 규칙**(예: '측정이상 추정 규칙' — PCHK 동일 shot spec-out 겹침 → 측정이상 추정)도 여기서 관리합니다. 코드가 산출한 신호를 **어떻게 해석·판정할지**를 서술하며, AI가 이를 적용합니다.
-- 단 **통계 임계값(σ·배수 숫자)** 은 `My_config.py`에서, 무거운 통계 계산은 코드가 담당합니다.
-- **엔지니어가 이 MD만 편집하면** 코드 수정 없이 AI 해석의 톤/형식·판정 규칙이 바뀝니다 — **룰 관련 관리 지점은 이 파일 하나**입니다.
-
-### LLM 연결 / 토글
-
-- **transport 교체 가능** (`Main._build_llm_fn`): 실 환경 `gpt_client`(OpenAI 호환, `gpt-oss-120b`) / 로컬 `gpt_oss_client.mock_llm` / 둘 다 없으면 `None`.
-- 3단계 오케스트레이션은 **코어(`anomaly_engine`)에 있어 그대로 이식**됩니다(사내는 `_build_llm_fn`만 실 클라이언트로 교체).
-- 토글(`My_config.py`):
-  - `use_gpt_summary` — AI 사용 마스터 스위치 (False면 AI 호출 자체 안 함)
-  - `use_gpt_multistep` — 3단계 해석 사용 (`use_gpt_summary=True`일 때)
-
----
+현재 Main은 LLM 클라이언트 import, 연결 테스트, mock 연결, AI 해석 호출을 하지 않습니다.
+연결 성공/실패/미설정/AI 스킵 로그도 출력하지 않습니다. `.env`의 GPT 설정은 읽지 않으며,
+기존 YAML의 `use_gpt_summary` / `use_gpt_multistep`가 True여도 발행 시 False로 고정합니다.
+코드 통계 분석과 Trend는 유지됩니다. 과거 AI 연결에 종속된 지식 불량모드 판정은 비활성입니다.
+자연어 규칙 CLI와 다이제스트는 키워드/코드 경로만 사용합니다.
 
 ## 설정 가이드 (My_config.py)
 
@@ -751,7 +789,7 @@ self.anomaly_exclude_unless_rule = [
 
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
-| `use_gpt_summary` / `use_gpt_multistep` | `True` | AI 사용 / 다단계 해석 토글 |
+| `use_gpt_summary` / `use_gpt_multistep` | `False` | 호환성용; Main에서 항상 False로 고정 |
 | `ai_stage_mode` | `'multi'` | AI 호출 모드 — `'multi'`(3단계) / `'single'`(Final 1회) |
 | `anomaly_nl_autocompile` | `True` | NL_RULES 자연어 규칙을 발행 시 자동 컴파일/적용 |
 | `use_archive_snapshot` | `True` | 발행 스냅샷(RUN/ARCHIVE) 저장 — 다이제스트/사례 아카이브 입력 |
@@ -806,7 +844,7 @@ self.anomaly_exclude_unless_rule = [
 - **WF MAP geometry(150mm 원 fit·shot pitch)는 좌표파일 기준**: 좌표 xlsx(Zone_Define)의 **MASK(vehicle)별 전체 chip layout(CHIP_X_ADJ/CHIP_Y_ADJ/Chip_Radius)**으로 계산(`set_chip_layout`) — 측정 point가 적은(예 13pt) wafer/항목도 full 측정과 동일한 원·칩 크기로 그려짐. 좌표파일이 없으면 종전처럼 측정 좌표로 폴백.
   - **색 = `REPORT DIRECTION`**(`_wfmap_cmap`): `LOWER`→낮은값 빨강/높은값 파랑(`coolwarm_r`), `UPPER`·`BOTH`→낮은값 파랑/높은값 빨강(`coolwarm`).
   - 단일 컬러바를 풀높이로 공유, 스케일 = 모집단 1~99% + lot 범위. 좌표는 zone_define(coordinate xlsx)과 inner-merge.
-- **임시 차트 파일 없음**: 모든 PPT 차트는 디스크가 아니라 **메모리(BytesIO)**로 처리(루트에 `tmp_*.jpg` 미생성). HTML용 Trend PNG는 `RUN/TEMP`에 임시 생성 후 **HTML에 base64로 내장**되며, 랏 완료 시 RUN/TEMP의 이미지 파일만 정리됩니다(anomaly_basis 등 비이미지는 보존).
+- **임시 차트 파일 없음**: 모든 PPT 차트는 디스크가 아니라 **메모리(BytesIO)**로 처리(루트에 `tmp_*.jpg` 미생성). HTML용 Trend PNG는 `RUN/OPS/temp/<실행>/<리포트>`에 임시 생성 후 **HTML에 base64로 내장**되며, 랏 완료 시 RUN/TEMP의 이미지 파일만 정리됩니다(anomaly_basis 등 비이미지는 보존).
 - **다중 lot_id**(같은 root_lot_id가 같은 step에 함께 reporting): 리포트 단위 = `root_lot_id + step`(match_key)로 형제 lot이 함께 그려짐.
   - **Trend** = lot별 **색**, **Radius/Cumulative** = lot별 **marker**(색은 wafer). 모집단 median 선은 연회색(`#cccccc`).
   - 단, **spec-out(이상) 분류는 타깃 lot만**.
@@ -926,38 +964,6 @@ from anomaly_engine import classify_specout_pattern
 label, stats = classify_specout_pattern(out_xy, all_xy, radius_of=coord_radius_map)
 print(label); print(stats['rules'])   # 규칙별 평가 trace
 ```
-
-### AI 판정 예시 (few-shot) — `RUN/EXAMPLE/*.md`
-
-후행적으로 불량 모드가 **확정된 사례**를 md 파일로 넣으면, AI Final(③) 판정 시 [판정 예시]로
-주입되어 유사 입력을 같은 판정으로 잡습니다. **없어도 정상 동작**(있을 때만 주입).
-
-- **운영 흐름**: 리포트 발행 → `RUN/AI/ai_input_<lot>_<step_id>.md`에 당시 AI 입력(findings)이 남음 →
-  이후 실물 분석으로 불량 모드/원인이 확정되면 → 그 입력 요약+확정 판정을 예시 파일로 저장 →
-  다음 리포트부터 유사 케이스가 자동으로 그 판정에 수렴.
-- **파일 규칙**: `RUN/EXAMPLE/` 아래 `.md` 파일. 파일명 정렬순으로 최대 `ai_examples_max`(5)개,
-  총 `ai_examples_max_chars`(6000자)까지 주입. **파일명이 `_`로 시작하면 스킵**(`_TEMPLATE.md` 등).
-  config: `ai_examples_dir/max/max_chars`.
-- **작성 형식** (자유 서식이지만 아래 3섹션 권장 — `RUN/EXAMPLE/_TEMPLATE.md` 참조):
-
-```markdown
-# 사례: <짧은 사례명> (lot Txxxx.x, 2026-07 확정)
-
-## 입력(관찰 요약) — 당시 ai_input_<lot>_<step_id>.md의 findings 요약
-- spec-out: VTH_N, VTH_P (CAT2=VTH), 특이맵: Edge ring(84%)
-- PCHK 겹침: 없음 / [항목 통계] 특기: IDSAT_N median_pctile=3.2(하위 5% 이내)
-
-## 확정 판정(후행 확인된 결과)
-- 불량 모드: Gate 모듈 불량 (VTH N·P 연동)   ← NL_RULES [RULE]의 "판정명" 문구 그대로
-- 판정 로직: VTH N·P 동시 spec-out + Edge ring → OOO 설비 엣지 링 이슈로 확정됨
-
-## 비고(선택)
-- 재발 시 확인 포인트: OOO 챔버 이력, 엣지 계측
-```
-
-- **주의**: `불량 모드`는 `ANOMALY_KNOWLEDGE.md`의 `[RULE]` **"판정명"(큰따옴표 문구)과 정확히 일치**해야
-  코드 검증을 통과합니다(새 불량이면 `[RULE]`을 먼저 추가한 뒤 예시를 넣으세요 —
-  예시는 "언제 그 모드로 판정할지"의 사례, `[RULE]`은 "그 모드가 존재함"의 정의).
 
 ### 불량 모드 판정 지식 (참고)
 

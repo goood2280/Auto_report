@@ -525,7 +525,7 @@ def Reformatize(data, ALIAS, FORMULA):
 
 def clear_temp_inside_run():
     """temp_*.png 임시 파일 삭제."""
-    for f in glob.glob("temp_*.png"):
+    for f in glob.glob(os.path.join(report_temp_dir(),"temp_*.png")):
         try:
             os.remove(f)
         except OSError:
@@ -534,7 +534,7 @@ def clear_temp_inside_run():
 
 def clear_anomaly_inside_run():
     """anomaly_*.png 임시 파일 삭제."""
-    for f in glob.glob("anomaly_*.png"):
+    for f in glob.glob(os.path.join(report_temp_dir(),"anomaly_*.png")):
         try:
             os.remove(f)
         except OSError:
@@ -553,7 +553,7 @@ def clear_run_temp_files():
     (AI 인풋파일은 RUN/AI에 별도 보관하며 삭제하지 않는다. anomaly_basis 등 비이미지
      산출물도 그대로 남긴다.) HTML은 이미지가 base64로 내장돼 있어 삭제 후에도 정상.
     """
-    _tdir = os.path.join('RUN', 'TEMP')
+    _tdir = report_temp_dir()
     if not os.path.isdir(_tdir):
         return
     for _root, _dirs, _files in os.walk(_tdir):
@@ -1278,7 +1278,7 @@ def _wafer_circle_params(df, x_col, y_col, rad_col=None, mask_col=None,
 
     ● MASK(vehicle) 매칭 — vehicle별 shot 크기가 다를 수 있으므로, 같은 MASK==main_vehicle
       shot만으로 계산한다(mask_col·main_vehicle이 있고 데이터가 충분할 때). mask_col 미지정 시
-      df에서 'MASK'/'mask'를 자동 인식, main_vehicle 미지정 시 GLOBAL_CONFIG.vehicle 사용.
+      df에서 'MASK'/'mask'를 자동 인식, main_vehicle 미지정 시 GLOBAL_CONFIG.get('vehicle') 사용.
 
     ● shot 크기(mm) 산출 — 격자 1칸당 물리거리 = shot_width/shot_height. Chip_Radius r 과
       shot 중점 격자좌표(chip_x_adj, chip_y_adj)의 관계
@@ -1624,9 +1624,9 @@ def render_specout_wfmaps_b64(merged_df, item, spec_low=None, spec_high=None,
 
     main_vehicle : wafer 원(150mm)·shot pitch·격자 범위를 '측정 데이터'가 아니라 등록된
       MASK(vehicle)별 chip layout(CHIP_X_ADJ/CHIP_Y_ADJ/Chip_Radius)으로 계산하기 위한 vehicle 명.
-      이걸 넘겨야 _wafer_circle_params가 측정 subset에 radius가 없거나 GLOBAL_CONFIG.vehicle이
+      이걸 넘겨야 _wafer_circle_params가 측정 subset에 radius가 없거나 GLOBAL_CONFIG.get('vehicle')이
       미설정/불일치일 때도 실제 Chip_Radius fit(정확한 150mm 원)을 쓴다. 미전달 시 측정 데이터
-      radius나 GLOBAL_CONFIG.vehicle에 의존하다 실패하면 shot을 억지로 원 안에 가두는
+      radius나 GLOBAL_CONFIG.get('vehicle')에 의존하다 실패하면 shot을 억지로 원 안에 가두는
       bounding-원 폴백으로 떨어져, 실제로는 원 밖으로 나가야 할 edge shot이 안쪽으로 눌린다.
     """
     import matplotlib
@@ -2310,7 +2310,7 @@ def _render_wafer_legend_bytes(cfg):
     return buf.getvalue()
 
 
-def _render_item_charts(task):
+def _render_item_charts_uncached(task):
     """[워커/직렬 공용] 한 index의 차트 5종(Box/WF MAP/Trend/Radius/CDF)을 렌더링.
 
     insert_plots의 per-item 렌더링을 프로세스 워커로 분리한 것. 차트 모양/색/
@@ -2424,7 +2424,7 @@ def _render_item_charts(task):
         item_df_full = item_df
         target_df = _select_target_lot_frame(item_df, target_lot_id, target_root_lot_id, target_DC_step_id)
         item_df = target_df
-        if len(item_df) == 0:
+        if len(item_df) == 0 and not cfg.get('trend_only'):
             out['status'] = 'skip'
             out['reason'] = f"대상 lot '{target_lot_id}' 데이터 없음"
             return out
@@ -2439,374 +2439,377 @@ def _render_item_charts(task):
         LOT_MARKERS = ['o', '^', 's', 'D', 'v', 'P', 'X', '*']
         lot_marker = {lot: LOT_MARKERS[i % len(LOT_MARKERS)] for i, lot in enumerate(target_lots)}
 
-        # ---- Index Aggregation Table용 (lot, wafer)별 집계값 ----
-        # REPORT DIRECTION → BOTH=Median / UPPER=P90 / LOWER=P10. lot_id별 분리해 wafer별 1값.
-        try:
+        if not cfg.get('trend_only'):
+            # ---- Index Aggregation Table용 (lot, wafer)별 집계값 ----
+            # REPORT DIRECTION → BOTH=Median / UPPER=P90 / LOWER=P10. lot_id별 분리해 wafer별 1값.
+            try:
+                if direction == 'UPPER':
+                    _q, _sstat = 0.90, 'P90'
+                elif direction == 'LOWER':
+                    _q, _sstat = 0.10, 'P10'
+                else:
+                    _q, _sstat = None, 'Median'
+
+                def _aggv(s):
+                    s = pd.to_numeric(s, errors='coerce').dropna()
+                    if len(s) == 0:
+                        return None
+                    return float(s.median()) if _q is None else float(s.quantile(_q))
+
+                _lc = 'fab_lot_id' if 'fab_lot_id' in item_df.columns else None
+                _wv = {}   # {(lot, wafer_int): value}
+                if _lc:
+                    for (_lot, _waf), _g in item_df.groupby([_lc, w_col]):
+                        _v = _aggv(_g[item_name])
+                        if _v is None:
+                            continue
+                        try:
+                            _waf = int(float(_waf))
+                        except (ValueError, TypeError):
+                            pass
+                        _wv[(str(_lot), _waf)] = _v
+                else:
+                    _v = _aggv(item_df[item_name])
+                    if _v is not None:
+                        _wv[(str(target_lot_id), 0)] = _v
+                if _wv:
+                    out['summary_row'] = {'index': item_name, 'stat': _sstat, 'wafer_vals': _wv}
+            except Exception as _se:
+                out['warnings'].append(f"summary 집계 실패: {_se}")
+
+            # ---- 통계 테이블 값 (REPORT DIRECTION별 4행 × wafer #1~25) ----
+            #   UPPER: Max P90 Med P10 / LOWER: P90 Med P10 Min / BOTH: P90 Med P10 Std
             if direction == 'UPPER':
-                _q, _sstat = 0.90, 'P90'
+                stat_defs = [("Max", lambda s: s.max()), ("P90", lambda s: s.quantile(0.90)),
+                             ("Med", lambda s: s.median()), ("P10", lambda s: s.quantile(0.10))]
             elif direction == 'LOWER':
-                _q, _sstat = 0.10, 'P10'
+                stat_defs = [("P90", lambda s: s.quantile(0.90)), ("Med", lambda s: s.median()),
+                             ("P10", lambda s: s.quantile(0.10)), ("Min", lambda s: s.min())]
             else:
-                _q, _sstat = None, 'Median'
+                stat_defs = [("P90", lambda s: s.quantile(0.90)), ("Med", lambda s: s.median()),
+                             ("P10", lambda s: s.quantile(0.10)),
+                             ("Std", lambda s: s.std() if len(s) > 1 else float('nan'))]
+            out['stat_rows'] = [lbl for lbl, _ in stat_defs]
+            for w_idx in range(1, 26):
+                w_str = str(w_idx)
+                if w_str in grouped.groups:
+                    grp_data = pd.to_numeric(grouped.get_group(w_str), errors='coerce').dropna()
+                    vals = []
+                    for _lbl, _fn in stat_defs:
+                        try:
+                            vals.append(_fmt_stat_value(_fn(grp_data)))
+                        except Exception:
+                            vals.append("-")
+                    out['stat_cells'][w_idx] = vals
+                else:
+                    out['stat_cells'][w_idx] = None
 
-            def _aggv(s):
-                s = pd.to_numeric(s, errors='coerce').dropna()
-                if len(s) == 0:
-                    return None
-                return float(s.median()) if _q is None else float(s.quantile(_q))
-
-            _lc = 'fab_lot_id' if 'fab_lot_id' in item_df.columns else None
-            _wv = {}   # {(lot, wafer_int): value}
-            if _lc:
-                for (_lot, _waf), _g in item_df.groupby([_lc, w_col]):
-                    _v = _aggv(_g[item_name])
-                    if _v is None:
-                        continue
+            # 통계표 (lot_id 포함) — HTML score board처럼 (lot, wafer)별 값. 측정된 것만.
+            out['stat_cells_lw'] = {}   # {(lot_str, wafer_int): [v1..v4]}
+            _lc_s = 'fab_lot_id' if 'fab_lot_id' in item_df.columns else None
+            if _lc_s:
+                for (_lot, _waf), _g in item_df.groupby([_lc_s, w_col]):
                     try:
-                        _waf = int(float(_waf))
+                        _wi = int(str(_waf).replace('#', ''))
+                    except (ValueError, TypeError):
+                        continue
+                    _d = pd.to_numeric(_g[item_name], errors='coerce').dropna()
+                    _vals = []
+                    for _lbl, _fn in stat_defs:
+                        try:
+                            _vals.append(_fmt_stat_value(_fn(_d)))
+                        except Exception:
+                            _vals.append("-")
+                    out['stat_cells_lw'][(str(_lot), _wi)] = _vals
+
+            # ---- 차트 임시 버퍼 (디스크 파일 없이 메모리에서 처리) ----
+            tmp_box = _io.BytesIO()
+            tmp_map = _io.BytesIO()
+            tmp_trend = _io.BytesIO()
+            tmp_rad = _io.BytesIO()
+            tmp_cum = _io.BytesIO()
+
+            plt.rcParams['axes.linewidth'] = 0.6
+            plt.rcParams['font.size'] = 7.5
+            plt.rcParams['font.family'] = FONT
+            plt.rcParams['axes.unicode_minus'] = False
+            plt.rcParams['axes.facecolor'] = '#ffffff'
+            plt.rcParams['figure.facecolor'] = '#ffffff'
+            plt.rcParams['grid.color'] = C_GRID
+            plt.rcParams['grid.linestyle'] = '-'
+            plt.rcParams['grid.linewidth'] = 0.5
+
+            # ---- 3. BOX Plot (측정된 웨이퍼만 플롯하되, X축은 1~25 고정) ----
+            fig_box, ax_box = plt.subplots(figsize=(7.8, 1.9))
+            box_data = []
+            box_positions = []
+            for w in measured_wafers:
+                try:
+                    w_int = int(w)
+                    box_positions.append(w_int)
+                    box_data.append(grouped.get_group(w).values)
+                except ValueError: pass
+
+            if len(box_data) > 0:
+                bplot = ax_box.boxplot(
+                    box_data, positions=box_positions, patch_artist=True,
+                    showfliers=True,
+                    flierprops={'marker': 'o', 'markerfacecolor': C_ACCENT, 'markeredgecolor': 'none', 'markersize': 3.5},
+                    medianprops={'color': C_NEUTRAL, 'linewidth': 1.2},
+                    whiskerprops={'color': '#94a3b8', 'linewidth': 0.8},
+                    capprops={'color': '#94a3b8', 'linewidth': 0.8}
+                )
+                for i, patch in enumerate(bplot['boxes']):
+                    w_str = str(box_positions[i])
+                    patch.set_facecolor(w_colors.get(w_str, '#ffffff'))
+                    patch.set_alpha(0.85)
+                    patch.set_edgecolor(C_NEUTRAL)
+                    patch.set_linewidth(0.8)
+
+            # Spec line은 그리되 범례(Spec Limit)는 표시하지 않음
+            if spec_low is not None:
+                ax_box.axhline(y=float(spec_low), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
+            if spec_high is not None:
+                ax_box.axhline(y=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
+            # 대상 lot_id(리포트 subject)에 속한 wafer 번호 → x축 라벨에 '*' 표기 + 우하단 범례
+            _tgt_wafnums = set()
+            if 'fab_lot_id' in item_df.columns:
+                _tl_box = item_df[item_df['fab_lot_id'].astype(str) == str(target_lot_id)]
+                for _w in _tl_box[w_col].unique():
+                    try:
+                        _tgt_wafnums.add(int(_w))
                     except (ValueError, TypeError):
                         pass
-                    _wv[(str(_lot), _waf)] = _v
+            ax_box.set_xticks(range(1, 26))
+            ax_box.set_xticklabels([f"#{i}" + ("*" if i in _tgt_wafnums else "") for i in range(1, 26)])
+            ax_box.set_xlim(0.5, 25.5)
+            ax_box.tick_params(axis='x', rotation=45, labelsize=7)
+            _target_blue = '#0033CC'
+            for _widx, _tick_label in enumerate(ax_box.get_xticklabels(), start=1):
+                if _widx in _tgt_wafnums:
+                    # Matplotlib tick 한 개 안에서 '*'만 별도 색칠하기 어려우므로 대상 wafer의
+                    # '#번호*' 전체를 파란색·볼드로 표시해 별표가 확실히 보이게 한다.
+                    _tick_label.set_color(_target_blue)
+                    _tick_label.set_fontweight('bold')
+            if _tgt_wafnums:
+                # box plot '바깥 아래'(축 아래, x라벨 밑)에 '*: lot_id' 범례를 우측 정렬로 배치
+                #  (y<0 = 축 영역 밖 아래, 오른쪽 끝을 box plot 우측에 맞춤)
+                ax_box.text(1.0, -0.5, f"*: {target_lot_id}", transform=ax_box.transAxes,
+                            ha='right', va='top', fontsize=6, color=_target_blue,
+                            fontstyle='italic', fontweight='bold')
+            _label_axes(ax_box, xlabel="Wafer #", ylabel=y_label)
+            _remove_spines(ax_box)
+            ax_box.set_axisbelow(True)
+            if log_scale:
+                # 로그 스케일은 10의 거듭제곱 major tick/grid만 표시한다.
+                from matplotlib.ticker import LogLocator
+                ax_box.set_yscale('log')
+                ax_box.yaxis.set_major_locator(LogLocator(base=10.0, numticks=15))
+                ax_box.minorticks_off()
+                ax_box.grid(True, which='major', axis='both', color=C_GRID, linestyle='-', linewidth=0.6)
             else:
-                _v = _aggv(item_df[item_name])
-                if _v is not None:
-                    _wv[(str(target_lot_id), 0)] = _v
-            if _wv:
-                out['summary_row'] = {'index': item_name, 'stat': _sstat, 'wafer_vals': _wv}
-        except Exception as _se:
-            out['warnings'].append(f"summary 집계 실패: {_se}")
+                ax_box.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
+                ax_box.grid(True, which='major', axis='both', color=C_GRID, linestyle='-', linewidth=0.5)
+            # 용량 다이어트를 위한 JPG 포맷 저장 및 quality 옵션 적용
+            fig_box.savefig(tmp_box, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
+            plt.close(fig_box)
+            out['imgs']['box'] = tmp_box.getvalue()
 
-        # ---- 통계 테이블 값 (REPORT DIRECTION별 4행 × wafer #1~25) ----
-        #   UPPER: Max P90 Med P10 / LOWER: P90 Med P10 Min / BOTH: P90 Med P10 Std
-        if direction == 'UPPER':
-            stat_defs = [("Max", lambda s: s.max()), ("P90", lambda s: s.quantile(0.90)),
-                         ("Med", lambda s: s.median()), ("P10", lambda s: s.quantile(0.10))]
-        elif direction == 'LOWER':
-            stat_defs = [("P90", lambda s: s.quantile(0.90)), ("Med", lambda s: s.median()),
-                         ("P10", lambda s: s.quantile(0.10)), ("Min", lambda s: s.min())]
-        else:
-            stat_defs = [("P90", lambda s: s.quantile(0.90)), ("Med", lambda s: s.median()),
-                         ("P10", lambda s: s.quantile(0.10)),
-                         ("Std", lambda s: s.std() if len(s) > 1 else float('nan'))]
-        out['stat_rows'] = [lbl for lbl, _ in stat_defs]
-        for w_idx in range(1, 26):
-            w_str = str(w_idx)
-            if w_str in grouped.groups:
-                grp_data = pd.to_numeric(grouped.get_group(w_str), errors='coerce').dropna()
-                vals = []
-                for _lbl, _fn in stat_defs:
+            # ---- 4. WF MAP (행=PGM(pt), 열=wafer #1~25 고정) ----
+            # Wafer 좌표: flat-zone 회전이 반영된 보정 좌표(CHIP_X_ADJ/CHIP_Y_ADJ)가
+            # 있으면 우선 사용해 실제 웨이퍼 배치대로 그린다. 없으면 raw chip_x/y로 fallback.
+            map_x = 'CHIP_X_ADJ' if 'CHIP_X_ADJ' in item_df.columns else col_x
+            map_y = 'CHIP_Y_ADJ' if 'CHIP_Y_ADJ' in item_df.columns else col_y
+
+            # WF MAP 행 = PGM(pt)별 한 줄. PGM(pt) 컬럼이 있으면 그것으로 그룹핑(없으면 subitem).
+            _wfmap_grp_col = 'PGM(pt)' if 'PGM(pt)' in item_df.columns else col_sub
+            sub_groups = list(item_df.groupby(_wfmap_grp_col))
+            n_pgm = len(sub_groups) if len(sub_groups) > 0 else 1
+
+            # ---- WF MAP 공유 컬러 스케일 (spec line 기준 diverging, HTML과 동일 규칙) ----
+            wfmap_norm = _wfmap_norm(direction, wfmap_spec_low, wfmap_spec_high, item_df[item_name])
+
+            # ---- PPT WF MAP 좌표계 = '물리 mm' ----
+            # Chip_Radius fit(_wafer_circle_params): 각 shot 중심(격자좌표)과 Chip_Radius(mm)의 관계
+            #   r² = shot_w²(x-cx)² + shot_h²(y-cy)²  를 최소자승 fit → shot 크기(shot_w×shot_h mm,
+            # 비정사각 칩이면 서로 다름)와 wafer 중점(cx,cy)을 얻는다. 셀은 그 mm 좌표로 렌더한다:
+            #   · shot = (pitch·shot_w)×(pitch·shot_h) mm 직사각형 — 칩 물리 비율(w≠h) 그대로 표시
+            #   · wafer 외곽선 = 중점 기준 반경 150mm 정원 (mm 등방 좌표라 원 왜곡 여지 없음)
+            #   · aspect='equal' + 대칭 정사각 축범위(±_wf_L) → 셀 PNG가 항상 정사각 →
+            #     (CELL×CELL) 합성 리사이즈로도 원이 찌그러질 수 없다.
+            # (종전 '격자좌표+set_aspect(ky/kx)'는 원 왜곡, '등방(grid) bounding 원'은 외곽선이
+            #  실제 wafer 크기(150mm)와 무관해지는 문제 — mm 렌더는 둘 다 원천 해소.
+            #  Chip_Radius가 없으면 fit 폴백(등방 bounding 원)이 같은 150/semi 스케일 규칙으로 동작.)
+            _circ_ppt = _wafer_circle_params(item_df, map_x, map_y, col_rad,
+                                             mask_col=col_mask, main_vehicle=main_vehicle)
+            if _circ_ppt:
+                _wf_cx, _wf_cy = float(_circ_ppt[0]), float(_circ_ppt[1])
+                _mm_x = 150.0 / float(_circ_ppt[2])   # 격자 1칸당 mm (x) = shot_w
+                _mm_y = 150.0 / float(_circ_ppt[3])   # 격자 1칸당 mm (y) = shot_h
+            else:   # 좌표 무효(유효 shot<6) — 원 없이 격자 그대로(등방)
+                _wf_cx = float(pd.to_numeric(item_df[map_x], errors='coerce').mean())
+                _wf_cy = float(pd.to_numeric(item_df[map_y], errors='coerce').mean())
+                _mm_x = _mm_y = 1.0
+
+            # ---- WF MAP 배치: 행=PGM(pt), 열=wafer #1~25 고정 ----
+            # 각 wafer 셀을 '독립 단일 axes'(HTML spec-out WF MAP과 완전히 동일한 렌더 파이프라인)로
+            # 그린 뒤 PIL로 격자에 합성한다.
+            #   이전 방식(gridspec 25열 + set_aspect('box') + bbox_inches='tight')은 tight 재계산이
+            #   셀별 aspect 박스 조정과 충돌해 원을 찌그러뜨리고 shot을 원 밖으로 넘치게(이웃 셀과
+            #   겹침) 만들었다. 셀을 완전히 분리 렌더하면 이 상호작용이 원천적으로 사라져
+            #   배치가 HTML spec-out 맵과 동일해지고(=요청), color(diverging cmap/norm)만 달라진다.
+            FIXED_N_WAF = 25
+            grid_rows, grid_cols = n_pgm, FIXED_N_WAF
+            _multi_pgm = n_pgm > 1
+            cell_map = {(i, c): (sub_grp, str(c + 1), sub_name)
+                        for i, (sub_name, sub_grp) in enumerate(sub_groups)
+                        for c in range(FIXED_N_WAF)}
+            # shot 크기(mm) = 인접 shot 센터 간 pitch(격자)×mm 스케일 — 측정 pt 수와 무관·gap 없음
+            #   (좌표파일 layout 등록 시 pitch도 전체 layout 기준 — sparse 측정에서도 동일)
+            _pit_gx, _pit_gy = _wfmap_shot_pitch_xy(item_df, map_x, map_y, main_vehicle)
+            _shot_px = _pit_gx * _mm_x
+            _shot_py = _pit_gy * _mm_y
+            # 셀 공통 축범위(±_wf_L mm, 정사각): 150mm 원 + 모든 shot(반 pitch 여백 포함)을 포함
+            _xs_mm = (pd.to_numeric(item_df[map_x], errors='coerce') - _wf_cx) * _mm_x
+            _ys_mm = (pd.to_numeric(item_df[map_y], errors='coerce') - _wf_cy) * _mm_y
+            _ext_parts = [(150.0 if _circ_ppt else 0.0),
+                          float(_xs_mm.abs().max()) + _shot_px / 2.0,
+                          float(_ys_mm.abs().max()) + _shot_py / 2.0]
+            # chip layout 전체 grid도 축범위에 포함 (위치만 반영, 배경 회색 그리기 없음)
+            _bg_ppt_grid = _wfmap_full_grid(map_x, map_y, main_vehicle)
+            if _bg_ppt_grid is not None:
+                _bg_x_mm = (_bg_ppt_grid[0] - _wf_cx) * _mm_x
+                _bg_y_mm = (_bg_ppt_grid[1] - _wf_cy) * _mm_y
+                _ext_parts.append(float(np.abs(_bg_x_mm).max()) + _shot_px / 2.0)
+                _ext_parts.append(float(np.abs(_bg_y_mm).max()) + _shot_py / 2.0)
+            _wf_L = max(_ext_parts) * 1.04
+            if not np.isfinite(_wf_L) or _wf_L <= 0:
+                _wf_L = 160.0
+            _cmap_ppt = _wfmap_cmap(direction)
+
+            def _render_ppt_cell(w_grp):
+                """한 wafer를 물리 mm 좌표의 독립 axes로 렌더 → 정사각 PNG bytes.
+                shot=(pitch·shot_w)×(pitch·shot_h)mm 직사각형(칩 물리 비율 유지),
+                원=중점(0,0)·반경 150mm 정원. aspect='equal'+정사각 축범위(±_wf_L)라
+                크롭/리사이즈 왜곡이 구조적으로 불가능. color만 diverging(HTML과 동일 규칙)."""
+                _f, _a = plt.subplots(figsize=(0.62, 0.62))
+                _draw_wfmap_shots(_a,
+                                  (w_grp[map_x].astype(float).values - _wf_cx) * _mm_x,
+                                  (w_grp[map_y].astype(float).values - _wf_cy) * _mm_y,
+                                  _shot_px, _shot_py,
+                                  values=w_grp[item_name].astype(float).values,
+                                  cmap=_cmap_ppt, norm=wfmap_norm)
+                if _circ_ppt:   # wafer 외곽선 — 중점 기준 150mm 정원
+                    _add_wafer_circle(_a, (0.0, 0.0, 150.0, 150.0, 1.0), color='#000000', lw=1.0)
+                _a.set_xticks([]); _a.set_yticks([]); _a.set_facecolor('white')
+                _a.set_aspect('equal', adjustable='box')   # mm 등방 — 원 정원·shot 물리 비율
+                for _sp in _a.spines.values():
+                    _sp.set_visible(False)
+                # 방향: 왼쪽=chip_x_adj 작은 쪽, 위쪽=chip_y_adj 작은 쪽(y축 반전). HTML과 동일
+                _a.set_xlim(-_wf_L, _wf_L); _a.set_ylim(_wf_L, -_wf_L)
+                _f.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
+                _png = _wfmap_png_bytes(_f, max(int(dpi), 200), colors=256)   # HTML 단일맵과 동일 인코딩
+                plt.close(_f)
+                return _png
+
+            from PIL import Image as _PImg, ImageDraw as _PDraw, ImageFont as _PFont
+            from matplotlib.colors import to_rgb as _to_rgb
+            # 측정된 wafer 셀만 렌더(빈 칸은 흰 배경). {(r,c): png bytes}
+            _cells = {}
+            for r in range(grid_rows):
+                for c in range(grid_cols):
+                    sub_grp, w, sub_name = cell_map[(r, c)]
+                    w_grp = sub_grp[sub_grp[w_col] == w]
+                    if not w_grp.empty:
+                        _cells[(r, c)] = _render_ppt_cell(w_grp)
+            sc = bool(_cells)   # 컬러바 렌더 여부 플래그(아래 colorbar 블록에서 사용)
+
+            # 셀 픽셀 크기 확정(모든 셀 동일) — 합성 격자의 한 칸
+            if _cells:
+                CELL = _PImg.open(_io.BytesIO(next(iter(_cells.values())))).size[0]
+            else:
+                CELL = max(int(dpi), 200)
+            _gx = max(2, int(CELL * 0.05))                 # 열 간격
+            _gy = max(2, int(CELL * 0.06))                 # 행 간격
+            # 25열 전체 합성 이미지는 PPT에서 좌열 폭에 맞춰 크게 축소된다. 최종 표시 기준
+            # 약 8.5pt가 되도록 내부 wafer# 글자를 CELL의 40%, 라벨 영역을 50%로 확보한다.
+            _lab_h = max(22, int(CELL * 0.50))
+            _lab_w = max(12, int(CELL * 0.16)) if _multi_pgm else 2   # 좌측 PGM(pt) 라벨 폭
+            _cw = _lab_w + grid_cols * CELL + (grid_cols - 1) * _gx
+            _ch = grid_rows * CELL + (grid_rows - 1) * _gy + _lab_h
+            _canvas = _PImg.new('RGB', (_cw, _ch), 'white')
+            _dr = _PDraw.Draw(_canvas)
+
+            def _pick_font(px, bold=False):
+                _fonts = (('NanumGothicBold.ttf', 'malgunbd.ttf', 'arialbd.ttf', 'DejaVuSans-Bold.ttf')
+                          if bold else
+                          ('NanumGothic.ttf', 'malgun.ttf', 'arial.ttf', 'DejaVuSans.ttf'))
+                for _fn in _fonts:
                     try:
-                        vals.append(_fmt_stat_value(_fn(grp_data)))
+                        return _PFont.truetype(_fn, px)
                     except Exception:
-                        vals.append("-")
-                out['stat_cells'][w_idx] = vals
-            else:
-                out['stat_cells'][w_idx] = None
-
-        # 통계표 (lot_id 포함) — HTML score board처럼 (lot, wafer)별 값. 측정된 것만.
-        out['stat_cells_lw'] = {}   # {(lot_str, wafer_int): [v1..v4]}
-        _lc_s = 'fab_lot_id' if 'fab_lot_id' in item_df.columns else None
-        if _lc_s:
-            for (_lot, _waf), _g in item_df.groupby([_lc_s, w_col]):
+                        continue
                 try:
-                    _wi = int(str(_waf).replace('#', ''))
-                except (ValueError, TypeError):
-                    continue
-                _d = pd.to_numeric(_g[item_name], errors='coerce').dropna()
-                _vals = []
-                for _lbl, _fn in stat_defs:
-                    try:
-                        _vals.append(_fmt_stat_value(_fn(_d)))
-                    except Exception:
-                        _vals.append("-")
-                out['stat_cells_lw'][(str(_lot), _wi)] = _vals
+                    return _PFont.load_default(size=px)
+                except TypeError:
+                    return _PFont.load_default()
+            _fw = _pick_font(max(18, int(CELL * 0.40)), bold=True)  # wafer# — PPT 최종 표시 약 8.5pt
+            _fp = _pick_font(max(8, int(CELL * 0.13)))     # PGM(pt) 폰트
+            _wafer_lab_rgb = (0, 0, 0)
+            _pgm_lab_rgb = tuple(int(v * 255) for v in _to_rgb(C_NEUTRAL))
 
-        # ---- 차트 임시 버퍼 (디스크 파일 없이 메모리에서 처리) ----
-        tmp_box = _io.BytesIO()
-        tmp_map = _io.BytesIO()
+            for r in range(grid_rows):
+                for c in range(grid_cols):
+                    _x0 = _lab_w + c * (CELL + _gx)
+                    _y0 = r * (CELL + _gy)
+                    _cb = _cells.get((r, c))
+                    if _cb is not None:
+                        _cim = _PImg.open(_io.BytesIO(_cb)).convert('RGB')
+                        if _cim.size != (CELL, CELL):
+                            _cim = _cim.resize((CELL, CELL))
+                        _canvas.paste(_cim, (_x0, _y0))
+                    if r == grid_rows - 1:   # 맨 아래 행에만 wafer 번호(#1~25)
+                        _dr.text((_x0 + CELL / 2.0, _ch - _lab_h / 2.0), f"#{c + 1}",
+                                 fill=_wafer_lab_rgb, font=_fw, anchor='mm')
+                # 다중 PGM이면 각 행 좌측에 PGM(pt) 라벨(세로). 형식: step_seq(pt수), '_1.0'·'pt' 제거
+                if _multi_pgm:
+                    sub_grp0, _w0, sub_name0 = cell_map[(r, 0)]
+                    _pl = str(sub_name0)
+                    if 'PGM(pt)' in sub_grp0.columns:
+                        _u = sub_grp0['PGM(pt)'].dropna()
+                        if len(_u):
+                            _pl = str(_u.iloc[0])
+                    _pl = re.sub(r'_[0-9.]+$', '', _pl)              # Duplicate_Count 접미사(_1.0 등) 제거
+                    _pl = re.sub(r'(\d+)\s*pt\)', r'\1)', _pl)       # "(137pt)" → "(137)"
+                    _ti = _PImg.new('RGBA', (CELL, _lab_w), (0, 0, 0, 0))
+                    _PDraw.Draw(_ti).text((CELL / 2.0, _lab_w / 2.0), _pl,
+                                          fill=_pgm_lab_rgb + (255,), font=_fp, anchor='mm')
+                    _ti = _ti.rotate(90, expand=True)
+                    _yc = r * (CELL + _gy) + (CELL - _ti.size[1]) // 2
+                    _canvas.paste(_ti, (0, max(0, _yc)), _ti)
+
+            _obio = _io.BytesIO()
+            _canvas.save(_obio, format='PNG', optimize=True)
+            out['imgs']['map'] = _obio.getvalue()
+            # 배치 비율(h/w) — 합성 캔버스 실제 픽셀비. 슬라이드에서 폭에 맞춰 배치된다.
+            out['map_ratio'] = (_ch / _cw) if _cw else 0.1
+
+            # ---- WF MAP 컬러바(별도 이미지) : 슬라이드에서 항상 같은 크기로 우측에 세로로 길게 배치 ----
+            if sc:
+                import matplotlib.cm as _cm
+                tmp_cbar = _io.BytesIO()
+                _sm = _cm.ScalarMappable(norm=wfmap_norm, cmap=_wfmap_cmap(direction))
+                _sm.set_array([])
+                fig_cb = plt.figure(figsize=(0.62, 3.2))
+                _cax = fig_cb.add_axes([0.04, 0.04, 0.30, 0.92])
+                _cb = fig_cb.colorbar(_sm, cax=_cax)
+                _cb.ax.tick_params(labelsize=7)
+                fig_cb.savefig(tmp_cbar, format='png', dpi=max(int(dpi), 150),
+                               bbox_inches='tight', facecolor='white')
+                plt.close(fig_cb)
+                out['imgs']['cbar'] = tmp_cbar.getvalue()
+
         tmp_trend = _io.BytesIO()
-        tmp_rad = _io.BytesIO()
-        tmp_cum = _io.BytesIO()
-
-        plt.rcParams['axes.linewidth'] = 0.6
-        plt.rcParams['font.size'] = 7.5
-        plt.rcParams['font.family'] = FONT
-        plt.rcParams['axes.unicode_minus'] = False
-        plt.rcParams['axes.facecolor'] = '#ffffff'
-        plt.rcParams['figure.facecolor'] = '#ffffff'
-        plt.rcParams['grid.color'] = C_GRID
-        plt.rcParams['grid.linestyle'] = '-'
-        plt.rcParams['grid.linewidth'] = 0.5
-
-        # ---- 3. BOX Plot (측정된 웨이퍼만 플롯하되, X축은 1~25 고정) ----
-        fig_box, ax_box = plt.subplots(figsize=(7.8, 1.9))
-        box_data = []
-        box_positions = []
-        for w in measured_wafers:
-            try:
-                w_int = int(w)
-                box_positions.append(w_int)
-                box_data.append(grouped.get_group(w).values)
-            except ValueError: pass
-
-        if len(box_data) > 0:
-            bplot = ax_box.boxplot(
-                box_data, positions=box_positions, patch_artist=True,
-                showfliers=True,
-                flierprops={'marker': 'o', 'markerfacecolor': C_ACCENT, 'markeredgecolor': 'none', 'markersize': 3.5},
-                medianprops={'color': C_NEUTRAL, 'linewidth': 1.2},
-                whiskerprops={'color': '#94a3b8', 'linewidth': 0.8},
-                capprops={'color': '#94a3b8', 'linewidth': 0.8}
-            )
-            for i, patch in enumerate(bplot['boxes']):
-                w_str = str(box_positions[i])
-                patch.set_facecolor(w_colors.get(w_str, '#ffffff'))
-                patch.set_alpha(0.85)
-                patch.set_edgecolor(C_NEUTRAL)
-                patch.set_linewidth(0.8)
-
-        # Spec line은 그리되 범례(Spec Limit)는 표시하지 않음
-        if spec_low is not None:
-            ax_box.axhline(y=float(spec_low), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
-        if spec_high is not None:
-            ax_box.axhline(y=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
-        # 대상 lot_id(리포트 subject)에 속한 wafer 번호 → x축 라벨에 '*' 표기 + 우하단 범례
-        _tgt_wafnums = set()
-        if 'fab_lot_id' in item_df.columns:
-            _tl_box = item_df[item_df['fab_lot_id'].astype(str) == str(target_lot_id)]
-            for _w in _tl_box[w_col].unique():
-                try:
-                    _tgt_wafnums.add(int(_w))
-                except (ValueError, TypeError):
-                    pass
-        ax_box.set_xticks(range(1, 26))
-        ax_box.set_xticklabels([f"#{i}" + ("*" if i in _tgt_wafnums else "") for i in range(1, 26)])
-        ax_box.set_xlim(0.5, 25.5)
-        ax_box.tick_params(axis='x', rotation=45, labelsize=7)
-        _target_blue = '#0033CC'
-        for _widx, _tick_label in enumerate(ax_box.get_xticklabels(), start=1):
-            if _widx in _tgt_wafnums:
-                # Matplotlib tick 한 개 안에서 '*'만 별도 색칠하기 어려우므로 대상 wafer의
-                # '#번호*' 전체를 파란색·볼드로 표시해 별표가 확실히 보이게 한다.
-                _tick_label.set_color(_target_blue)
-                _tick_label.set_fontweight('bold')
-        if _tgt_wafnums:
-            # box plot '바깥 아래'(축 아래, x라벨 밑)에 '*: lot_id' 범례를 우측 정렬로 배치
-            #  (y<0 = 축 영역 밖 아래, 오른쪽 끝을 box plot 우측에 맞춤)
-            ax_box.text(1.0, -0.5, f"*: {target_lot_id}", transform=ax_box.transAxes,
-                        ha='right', va='top', fontsize=6, color=_target_blue,
-                        fontstyle='italic', fontweight='bold')
-        _label_axes(ax_box, xlabel="Wafer #", ylabel=y_label)
-        _remove_spines(ax_box)
-        ax_box.set_axisbelow(True)
-        if log_scale:
-            # 로그 스케일은 10의 거듭제곱 major tick/grid만 표시한다.
-            from matplotlib.ticker import LogLocator
-            ax_box.set_yscale('log')
-            ax_box.yaxis.set_major_locator(LogLocator(base=10.0, numticks=15))
-            ax_box.minorticks_off()
-            ax_box.grid(True, which='major', axis='both', color=C_GRID, linestyle='-', linewidth=0.6)
-        else:
-            ax_box.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
-            ax_box.grid(True, which='major', axis='both', color=C_GRID, linestyle='-', linewidth=0.5)
-        # 용량 다이어트를 위한 JPG 포맷 저장 및 quality 옵션 적용
-        fig_box.savefig(tmp_box, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
-        plt.close(fig_box)
-        out['imgs']['box'] = tmp_box.getvalue()
-
-        # ---- 4. WF MAP (행=PGM(pt), 열=wafer #1~25 고정) ----
-        # Wafer 좌표: flat-zone 회전이 반영된 보정 좌표(CHIP_X_ADJ/CHIP_Y_ADJ)가
-        # 있으면 우선 사용해 실제 웨이퍼 배치대로 그린다. 없으면 raw chip_x/y로 fallback.
-        map_x = 'CHIP_X_ADJ' if 'CHIP_X_ADJ' in item_df.columns else col_x
-        map_y = 'CHIP_Y_ADJ' if 'CHIP_Y_ADJ' in item_df.columns else col_y
-
-        # WF MAP 행 = PGM(pt)별 한 줄. PGM(pt) 컬럼이 있으면 그것으로 그룹핑(없으면 subitem).
-        _wfmap_grp_col = 'PGM(pt)' if 'PGM(pt)' in item_df.columns else col_sub
-        sub_groups = list(item_df.groupby(_wfmap_grp_col))
-        n_pgm = len(sub_groups) if len(sub_groups) > 0 else 1
-
-        # ---- WF MAP 공유 컬러 스케일 (spec line 기준 diverging, HTML과 동일 규칙) ----
-        wfmap_norm = _wfmap_norm(direction, wfmap_spec_low, wfmap_spec_high, item_df[item_name])
-
-        # ---- PPT WF MAP 좌표계 = '물리 mm' ----
-        # Chip_Radius fit(_wafer_circle_params): 각 shot 중심(격자좌표)과 Chip_Radius(mm)의 관계
-        #   r² = shot_w²(x-cx)² + shot_h²(y-cy)²  를 최소자승 fit → shot 크기(shot_w×shot_h mm,
-        # 비정사각 칩이면 서로 다름)와 wafer 중점(cx,cy)을 얻는다. 셀은 그 mm 좌표로 렌더한다:
-        #   · shot = (pitch·shot_w)×(pitch·shot_h) mm 직사각형 — 칩 물리 비율(w≠h) 그대로 표시
-        #   · wafer 외곽선 = 중점 기준 반경 150mm 정원 (mm 등방 좌표라 원 왜곡 여지 없음)
-        #   · aspect='equal' + 대칭 정사각 축범위(±_wf_L) → 셀 PNG가 항상 정사각 →
-        #     (CELL×CELL) 합성 리사이즈로도 원이 찌그러질 수 없다.
-        # (종전 '격자좌표+set_aspect(ky/kx)'는 원 왜곡, '등방(grid) bounding 원'은 외곽선이
-        #  실제 wafer 크기(150mm)와 무관해지는 문제 — mm 렌더는 둘 다 원천 해소.
-        #  Chip_Radius가 없으면 fit 폴백(등방 bounding 원)이 같은 150/semi 스케일 규칙으로 동작.)
-        _circ_ppt = _wafer_circle_params(item_df, map_x, map_y, col_rad,
-                                         mask_col=col_mask, main_vehicle=main_vehicle)
-        if _circ_ppt:
-            _wf_cx, _wf_cy = float(_circ_ppt[0]), float(_circ_ppt[1])
-            _mm_x = 150.0 / float(_circ_ppt[2])   # 격자 1칸당 mm (x) = shot_w
-            _mm_y = 150.0 / float(_circ_ppt[3])   # 격자 1칸당 mm (y) = shot_h
-        else:   # 좌표 무효(유효 shot<6) — 원 없이 격자 그대로(등방)
-            _wf_cx = float(pd.to_numeric(item_df[map_x], errors='coerce').mean())
-            _wf_cy = float(pd.to_numeric(item_df[map_y], errors='coerce').mean())
-            _mm_x = _mm_y = 1.0
-
-        # ---- WF MAP 배치: 행=PGM(pt), 열=wafer #1~25 고정 ----
-        # 각 wafer 셀을 '독립 단일 axes'(HTML spec-out WF MAP과 완전히 동일한 렌더 파이프라인)로
-        # 그린 뒤 PIL로 격자에 합성한다.
-        #   이전 방식(gridspec 25열 + set_aspect('box') + bbox_inches='tight')은 tight 재계산이
-        #   셀별 aspect 박스 조정과 충돌해 원을 찌그러뜨리고 shot을 원 밖으로 넘치게(이웃 셀과
-        #   겹침) 만들었다. 셀을 완전히 분리 렌더하면 이 상호작용이 원천적으로 사라져
-        #   배치가 HTML spec-out 맵과 동일해지고(=요청), color(diverging cmap/norm)만 달라진다.
-        FIXED_N_WAF = 25
-        grid_rows, grid_cols = n_pgm, FIXED_N_WAF
-        _multi_pgm = n_pgm > 1
-        cell_map = {(i, c): (sub_grp, str(c + 1), sub_name)
-                    for i, (sub_name, sub_grp) in enumerate(sub_groups)
-                    for c in range(FIXED_N_WAF)}
-        # shot 크기(mm) = 인접 shot 센터 간 pitch(격자)×mm 스케일 — 측정 pt 수와 무관·gap 없음
-        #   (좌표파일 layout 등록 시 pitch도 전체 layout 기준 — sparse 측정에서도 동일)
-        _pit_gx, _pit_gy = _wfmap_shot_pitch_xy(item_df, map_x, map_y, main_vehicle)
-        _shot_px = _pit_gx * _mm_x
-        _shot_py = _pit_gy * _mm_y
-        # 셀 공통 축범위(±_wf_L mm, 정사각): 150mm 원 + 모든 shot(반 pitch 여백 포함)을 포함
-        _xs_mm = (pd.to_numeric(item_df[map_x], errors='coerce') - _wf_cx) * _mm_x
-        _ys_mm = (pd.to_numeric(item_df[map_y], errors='coerce') - _wf_cy) * _mm_y
-        _ext_parts = [(150.0 if _circ_ppt else 0.0),
-                      float(_xs_mm.abs().max()) + _shot_px / 2.0,
-                      float(_ys_mm.abs().max()) + _shot_py / 2.0]
-        # chip layout 전체 grid도 축범위에 포함 (위치만 반영, 배경 회색 그리기 없음)
-        _bg_ppt_grid = _wfmap_full_grid(map_x, map_y, main_vehicle)
-        if _bg_ppt_grid is not None:
-            _bg_x_mm = (_bg_ppt_grid[0] - _wf_cx) * _mm_x
-            _bg_y_mm = (_bg_ppt_grid[1] - _wf_cy) * _mm_y
-            _ext_parts.append(float(np.abs(_bg_x_mm).max()) + _shot_px / 2.0)
-            _ext_parts.append(float(np.abs(_bg_y_mm).max()) + _shot_py / 2.0)
-        _wf_L = max(_ext_parts) * 1.04
-        if not np.isfinite(_wf_L) or _wf_L <= 0:
-            _wf_L = 160.0
-        _cmap_ppt = _wfmap_cmap(direction)
-
-        def _render_ppt_cell(w_grp):
-            """한 wafer를 물리 mm 좌표의 독립 axes로 렌더 → 정사각 PNG bytes.
-            shot=(pitch·shot_w)×(pitch·shot_h)mm 직사각형(칩 물리 비율 유지),
-            원=중점(0,0)·반경 150mm 정원. aspect='equal'+정사각 축범위(±_wf_L)라
-            크롭/리사이즈 왜곡이 구조적으로 불가능. color만 diverging(HTML과 동일 규칙)."""
-            _f, _a = plt.subplots(figsize=(0.62, 0.62))
-            _draw_wfmap_shots(_a,
-                              (w_grp[map_x].astype(float).values - _wf_cx) * _mm_x,
-                              (w_grp[map_y].astype(float).values - _wf_cy) * _mm_y,
-                              _shot_px, _shot_py,
-                              values=w_grp[item_name].astype(float).values,
-                              cmap=_cmap_ppt, norm=wfmap_norm)
-            if _circ_ppt:   # wafer 외곽선 — 중점 기준 150mm 정원
-                _add_wafer_circle(_a, (0.0, 0.0, 150.0, 150.0, 1.0), color='#000000', lw=1.0)
-            _a.set_xticks([]); _a.set_yticks([]); _a.set_facecolor('white')
-            _a.set_aspect('equal', adjustable='box')   # mm 등방 — 원 정원·shot 물리 비율
-            for _sp in _a.spines.values():
-                _sp.set_visible(False)
-            # 방향: 왼쪽=chip_x_adj 작은 쪽, 위쪽=chip_y_adj 작은 쪽(y축 반전). HTML과 동일
-            _a.set_xlim(-_wf_L, _wf_L); _a.set_ylim(_wf_L, -_wf_L)
-            _f.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
-            _png = _wfmap_png_bytes(_f, max(int(dpi), 200), colors=256)   # HTML 단일맵과 동일 인코딩
-            plt.close(_f)
-            return _png
-
-        from PIL import Image as _PImg, ImageDraw as _PDraw, ImageFont as _PFont
-        from matplotlib.colors import to_rgb as _to_rgb
-        # 측정된 wafer 셀만 렌더(빈 칸은 흰 배경). {(r,c): png bytes}
-        _cells = {}
-        for r in range(grid_rows):
-            for c in range(grid_cols):
-                sub_grp, w, sub_name = cell_map[(r, c)]
-                w_grp = sub_grp[sub_grp[w_col] == w]
-                if not w_grp.empty:
-                    _cells[(r, c)] = _render_ppt_cell(w_grp)
-        sc = bool(_cells)   # 컬러바 렌더 여부 플래그(아래 colorbar 블록에서 사용)
-
-        # 셀 픽셀 크기 확정(모든 셀 동일) — 합성 격자의 한 칸
-        if _cells:
-            CELL = _PImg.open(_io.BytesIO(next(iter(_cells.values())))).size[0]
-        else:
-            CELL = max(int(dpi), 200)
-        _gx = max(2, int(CELL * 0.05))                 # 열 간격
-        _gy = max(2, int(CELL * 0.06))                 # 행 간격
-        # 25열 전체 합성 이미지는 PPT에서 좌열 폭에 맞춰 크게 축소된다. 최종 표시 기준
-        # 약 8.5pt가 되도록 내부 wafer# 글자를 CELL의 40%, 라벨 영역을 50%로 확보한다.
-        _lab_h = max(22, int(CELL * 0.50))
-        _lab_w = max(12, int(CELL * 0.16)) if _multi_pgm else 2   # 좌측 PGM(pt) 라벨 폭
-        _cw = _lab_w + grid_cols * CELL + (grid_cols - 1) * _gx
-        _ch = grid_rows * CELL + (grid_rows - 1) * _gy + _lab_h
-        _canvas = _PImg.new('RGB', (_cw, _ch), 'white')
-        _dr = _PDraw.Draw(_canvas)
-
-        def _pick_font(px, bold=False):
-            _fonts = (('NanumGothicBold.ttf', 'malgunbd.ttf', 'arialbd.ttf', 'DejaVuSans-Bold.ttf')
-                      if bold else
-                      ('NanumGothic.ttf', 'malgun.ttf', 'arial.ttf', 'DejaVuSans.ttf'))
-            for _fn in _fonts:
-                try:
-                    return _PFont.truetype(_fn, px)
-                except Exception:
-                    continue
-            try:
-                return _PFont.load_default(size=px)
-            except TypeError:
-                return _PFont.load_default()
-        _fw = _pick_font(max(18, int(CELL * 0.40)), bold=True)  # wafer# — PPT 최종 표시 약 8.5pt
-        _fp = _pick_font(max(8, int(CELL * 0.13)))     # PGM(pt) 폰트
-        _wafer_lab_rgb = (0, 0, 0)
-        _pgm_lab_rgb = tuple(int(v * 255) for v in _to_rgb(C_NEUTRAL))
-
-        for r in range(grid_rows):
-            for c in range(grid_cols):
-                _x0 = _lab_w + c * (CELL + _gx)
-                _y0 = r * (CELL + _gy)
-                _cb = _cells.get((r, c))
-                if _cb is not None:
-                    _cim = _PImg.open(_io.BytesIO(_cb)).convert('RGB')
-                    if _cim.size != (CELL, CELL):
-                        _cim = _cim.resize((CELL, CELL))
-                    _canvas.paste(_cim, (_x0, _y0))
-                if r == grid_rows - 1:   # 맨 아래 행에만 wafer 번호(#1~25)
-                    _dr.text((_x0 + CELL / 2.0, _ch - _lab_h / 2.0), f"#{c + 1}",
-                             fill=_wafer_lab_rgb, font=_fw, anchor='mm')
-            # 다중 PGM이면 각 행 좌측에 PGM(pt) 라벨(세로). 형식: step_seq(pt수), '_1.0'·'pt' 제거
-            if _multi_pgm:
-                sub_grp0, _w0, sub_name0 = cell_map[(r, 0)]
-                _pl = str(sub_name0)
-                if 'PGM(pt)' in sub_grp0.columns:
-                    _u = sub_grp0['PGM(pt)'].dropna()
-                    if len(_u):
-                        _pl = str(_u.iloc[0])
-                _pl = re.sub(r'_[0-9.]+$', '', _pl)              # Duplicate_Count 접미사(_1.0 등) 제거
-                _pl = re.sub(r'(\d+)\s*pt\)', r'\1)', _pl)       # "(137pt)" → "(137)"
-                _ti = _PImg.new('RGBA', (CELL, _lab_w), (0, 0, 0, 0))
-                _PDraw.Draw(_ti).text((CELL / 2.0, _lab_w / 2.0), _pl,
-                                      fill=_pgm_lab_rgb + (255,), font=_fp, anchor='mm')
-                _ti = _ti.rotate(90, expand=True)
-                _yc = r * (CELL + _gy) + (CELL - _ti.size[1]) // 2
-                _canvas.paste(_ti, (0, max(0, _yc)), _ti)
-
-        _obio = _io.BytesIO()
-        _canvas.save(_obio, format='PNG', optimize=True)
-        out['imgs']['map'] = _obio.getvalue()
-        # 배치 비율(h/w) — 합성 캔버스 실제 픽셀비. 슬라이드에서 폭에 맞춰 배치된다.
-        out['map_ratio'] = (_ch / _cw) if _cw else 0.1
-
-        # ---- WF MAP 컬러바(별도 이미지) : 슬라이드에서 항상 같은 크기로 우측에 세로로 길게 배치 ----
-        if sc:
-            import matplotlib.cm as _cm
-            tmp_cbar = _io.BytesIO()
-            _sm = _cm.ScalarMappable(norm=wfmap_norm, cmap=_wfmap_cmap(direction))
-            _sm.set_array([])
-            fig_cb = plt.figure(figsize=(0.62, 3.2))
-            _cax = fig_cb.add_axes([0.04, 0.04, 0.30, 0.92])
-            _cb = fig_cb.colorbar(_sm, cax=_cax)
-            _cb.ax.tick_params(labelsize=7)
-            fig_cb.savefig(tmp_cbar, format='png', dpi=max(int(dpi), 150),
-                           bbox_inches='tight', facecolor='white')
-            plt.close(fig_cb)
-            out['imgs']['cbar'] = tmp_cbar.getvalue()
 
         # ---- 5. Trend Chart (vehicle/with_vehicle/target 비교 + vehicle 1~99% 구름대) ----
         tdf = item_df_full.copy()
@@ -2864,20 +2867,7 @@ def _render_item_charts(task):
             _band_pct = 0.0
         if not (0 < _band_pct < 50):
             _band_pct = 0.0                      # 0/None/범위 밖 → 구름대 포함 OFF(종전 동작)
-        _band_roll = None
-        if len(veh_df) > 0:
-            _b = veh_df[['tkout_time', item_name]].dropna().sort_values('tkout_time')
-            if len(_b) > 0:
-                _b = _b.assign(date=_b['tkout_time'].dt.date)
-                _aggs = {'median': 'median',
-                         'q01': lambda x: x.quantile(0.01),
-                         'q99': lambda x: x.quantile(0.99)}
-                if _band_pct:
-                    _aggs['qlo'] = lambda x, _q=_band_pct / 100.0: x.quantile(_q)
-                    _aggs['qhi'] = lambda x, _q=1.0 - _band_pct / 100.0: x.quantile(_q)
-                _daily = _b.groupby('date')[item_name].agg(**_aggs).reset_index()
-                _daily['date'] = pd.to_datetime(_daily['date'])
-                _band_roll = _daily.set_index('date').sort_index().rolling('3D', min_periods=1).mean()
+        _band_roll = cached_trend_band(veh_df,item_name,_band_pct)
 
         def _draw_trend(ax):
             # vehicle 기준 1~99% 구름대 + median (main vehicle 데이터만)
@@ -2996,6 +2986,11 @@ def _render_item_charts(task):
             _label_axes(
                 ax, xlabel="DC tkout_time", ylabel=y_label,
                 ylabel_size=float(cfg.get('trend_yaxis_label_font_pt', 8.5) or 8.5))
+            label = ax.yaxis.label
+            label.set_text(str(y_label).replace('\n', ' '))
+            label.set_fontsize(max(5.0, min(label.get_fontsize(), 160.0 / max(len(label.get_text()), 1))))
+            label.set_in_layout(False)
+            # Fixed canvas clips unusually long labels without changing plot geometry.
             if log_scale: ax.set_yscale('log')
             # Trend 범례 좌상단 고정 — 흰 배경 + 옅은 테두리, 글자·항목 간격 축소(컴팩트)
             _leg = ax.legend(fontsize=6, loc='upper left', frameon=True, facecolor='white',
@@ -3009,10 +3004,13 @@ def _render_item_charts(task):
             ax.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
 
         fig_trend, ax_trend = plt.subplots(figsize=(4.55, 1.75))
+        fig_trend.subplots_adjust(left=0.18, right=0.98, bottom=0.27, top=0.97)
         _draw_trend(ax_trend)
-        fig_trend.savefig(tmp_trend, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
+        fig_trend.savefig(tmp_trend, format='jpg', dpi=dpi, facecolor='white', pil_kwargs={'quality': jpg_q})
         plt.close(fig_trend)
         out['imgs']['trend'] = tmp_trend.getvalue()
+        if cfg.get('trend_only'):
+            return out
 
         # index(alias) Trend scatter 차트만 RUN/TEMP에 alias명.png로 저장 (Anomaly/HTML 재사용)
         safe_name = re.sub(r'[\\/:*?"<>|]', '_', str(item_name))
@@ -3028,6 +3026,8 @@ def _render_item_charts(task):
             fig_trend_png.savefig(os.path.join(run_temp, f"{safe_name}.png"),
                                   dpi=cfg.get('html_chart_dpi', 100), facecolor='white')
             plt.close(fig_trend_png)
+            with open(os.path.join(run_temp, f'{safe_name}.png'), 'rb') as _png_file:
+                out['trend_png'] = _png_file.read()
         except Exception as e:
             out['warnings'].append(f"Failed to save RUN/TEMP/{safe_name}.png: {e}")
 
@@ -3313,7 +3313,7 @@ def render_wafer_wfmaps_batch(df, item_specs, min_pts=50, lot_prefix=None,
 def insert_plots(merged_df, prs, description_image_info_dict,
                  target_lot_id, target_root_lot_id,
                  target_DC_step, target_DC_step_id,
-                 spec_data, img_quality=12, ref=False, reformatter=None, dpi=None):
+                 spec_data, img_quality=12, ref=False, reformatter=None, dpi=None, trend_only=False):
     """최고급 다중 차트 및 통계표 대시보드를 생성하여 PPT에 삽입.
 
     각 측정 항목(item)에 대해 하나의 슬라이드를 생성하며, 슬라이드 구성:
@@ -3377,7 +3377,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
     metrics_dict = {}
 
     import os
-    os.makedirs("RUN/TEMP", exist_ok=True)
+    os.makedirs(report_temp_dir(), exist_ok=True)
 
     # --- 페이지 index 목록 구성 (spec_data 항목 + Reformatize 파생 항목 포함) ---
     # Reformatize는 ADDP FORM으로 단일/다중 컬럼 파생 index를 만든다.
@@ -3500,7 +3500,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
 
     # 워커에 넘길 경량 설정(dict) — 워커는 GLOBAL_CONFIG(yaml 미로드)를 참조하지 않는다
     cfg_task = {
-        'dpi': dpi, 'jpg_q': jpg_q, 'map_q': map_q,
+        'dpi': dpi, 'jpg_q': jpg_q, 'map_q': map_q, 'trend_only': trend_only,
         'C_NAVY': C_NAVY, 'C_ACCENT': C_ACCENT, 'C_NEUTRAL': C_NEUTRAL,
         'C_GRID': C_GRID, 'C_SPINE': C_SPINE, 'C_VEHICLE': C_VEHICLE,
         'C_BAND': C_BAND, 'C_WV': C_WV, 'WV_PALETTE': WV_PALETTE, 'FONT': FONT,
@@ -3510,7 +3510,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
         'trend_yaxis_label_font_pt': GLOBAL_CONFIG.get('trend_yaxis_label_font_pt', 8.5),
         'trend_axis_tick_font_pt': GLOBAL_CONFIG.get('trend_axis_tick_font_pt', 7.5),
         'html_chart_dpi': getattr(GLOBAL_CONFIG, 'html_chart_dpi', 100),
-        'run_temp_dir': os.path.abspath(os.path.join('RUN', 'TEMP')),
+        'run_temp_dir': os.path.abspath(report_temp_dir()),
         # 좌표파일(Zone_Define) chip layout(main vehicle 필터 적용) — 워커의 WF MAP geometry 기준.
         # 워커는 GLOBAL_CONFIG(vehicle)를 모르므로 메인에서 MASK 필터를 마친 표준형(records)을 넘긴다.
         'chip_layout': (lambda _l: _l.to_dict('records') if _l is not None else None)(
@@ -3626,7 +3626,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
     _pump()
 
     # 슬라이드 공통 정적 요소: Wafer 색 범례는 항목과 무관 → 1회만 렌더링해 재사용
-    leg_bytes = _render_wafer_legend_bytes(cfg_task)
+    leg_bytes = b'' if trend_only else _render_wafer_legend_bytes(cfg_task)
 
     # --- 항목별 슬라이드 조립 루프 (렌더링 결과를 REPORT ORDER 순서로 소비) ---
     for idx, (item_name, spec_name) in enumerate(plot_items, start=1):
@@ -3642,7 +3642,7 @@ def insert_plots(merged_df, prs, description_image_info_dict,
         #   실제 데이터가 찍힌 CAT2에만 간지를 붙이기 위해, 여기서는 대기(_pending_desc)로만 잡아둔다.
         #   아래에서 이 CAT2의 item이 '실제 chart 슬라이드'를 만들 때(=데이터 존재) 그 직전에 삽입한다.
         #   데이터가 하나도 없는 CAT2는 다음 CAT2로 넘어가며 대기가 덮어써져 간지가 붙지 않는다.
-        if getattr(GLOBAL_CONFIG, 'use_description_page', True) and 'CAT2' in spec_data.columns:
+        if not trend_only and getattr(GLOBAL_CONFIG, 'use_description_page', True) and 'CAT2' in spec_data.columns:
             cat2 = str(spec_data.loc[spec_name, 'CAT2']).strip()
             if cat2 != current_cat and cat2.lower() != 'nan':
                 current_cat = cat2
@@ -3685,7 +3685,13 @@ def insert_plots(merged_df, prs, description_image_info_dict,
             print(f"[{idx}/{total_items}] {item_name} 건너뜀 ({res['reason']})")
             continue
         if res['status'] == 'error':
+            if trend_only:
+                raise RuntimeError(f"ALL trend 렌더링 실패: {item_name}: {res['reason']}")
             print(f"[ERROR] {item_name} 차트 생성 중 에러 발생: {res['reason']}")
+            continue
+
+        if trend_only:
+            item_slide_map[item_name] = (str(spec_data.loc[spec_name, 'CAT2']), res['imgs']['trend'])
             continue
 
         if res.get('metrics'):
@@ -4101,6 +4107,7 @@ def getData_with_retry(params, custom_columns=None, user_name=None,
         _t.join(timeout_sec)
 
         if _t.is_alive():
+            raise TimeoutError(f'bigdatalake query timeout after {timeout_sec}s; no overlapping retry thread')
             print(f"[WARN] bigdatalake 쿼리 타임아웃({timeout_sec // 60}분 초과) — 강제 중단 후 재시도 (attempt {attempt})")
         elif 'err' in _res:
             print(f"[WARN] bigdatalake 쿼리 실패: {_res['err']} (attempt {attempt})")
@@ -4114,7 +4121,7 @@ def getData_with_retry(params, custom_columns=None, user_name=None,
             _w = retry_wait_sec
             print(f"[WARN] {_w // 60}분 후 재시도합니다 ({attempt}/{max_retries})")
         else:
-            _w = long_wait_sec
+            raise RuntimeError(f'bigdatalake query failed {max_retries} attempts')
             print(f"[ERROR] bigdatalake 쿼리 {max_retries}회 연속 실패 — 이후 {_w // 60}분 간격으로 계속 재시도합니다")
         _time.sleep(_w)
 
@@ -4149,6 +4156,17 @@ def etdata_query():
         else :
             sub_to_date_time = sub_datetime_now 
             sub_from_date_time = sub_datetime_now - timedelta(days = GLOBAL_CONFIG.get("QueryTimeSpan"))
+        import hashlib,json
+        signature=hashlib.sha256((item_et.to_csv(index=False)+str(GLOBAL_CONFIG.get('et_custom_columns'))+
+                                 str(GLOBAL_CONFIG.get('process_id'))+str(GLOBAL_CONFIG.get('line_id'))+
+                                 str(GLOBAL_CONFIG.get('DB_et_daily'))+str(GLOBAL_CONFIG.get('setting_stepseq'))+
+                                 str(GLOBAL_CONFIG.get('QueryTimeSpan'))+str(GLOBAL_CONFIG.get('now_minus'))).encode()).hexdigest()
+        refresh=ops_get('et_refresh',GLOBAL_CONFIG.get('vehicle'),{})
+        full=(refresh.get('signature')!=signature or time.time()-refresh.get('full_at',0)>=GLOBAL_CONFIG.get('et_full_refresh_days',7)*86400)
+        if not full and refresh.get('success_at'):
+            incremental=datetime.fromtimestamp(refresh['success_at'])-timedelta(days=GLOBAL_CONFIG.get('et_refresh_days',2)+1)
+            sub_from_date_time=max(sub_from_date_time,incremental)
+            print(f'[PERF] ET incremental refresh from {sub_from_date_time.date()}')
         dateTo = sub_to_date_time.strftime('%Y-%m-%d')
         dateFrom = sub_from_date_time.strftime('%Y-%m-%d')
 
@@ -4246,7 +4264,6 @@ def etdata_query():
                 'total_site_cnt': lambda x: list(sorted(set(sum(x, [])))),
                 'tkout_time': 'max' 
             }).reset_index()
-            final_lot_log.to_csv(GLOBAL_CONFIG.get("et_log_path"), index = False)
 
             # Hive 파티셔닝 구조로 일별 parquet 저장
             # 저장 경로: {DB_et_daily}/date={YYYY-MM-DD}/data.parquet
@@ -4254,7 +4271,9 @@ def etdata_query():
             for date_val, group in daily_groups:
                 partition_dir = os.path.join(DB_et_daily, f'date={date_val}')
                 os.makedirs(partition_dir, exist_ok=True)
-                group.to_parquet(os.path.join(partition_dir, 'data.parquet'), index=False)
+                atomic_output(os.path.join(partition_dir, 'data.parquet'), lambda temp: group.to_parquet(temp, index=False))
+
+            atomic_output(GLOBAL_CONFIG.get("et_log_path"), lambda temp: final_lot_log.to_csv(temp, index=False))
 
             end_time = time.time()
             elapsed_time = end_time - start_time
@@ -4262,9 +4281,12 @@ def etdata_query():
             print(f"[ET Query Complete] {GLOBAL_CONFIG.get('vehicle')} ET Query 완료 (소요시간: {elapsed_time:.2f}초)")
             print("="*60 + "\n") 
 
+        ops_put('et_refresh',GLOBAL_CONFIG.get('vehicle'),dict(signature=signature,success_at=time.time(),full_at=time.time() if full else refresh.get('full_at',time.time())))
+
     except Exception as e:
         print(f"[ERROR] etdata_query 실패: {e}")
         traceback.print_exc()
+        raise
 
 def _filter_inline_by_vehicle(inline_df, vehicle):
     """INLINE 설정 시트에서 현재 리포트 대상 vehicle 행만 남긴다.
@@ -4357,7 +4379,7 @@ def inlinedata_query(root_lot_id):
         Query_Table.rename(columns={'step_seq': 'STEP_DESC'}, inplace=True)
         Query_Table = pd.merge(Query_Table, Inline1, on='STEP_DESC', how='left')
 
-        Query_Table.to_csv(GLOBAL_CONFIG.get('DB') + f"{GLOBAL_CONFIG.get('vehicle')}_inline_table.csv", encoding='utf-8-sig', index=False)
+        atomic_output(GLOBAL_CONFIG.get('DB') + f"{GLOBAL_CONFIG.get('vehicle')}_inline_table.csv", lambda temp: Query_Table.to_csv(temp, encoding='utf-8-sig', index=False))
 
         return Query_Table
     
@@ -4386,10 +4408,1091 @@ def wipdata_query():
         Query_Table_tmp['lot_id6'] = Query_Table_tmp['lot_id'].str.split('.').str[0]
         Query_Table_tmp.rename(columns={'step_seq': 'step_id'}, inplace=True)
 
-        Query_Table_tmp.to_csv(GLOBAL_CONFIG.get('DB') + f"{GLOBAL_CONFIG.get('vehicle')}_wip_current.csv", index = False, encoding='cp949')
+        atomic_output(GLOBAL_CONFIG.get('DB') + f"{GLOBAL_CONFIG.get('vehicle')}_wip_current.csv", lambda temp: Query_Table_tmp.to_csv(temp, index=False, encoding='cp949'))
             
         print('wip data 추출완료')
     
     except Exception as e:
         print(f"wipdata_query 에러가 발생했습니다: {e}")
         traceback.print_exc()
+        raise
+
+# ---- Durable operations ledger / atomic output / bounded caches ----
+def atomic_output(path, writer):
+    import tempfile
+    path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix='._writing_', suffix='.tmp', dir=os.path.dirname(path))
+    os.close(fd)
+    try:
+        writer(temp)
+        with open(temp, 'r+b') as stream:
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.remove(temp)
+
+
+def atomic_bytes(path, data):
+    def write(temp):
+        with open(temp, 'wb') as stream:
+            stream.write(data)
+    atomic_output(path, write)
+
+
+def atomic_json(path, value):
+    import json
+    atomic_bytes(path, json.dumps(value, ensure_ascii=False, default=str, allow_nan=False).encode('utf-8'))
+
+
+def operations_root():
+    return os.path.abspath(os.getenv('AUTO_REPORT_OPS_ROOT') or os.path.join(os.path.dirname(__file__), 'RUN', 'OPS'))
+
+
+from contextlib import contextmanager
+
+@contextmanager
+def ops_connect():
+    import sqlite3
+    root = operations_root()
+    os.makedirs(root, exist_ok=True)
+    con = sqlite3.connect(os.path.join(root, 'operations.sqlite'), timeout=30)
+    try:
+        con.execute('PRAGMA journal_mode=WAL')
+        con.execute('CREATE TABLE IF NOT EXISTS records (kind TEXT, id TEXT, updated REAL, payload TEXT, PRIMARY KEY(kind,id))')
+        con.execute('CREATE INDEX IF NOT EXISTS records_updated ON records(kind,updated)')
+        with con:
+            yield con
+    finally:
+        con.close()
+
+
+def ops_get(kind, key, default=None):
+    import json
+    with ops_connect() as con:
+        row = con.execute('SELECT payload FROM records WHERE kind=? AND id=?', (kind, str(key))).fetchone()
+    return json.loads(row[0]) if row else default
+
+
+def ops_put(kind, key, value):
+    import json
+    with ops_connect() as con:
+        con.execute('INSERT OR REPLACE INTO records VALUES (?,?,?,?)',
+                    (kind, str(key), time.time(), json.dumps(value, ensure_ascii=False, default=str, allow_nan=False)))
+
+
+def ops_get_many(kind, keys):
+    """Read requested identities on one connection, within SQLite's legacy variable limit."""
+    import json
+    keys = list(dict.fromkeys(map(str, keys)))
+    if not keys:
+        return {}
+    values = {}
+    with ops_connect() as con:
+        for start in range(0, len(keys), 900):
+            batch = keys[start:start + 900]
+            slots = ','.join('?' for _ in batch)
+            rows = con.execute(f'SELECT id,payload FROM records WHERE kind=? AND id IN ({slots})',
+                               [kind] + batch).fetchall()
+            values.update((key, json.loads(payload)) for key, payload in rows)
+    return values
+
+
+def ops_list(kind, since=0):
+    import json
+    with ops_connect() as con:
+        rows = con.execute('SELECT payload FROM records WHERE kind=? AND updated>=? ORDER BY updated', (kind, since)).fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+
+def file_fingerprint(paths):
+    import hashlib
+    h = hashlib.sha256()
+    for path in sorted(set(map(os.path.abspath, paths))):
+        stat = os.stat(path)
+        h.update(f'{path}|{stat.st_size}|{stat.st_mtime_ns}'.encode())
+    return h.hexdigest()
+
+
+def trim_runtime_cache(root, days=14, max_bytes=2_000_000_000):
+    from pathlib import Path
+    entries=[]
+    for path in Path(root).glob('**/*'):
+        if path.name.startswith('._writing_'):continue
+        try:
+            if path.is_file():
+                stat=path.stat();entries.append((stat.st_mtime,stat.st_size,path))
+        except OSError:pass
+    size=0
+    for modified,amount,path in sorted(entries,reverse=True):
+        size+=amount
+        if modified<time.time()-days*86400 or size>max_bytes:
+            try:path.unlink()
+            except OSError:pass
+
+
+def load_daily_projected(conn, daily_path, days, reformatter):
+    """Read only referenced REAL inputs and report metadata; reuse unchanged date partitions."""
+    import hashlib, json
+    from pathlib import Path
+    cutoff = (pd.Timestamp.now().normalize() - pd.Timedelta(days=int(days))).date().isoformat() if days is not None else '0000-00-00'
+    real=reformatter.loc[reformatter['CATEGORY'].eq('REAL')]
+    vramp_ids=set(real.loc[real['ALIAS'].astype(str).str.contains('vramp',case=False,na=False) |
+                           real['ITEMID'].astype(str).str.contains('vramp',case=False,na=False),'ITEMID'].astype(str))
+    files = sorted(p for p in Path(daily_path).glob('date=*/*.parquet') if vramp_ids or p.parent.name[5:] >= cutoff)
+    if not files:
+        return pd.DataFrame()
+    itemids = sorted(reformatter.loc[reformatter['CATEGORY'].eq('REAL'), 'ITEMID'].dropna().astype(str).unique())
+    wanted = ['fab_lot_id','lot_id','root_lot_id','wafer_id','process_id','part_id','step_id','step_seq',
+              'tkout_time','flat_zone','eqp_id','probe_card_id','chip_x_pos','chip_y_pos','subitem_id',
+              'temperature','total_site_cnt','item_id','et_value']
+    cache = Path(operations_root()) / 'cache' / 'raw'
+    cache.mkdir(parents=True, exist_ok=True)
+    frames=[]; hits=0
+    for source in files:
+        source_ids=itemids if source.parent.name[5:]>=cutoff else sorted(vramp_ids)
+        key=hashlib.sha256((file_fingerprint([source])+json.dumps(source_ids)+json.dumps(wanted)+'v2').encode()).hexdigest()
+        dest=cache/(key+'.parquet')
+        if dest.exists():
+            try:
+                frames.append(pd.read_parquet(dest)); hits+=1; continue
+            except Exception: pass  # cache only: corrupt entries are rebuilt from authoritative DB
+        schema=conn.execute('DESCRIBE SELECT * FROM read_parquet(?)', [str(source)]).df()['column_name'].tolist()
+        selected=[c for c in wanted if c in schema]
+        if not {'item_id','et_value'}.issubset(selected):
+            raise ValueError(f'raw DB 필수 열 누락: {source.name}')
+        names=', '.join('"'+c+'"' for c in selected)
+        data=conn.execute(f'SELECT {names} FROM read_parquet(?) WHERE CAST(item_id AS VARCHAR) IN (SELECT unnest(?))',
+                          [str(source), source_ids]).df()
+        atomic_output(dest, lambda temp: data.to_parquet(temp,index=False))
+        frames.append(data)
+    print(f'[PERF] raw partitions {len(files)}, cache hits {hits}, selected inputs {len(itemids)}')
+    result=pd.concat(frames,ignore_index=True) if frames else pd.DataFrame()
+    if vramp_ids and not result.empty:
+        mask=result['item_id'].astype(str).isin(vramp_ids)
+        shot_keys=[c for c in ['item_id','fab_lot_id','root_lot_id','wafer_id','step_id','step_seq',
+                               'temperature','flat_zone','chip_x_pos','chip_y_pos','subitem_id'] if c in result]
+        if not {'wafer_id','step_id','chip_x_pos','chip_y_pos'}.issubset(shot_keys):
+            raise ValueError('Vramp 전체 DB shot별 최대값: 필수 shot 식별 열 누락')
+        vramp=result.loc[mask].copy()
+        vramp['et_value']=pd.to_numeric(vramp['et_value'],errors='coerce')
+        vramp=vramp.dropna(subset=['et_value'])
+        # Preserve the timestamp and metadata of the actual maximum observation.
+        vramp=vramp.sort_values(['et_value','tkout_time']).drop_duplicates(shot_keys,keep='last')
+        result=pd.concat([result.loc[~mask],vramp],ignore_index=True)
+        print(f'[INFO] Vramp full DB shot maxima: {len(vramp)} shots / {len(files)} partitions')
+    return result
+
+
+def report_temp_dir():
+    return os.getenv('AUTO_REPORT_TEMP_DIR') or os.path.join('RUN','TEMP')
+
+
+def cached_reformat(pivot, aliases, formulas):
+    """Whole-frame cache preserves cross-row ADDP semantics; never computes ADDP independently per day."""
+    import pickle, hashlib
+    identity = (pd.util.hash_pandas_object(pivot,index=True).values.tobytes(), list(pivot.columns),
+                list(map(str,pivot.dtypes)), list(aliases), list(formulas),
+                file_fingerprint([__file__]), pd.__version__, np.__version__)
+    key=hashlib.sha256(pickle.dumps(identity,protocol=4)).hexdigest()
+    path=os.path.join(operations_root(),'cache','reformat',key+'.pkl')
+    if os.path.exists(path):
+        try:
+            with open(path,'rb') as stream: result=pickle.load(stream)
+            print('[PERF] reformat cache hit')
+            return result
+        except Exception: pass
+    result=Reformatize(pivot, aliases, formulas)
+    atomic_bytes(path,pickle.dumps(result,protocol=4))
+    return result
+
+
+def _render_item_charts(task):
+    """Cache keyed by full input, spec, target, renderer and configuration; restore HTML images on hits."""
+    import pickle, hashlib
+    config={k:v for k,v in task['cfg'].items() if k!='run_temp_dir'}
+    identity={k:v for k,v in task.items() if k not in ('df','cfg')}
+    identity['cfg']=config
+    identity['data']=(pd.util.hash_pandas_object(task['df'],index=True).values.tobytes(),
+                      list(task['df'].columns),list(map(str,task['df'].dtypes)))
+    identity['code']=file_fingerprint([__file__,os.path.join(os.path.dirname(__file__),'anomaly_engine.py')])
+    import matplotlib
+    identity['versions']=(pd.__version__,np.__version__,matplotlib.__version__)
+    key=hashlib.sha256(pickle.dumps(identity,protocol=4)).hexdigest()
+    path=os.path.join(operations_root(),'cache','charts',key+'.pkl')
+    result=None
+    if os.path.exists(path):
+        try:
+            with open(path,'rb') as stream:result=pickle.load(stream)
+            result['cache_hit']=True
+        except Exception: result=None
+    if result is None:
+        result=_render_item_charts_uncached(task)
+        if result['status']=='ok':
+            atomic_bytes(path,pickle.dumps(result,protocol=4))
+    if result.get('trend_png'):
+        safe=re.sub(r'[\\/:*?"<>|]','_',str(task['item_name']))
+        atomic_bytes(os.path.join(task['cfg'].get('run_temp_dir') or report_temp_dir(),safe+'.png'),result['trend_png'])
+    return result
+
+def ops_many(kind, records):
+    import json
+    now=time.time()
+    with ops_connect() as con:
+        con.executemany('INSERT OR REPLACE INTO records VALUES (?,?,?,?)',
+                        [(kind,str(key),now,json.dumps(value,ensure_ascii=False,default=str,allow_nan=False)) for key,value in records])
+
+
+def watchdog_observe(frame, reformatter, mode='AUTO'):
+    """Compact observations, scoped by product/step/program/temperature/shot mode/spec version."""
+    import hashlib,json
+    from anomaly_engine import trend_agg_spec
+    vehicle=GLOBAL_CONFIG.get('vehicle')
+    frame=frame.loc[frame['MASK'].astype(str).eq(str(vehicle))].copy()
+    if frame.empty:return
+    frame['_step']=frame['search_key'].astype(str).str.rsplit('_',n=1).str[-1]
+    keys=['FAB_LOT_ID','_step','TKOUT_TIME']
+    for key in ['STEP_SEQ','TEMPERATURE']:
+        if key in frame:keys.append(key)
+    selected=reformatter.loc[reformatter['CAT2'].notna() & reformatter['CAT2'].astype(str).str.strip().ne('')].drop_duplicates('ALIAS')
+    aliases=sorted(selected['ALIAS'].astype(str),key=len,reverse=True)
+    mode='NORMAL' if mode=='NORMAL' else 'FULL'
+    fingerprint=hashlib.sha256(pd.util.hash_pandas_object(frame,index=True).values.tobytes()+
+                              reformatter.to_csv(index=False).encode()+str(GLOBAL_CONFIG.get('trend_tkout_agg')).encode()).hexdigest()
+    marker=f'{vehicle}|{mode}'
+    if ops_get('observation_cache',marker,{}) .get('fingerprint')==fingerprint:
+        print('[PERF] watchdog observations cache hit');return
+    rows=[]
+    for item in frame.columns:
+        owner=next((a for a in aliases if str(item)==a or str(item).startswith(a+'_')),None)
+        if owner is None:continue
+        spec=selected.loc[selected['ALIAS'].eq(owner)].iloc[0]
+        direction=str(spec.get('REPORT DIRECTION','BOTH')).upper()
+        low=pd.to_numeric(spec.get('SPECLOW'),errors='coerce'); high=pd.to_numeric(spec.get('SPECHIGH'),errors='coerce')
+        low=None if pd.isna(low) or direction=='UPPER' else float(low)
+        high=None if pd.isna(high) or direction=='LOWER' else float(high)
+        agg=trend_agg_spec(item,GLOBAL_CONFIG.get('trend_tkout_agg',{}) or {},owner)
+        signature=hashlib.sha256(json.dumps([low,high,str(agg),str(spec.get('UNIT',''))]).encode()).hexdigest()[:12]
+        for groupkey, group in frame.groupby(keys,dropna=False,sort=False):
+            meta=dict(zip(keys,groupkey)); vals=pd.to_numeric(group[item],errors='coerce').replace([np.inf,-np.inf],np.nan).dropna()
+            valid=group.loc[vals.index]
+            if vals.empty:continue
+            if agg:
+                selector=valid.assign(_value=vals).groupby('WAFER_ID')['_value']
+                kind=str(agg).upper()
+                if kind in ('MEAN','AVG'):vals=selector.mean()
+                elif kind in ('MEDIAN','P50'):vals=selector.median()
+                else:
+                    match=re.fullmatch(r'P(\d+(?:\.\d+)?)',kind)
+                    if not match:raise ValueError(f'지원하지 않는 Trend 집계: {agg}')
+                    vals=selector.quantile(float(match.group(1))/100)
+            outside=pd.Series(False,index=vals.index)
+            if low is not None:outside |= vals<low
+            if high is not None:outside |= vals>high
+            counts,edges=np.histogram(vals.to_numpy(),bins=24)
+            spec_known=low is not None or high is not None
+            pass_score=float((~outside).mean()*100) if agg else float((~outside).groupby(valid['WAFER_ID']).mean().mean()*100)
+            pk=f"{vehicle}_{meta['FAB_LOT_ID']}_{meta['_step']}"
+            context=[vehicle,str(meta['_step']),str(item),str(meta.get('STEP_SEQ','')),str(meta.get('TEMPERATURE','')),mode,signature]
+            stamp=pd.Timestamp(meta['TKOUT_TIME']).isoformat()
+            identity=hashlib.sha256(json.dumps(context+[pk,stamp]).encode()).hexdigest()
+            values=dict(id=identity,vehicle=vehicle,prime_key=pk,lot=str(meta['FAB_LOT_ID']),step=str(meta['_step']),
+                        item=str(item),category=str(spec['CAT2']),time=stamp,program=str(meta.get('STEP_SEQ','')),
+                        temperature=str(meta.get('TEMPERATURE','')),mode=mode,signature=signature,
+                        unit=str(spec.get('UNIT','')),aggregation=str(agg or 'raw shot'),low=low,high=high,
+                        n=len(vals),wafers=int(valid['WAFER_ID'].nunique()),median=float(vals.median()),
+                        std=float(vals.std()) if len(vals)>1 else 0.,out=int(outside.sum()) if spec_known else None,
+                        score=pass_score if spec_known else None,
+                        hist=counts.tolist(),edges=edges.tolist(),context=context)
+            rows.append((identity,values))
+    ops_many('observations',rows)
+    ops_put('observation_cache',marker,dict(vehicle=vehicle,mode=mode,fingerprint=fingerprint,updated=time.time(),count=len(rows)))
+    print(f'[INFO] Watchdog 분석 관측값 {len(rows)}건 저장 (동일 lot/측정은 중복 집계하지 않음)')
+
+@contextmanager
+def process_lock(path):
+    """OS-backed nonblocking lock; an exited process releases it even after a crash."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)),exist_ok=True)
+    stream=open(path,'a+b')
+    try:
+        stream.seek(0,2)
+        if stream.tell()==0:stream.write(b'0');stream.flush()
+        stream.seek(0)
+        if os.name=='nt':
+            import msvcrt
+            msvcrt.locking(stream.fileno(),msvcrt.LK_NBLCK,1)
+        else:
+            import fcntl
+            fcntl.flock(stream.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+    except OSError:
+        stream.close();raise RuntimeError(f'동일 작업이 이미 실행 중입니다: {os.path.basename(path)}')
+    try:yield
+    finally:
+        stream.seek(0)
+        if os.name=='nt':msvcrt.locking(stream.fileno(),msvcrt.LK_UNLCK,1)
+        else:fcntl.flock(stream.fileno(),fcntl.LOCK_UN)
+        stream.close()
+
+def daily_trend_load(vehicle, reformatter):
+    """Use the same REAL scaling and whole-frame ADDP cache as the prime-key report.
+
+    This reads the current DB even when no new prime key is eligible for publication.
+    The existing product viewing_period owns the chart window.
+    """
+    import duckdb
+    with duckdb.connect() as conn:
+        raw=load_daily_projected(conn,GLOBAL_CONFIG.get('DB_et_daily'),
+                                 None,reformatter)
+    if raw.empty:return raw
+    real=reformatter.loc[reformatter['CATEGORY'].eq('REAL'),
+                         ['ITEMID','ALIAS','SCALE FACTOR']].drop_duplicates('ITEMID')
+    raw=raw.merge(real,left_on='item_id',right_on='ITEMID',how='left',validate='many_to_one')
+    raw['et_value']=pd.to_numeric(raw['et_value'],errors='coerce')*pd.to_numeric(raw['SCALE FACTOR'],errors='coerce').fillna(1)
+    raw['item_id']=raw['ALIAS'].fillna(raw['item_id'])
+    raw['match_key']=raw['root_lot_id'].astype(str)+'_'+raw['step_id'].astype(str)
+    raw['lot_wf']=raw['root_lot_id'].astype(str)+'_'+raw['wafer_id'].astype(str)
+    keys=[c for c in ['fab_lot_id','lot_id','root_lot_id','wafer_id','process_id','part_id','step_id',
+          'step_seq','tkout_time','flat_zone','eqp_id','probe_card_id','chip_x_pos','chip_y_pos',
+          'subitem_id','temperature','total_site_cnt','match_key','lot_wf'] if c in raw]
+    # Preserve measurements whose optional metadata is null (pivot_table drops them).
+    pivot=raw.groupby(keys+['item_id'],dropna=False,observed=True)['et_value'].last().unstack('item_id')
+    # groupby(dropna=False) may put NaN in MultiIndex levels; the shared cache hasher
+    # requires standard missing-value codes instead of null categorical categories.
+    pivot.index=pd.MultiIndex.from_tuples(pivot.index.tolist(),names=pivot.index.names)
+    addp=reformatter.loc[reformatter['CATEGORY'].eq('ADDP')].copy()
+    factors=pd.to_numeric(addp['SCALE FACTOR'],errors='coerce').fillna(1)
+    formulas=factors.astype(str)+'*('+addp['ADDP FORM'].astype(str)+')'
+    return cached_reformat(pivot,addp['ALIAS'].astype(str).tolist(),formulas.tolist()).reset_index()
+
+
+def daily_trend_ml(frame, reformatter, vehicle, settings):
+    """Join only requested ML columns; ambiguous wafer keys are never guessed.
+
+    Reformatter tkout_time/split_check accepts an exact column or a process step,
+    resolved to TKOUT_TIME_<step>/KNOB_<step>. split_check accepts ANY exact
+    Parquet column (e.g. FAB_ETCH, recipe, numeric codes), case-insensitively.
+    Multiple grouping columns use ';'; the KNOB_ prefix is only a legacy fallback.
+    """
+    columns={str(c).lower():c for c in reformatter.columns}
+    mappings={};wanted=set()
+    def clean(value):
+        return '' if pd.isna(value) or str(value).strip().lower() in ('','nan','none','false','0') else str(value).strip()
+    for _,spec in reformatter.iterrows():
+        timing=clean(spec.get(columns.get('tkout_time','tkout_time')))
+        split=clean(spec.get(columns.get('split_check','split_check')))
+        warnings=[]
+        if split.lower() in ('true','1','yes','y') and not timing:
+            warnings.append('split_check enabled without a tkout_time step or explicit ML column')
+        if split.lower() in ('true','1','yes','y'):split=timing
+        mappings[str(spec['ALIAS'])]=dict(time=timing,split=[x.strip() for x in split.split(';') if x.strip()],warnings=warnings)
+    deep=settings.get('service')=='mlmode'
+    requested=deep or any(m['time'] or m['split'] for m in mappings.values())
+    if not requested:return frame,mappings
+    path=os.path.join(settings.get('ml_table_dir') or GLOBAL_CONFIG.get('DB') or 'RUN/DB',f'ML_TABLE_{vehicle}.parquet')
+    if not os.path.exists(path):
+        # Accept the historical misspelling when supplied by an upstream export.
+        alternate=path[:-7]+'paruqet'
+        if os.path.exists(alternate):path=alternate
+    try:
+        import pyarrow.parquet as pq
+        schema=pq.read_schema(path);names=schema.names
+    except (OSError,ValueError) as exc:
+        for m in mappings.values():
+            if deep or m['time'] or m['split']:m['warnings'].append('ML_TABLE unavailable: '+type(exc).__name__)
+        return frame,mappings
+    lookup={c.casefold():c for c in names}
+    equipment=[c for c in names if c.upper().startswith(('EQP_','EQP_ID_','CHAMBER_')) or c.upper() in ('EQP','EQP_ID','CHAMBER')] if deep else []
+    explicit=settings.get('equipment_columns')
+    if explicit:equipment=[lookup[c.casefold()] for c in explicit if c.casefold() in lookup]
+    wanted.update(equipment)
+    for m in mappings.values():m['equipment_columns']=equipment
+    if deep and settings.get('influence_enabled',True):
+        import fnmatch
+        excluded={str(c).casefold() for c in settings.get('ml_join_keys',['root_lot_id','wafer_id'])}
+        excluded.update(str(c).casefold() for c in reformatter.get('ALIAS',[]))
+        excluded.update(str(c).casefold() for c in reformatter.get('ITEMID',[]))
+        excluded.update(['lot_id','fab_lot_id','root_lot_id','wafer_id','product','mask','vehicle','step_id','step_seq','temperature'])
+        include=settings.get('influence_columns') or []
+        omit=settings.get('influence_exclude_columns') or []
+        def eligible(c):
+            lower=c.casefold()
+            import pyarrow as pa
+            if pa.types.is_nested(schema.field(c).type) or pa.types.is_binary(schema.field(c).type):return False
+            if lower in excluded or re.search(r'(^|_)(time|date|timestamp|tkout|score|anomaly|prediction|target|label|spec|result)(_|$)',lower):return False
+            if re.search(r'(^|_)id(_|$)',lower) and not lower.startswith(('eqp','fab','chamber','recipe','knob')):return False
+            if any(fnmatch.fnmatchcase(lower,str(p).casefold()) for p in omit):return False
+            return not include or any(fnmatch.fnmatchcase(lower,str(p).casefold()) for p in include)
+        # Round-robin source families: thousands of FAB columns must not starve KNOB/INLINE.
+        pools={}
+        for c in sorted(names,key=str.casefold):
+            if eligible(c):pools.setdefault(c.split('_',1)[0].upper(),[]).append(c)
+        features=[pool[i] for i in range(max(map(len,pools.values()),default=0)) for _,pool in sorted(pools.items()) if i<len(pool)]
+        cap=max(1,int(settings.get('influence_max_columns',80)))
+        for m in mappings.values():
+            m['influence_columns']=features[:cap]
+            if len(features)>cap:m['warnings'].append(f'Influence column cap: {len(features)-cap} columns not scanned; configure influence_columns')
+        wanted.update(features[:cap])
+    for m in mappings.values():
+        for key,prefix in [('time','TKOUT_TIME_'),('split','KNOB_')]:
+            tokens=[m[key]] if key=='time' else m[key]
+            resolved=[]
+            for token in tokens:
+                if not token:continue
+                col=lookup.get(token.casefold()) or lookup.get((prefix+token).casefold())
+                if col:resolved.append(col);wanted.add(col)
+                else:m['warnings'].append(f'ML column missing: {token} (fallback: {prefix}{token})')
+            m[key+'_columns']=resolved
+    left_lookup={c.casefold():c for c in frame}
+    join=settings.get('ml_join_keys') or ['root_lot_id','wafer_id']
+    if any(k.casefold() not in lookup or k.casefold() not in left_lookup for k in join):
+        for m in mappings.values():m['warnings'].append('ML join keys missing: '+','.join(join))
+        return frame,mappings
+    right_keys=[lookup[k.casefold()] for k in join]
+    # Project columns and stream batches; retain only this report's root lots.
+    product_col=lookup.get('product') or lookup.get('mask')
+    projection=list(dict.fromkeys(right_keys+sorted(wanted)+([product_col] if product_col else [])))
+    rootkey=lookup.get('root_lot_id');leftroot=left_lookup.get('root_lot_id')
+    roots=set(frame[leftroot].astype(str).str.strip()) if leftroot else set()
+    chunks=[];total=0;limit=max(1000,int(settings.get('influence_max_join_rows',200000)))
+    for batch in pq.ParquetFile(path).iter_batches(batch_size=8192,columns=projection):
+        part=batch.to_pandas()
+        if rootkey in part and roots:part=part.loc[part[rootkey].astype(str).str.strip().isin(roots)]
+        if product_col:part=part.loc[part[product_col].astype(str).eq(vehicle)]
+        total+=len(part)
+        if deep and total>limit:
+            for m in mappings.values():m['warnings'].append('ML join row budget exceeded: influence unavailable; narrow report scope')
+            return frame,mappings
+        chunks.append(part)
+    ml=pd.concat(chunks,ignore_index=True) if chunks else pd.DataFrame(columns=projection)
+    # A file may contain several products despite its product filename.
+    product_col=lookup.get('product') or lookup.get('mask')
+    if product_col and product_col not in ml:
+        ml[product_col]=pd.read_parquet(path,columns=[product_col])[product_col]
+    if product_col:ml=ml.loc[ml[product_col].astype(str).eq(vehicle)].copy()
+    left=frame.copy();right=pd.DataFrame(index=ml.index);join_cols=[]
+    for i,(key,rkey) in enumerate(zip(join,right_keys)):
+        jk=f'__ml_key_{i}';join_cols.append(jk)
+        def normalize(series):
+            if key.casefold()=='wafer_id':return pd.to_numeric(series,errors='coerce').astype('Int64').astype('string')
+            return series.astype('string').str.strip().replace('',pd.NA)
+        left[jk]=normalize(left[left_lookup[key.casefold()]])
+        right[jk]=normalize(ml[rkey])
+    for col in wanted:right['__ml_'+col]=ml[col]
+    right=right.dropna(subset=join_cols).drop_duplicates()
+    duplicate=right.duplicated(join_cols,keep=False)
+    if duplicate.any():
+        for m in mappings.values():m['warnings'].append(f'ML ambiguous wafer keys excluded: {int(duplicate.sum())} rows')
+        right=right.loc[~duplicate]
+    left=left.merge(right,on=join_cols,how='left',validate='many_to_one').drop(columns=join_cols)
+    return left,mappings
+
+
+def daily_trend_entries(frame, reformatter, vehicle, settings, now=None):
+    """Every categorized item/context is retained, including no-data and no-spec items."""
+    from anomaly_engine import trend_agg_spec
+    now=pd.Timestamp.now() if now is None else pd.Timestamp(now)
+    if 'CAT2' not in reformatter:return []
+    selected=reformatter.loc[reformatter['CAT2'].notna() & reformatter['CAT2'].astype(str).str.strip().ne('')].drop_duplicates('ALIAS')
+    frame,mappings=daily_trend_ml(frame,selected,vehicle,settings)
+    entries=[]
+    aliases=sorted(reformatter['ALIAS'].dropna().astype(str),key=len,reverse=True)
+    for _,spec in selected.iterrows():
+        owner=str(spec['ALIAS']);mapping=mappings[owner]
+        items=[c for c in frame if next((a for a in aliases if c==a or str(c).startswith(a+'_')),None)==owner] or [owner]
+        for item in items:
+            low=pd.to_numeric(spec.get('SPECLOW'),errors='coerce');high=pd.to_numeric(spec.get('SPECHIGH'),errors='coerce')
+            direction=str(spec.get('REPORT DIRECTION','BOTH')).upper()
+            low=None if not np.isfinite(low) or direction=='UPPER' else float(low)
+            high=None if not np.isfinite(high) or direction=='LOWER' else float(high)
+            agg=trend_agg_spec(item,GLOBAL_CONFIG.get('trend_tkout_agg',{}) or {},owner)
+            base=dict(vehicle=vehicle,item=str(item),category=str(spec['CAT2']),unit=str(spec.get('UNIT','')),
+                      low=low,high=high,aggregation=str(agg or 'raw shot'),warnings=list(mapping['warnings']),
+                      x_label=('ML '+mapping['time']) if mapping['time'] else 'DC tkout_time',
+                      log_scale=str(spec.get('REPORT LOG SCALE','')).strip().lower() in ('true','1','yes'),
+                      knob_label='; '.join(mapping['split']))
+            if item not in frame or frame.empty:
+                entries.append(dict(base,points=pd.DataFrame(),step='',program='',temperature='',reason='No measurement data',n=0,out_pct=None,lots=0));continue
+            values=pd.to_numeric(frame[item],errors='coerce').replace([np.inf,-np.inf],np.nan)
+            needed=[c for c in ['fab_lot_id','root_lot_id','wafer_id','tkout_time','step_id','step_seq','temperature',
+                               'chip_x_pos','chip_y_pos','flat_zone','subitem_id','Chip_Radius'] if c in frame]
+            needed+=['__ml_'+c for c in mapping.get('time_columns',[])+mapping.get('split_columns',[])+mapping.get('equipment_columns',[])+mapping.get('influence_columns',[]) if '__ml_'+c in frame]
+            data=frame.loc[values.notna(),list(dict.fromkeys(needed))].copy();data['_value']=values.loc[values.notna()]
+            if data.empty:
+                entries.append(dict(base,points=pd.DataFrame(),step='',program='',temperature='',reason='No measurement data',n=0,out_pct=None,lots=0));continue
+            data['_dc_time']=pd.to_datetime(data['tkout_time'],errors='coerce')
+            cutoff=now-pd.Timedelta(days=float(GLOBAL_CONFIG.get('viewing_period',30)))
+            is_vramp='vramp' in str(item).lower() or 'vramp' in str(spec.get('ITEMID','')).lower()
+            data=data.loc[data['_dc_time'].le(now)].copy()
+            if is_vramp:base['warnings'].append('Vramp: full DB maximum per shot; chart window not applied')
+            data['_time']=data['_dc_time']
+            if mapping['time']:
+                cols=mapping.get('time_columns',[])
+                col='__ml_'+cols[0] if cols else ''
+                source=data[col] if col in data else pd.Series(pd.NaT,index=data.index)
+                # Numeric timestamps like 20260912093000 must not become nanoseconds since epoch.
+                text=source.astype('string').str.replace(r'\.0$','',regex=True)
+                data['_time']=pd.to_datetime(text,errors='coerce')
+                compact=text.str.fullmatch(r'\d{14}',na=False)
+                data.loc[compact,'_time']=pd.to_datetime(text.loc[compact],format='%Y%m%d%H%M%S',errors='coerce')
+                data.loc[data['_time']>now,'_time']=pd.NaT
+            data['_knob']='ALL'
+            if mapping['split']:
+                cols=['__ml_'+c for c in mapping.get('split_columns',[])]
+                if cols and all(c in data for c in cols):
+                    data['_knob']=data[cols].astype('string').fillna('UNMATCHED').agg(' | '.join,axis=1)
+                else:data['_knob']='UNMATCHED'
+            import hashlib
+            idcols=[c for c in needed if not c.startswith('__ml_')]+['_value','_time','_knob']
+            # Stable fingerprints include values and mapping: delayed rows, corrections and
+            # newly resolved ML mappings must all be highlighted after a successful publication.
+            data['_observation_id']=[hashlib.sha256((str(item)+'|'+str(vehicle)+'|'+str(v)).encode()).hexdigest()
+                                     for v in pd.util.hash_pandas_object(data[idcols].astype(str),index=False).tolist()]
+            prior=settings.get('_published_observations')
+            first_since=pd.Timestamp(settings.get('highlight_since',now.normalize()))
+            data['_recent']=~data['_observation_id'].isin(prior) if prior is not None else data['_dc_time'].between(first_since,now)
+            if settings.get('_candidate_observations') is not None:
+                settings['_candidate_observations'].update(data['_observation_id'])
+            # Existing history stays within the product YAML window. Unpublished late arrivals do not.
+            if not is_vramp:data=data.loc[data['_dc_time'].ge(cutoff)|data['_recent']].copy()
+            context=[c for c in ['step_id','step_seq','temperature'] if c in data]
+            groups=data.groupby(context,dropna=False,sort=True) if context else [((),data)]
+            if data.empty:groups=[((),data)]
+            for groupkey,group in groups:
+                groupkey=groupkey if isinstance(groupkey,tuple) else (groupkey,)
+                meta=dict(zip(context,groupkey));points=group.copy()
+                spatial=group.copy()
+                if agg and not points.empty:
+                    keys=[k for k in ['fab_lot_id','root_lot_id','wafer_id','tkout_time','_dc_time','_time','_knob'] if k in points]
+                    selector=points.groupby(keys,dropna=False)['_value'];kind=str(agg).upper()
+                    if kind in ('MEAN','AVG'):series=selector.mean()
+                    elif kind in ('MEDIAN','P50'):series=selector.median()
+                    elif re.fullmatch(r'P(\d+(?:\.\d+)?)',kind):series=selector.quantile(float(kind[1:])/100)
+                    else:raise ValueError('Unsupported Trend aggregation: '+kind)
+                    recent_flags=points.groupby(keys,dropna=False)['_recent'].any().rename('_recent')
+                    points=series.reset_index().merge(recent_flags.reset_index(),on=keys,validate='one_to_one')
+                points['_out']=False
+                if low is not None:points['_out'] |= points['_value']<low
+                if high is not None:points['_out'] |= points['_value']>high
+                known=low is not None or high is not None
+                n=len(points);pct=float(points['_out'].mean()*100) if known and n else None
+                reasons=[];minimum=max(3,int(settings.get('min_lots',3)))
+                if pct is not None and pct>=float(settings.get('spec_out_pct',10)):reasons.append(f'High spec out {pct:.1f}%')
+                valid=points.dropna(subset=['_time']).sort_values('_time')
+                for knob,g in valid.groupby('_knob',sort=True):
+                    lots=g.groupby('fab_lot_id',sort=False).agg(t=('_time','max'),v=('_value','median'),out=('_out','mean'),noise=('_value','std')).sort_values('t')
+                    if known and len(lots)>=minimum and lots['out'].tail(minimum).eq(1).all():
+                        reasons.append(f'{knob}: all spec out in last {minimum} lots')
+                    if len(lots)>=max(6,minimum*2):
+                        half=len(lots)//2;before=lots.iloc[:half];after=lots.iloc[-half:]
+                        delta=float(after.v.median()-before.v.median())
+                        noise=max(float(before.v.std()),float(before.noise.fillna(0).median()),1e-12)
+                        span=high-low if high is not None and low is not None else 0
+                        times=(lots.t-lots.t.min()).dt.total_seconds()
+                        correlation=float(times.corr(lots.v)) if times.nunique()>1 and lots.v.nunique()>1 else 0
+                        shifted=(after.v>before.v.median()).all() if delta>0 else (after.v<before.v.median()).all()
+                        if abs(delta)>=abs(span)*float(settings.get('shift_min_spec_frac',.02)) and abs(delta)/noise>=float(settings.get('shift_sigma',2)) and (abs(correlation)>=float(settings.get('trend_correlation',.7)) or shifted):
+                            reasons.append(f'{knob}: time shift {delta:+.4g} ({abs(delta)/noise:.1f} sigma)')
+                warnings=list(base['warnings'])
+                missing=int(points['_time'].isna().sum())
+                if missing:warnings.append(f'Process time unmatched: {missing}/{n}; excluded from time plot')
+                if mapping['split'] and points['_knob'].str.contains('UNMATCHED',regex=False).any():warnings.append('Knob unmatched: shown as UNMATCHED')
+                if not n:reasons.append('No data in chart window')
+                elif not known:reasons.append('Spec unavailable')
+                if n and points['fab_lot_id'].nunique()<minimum:warnings.append('Insufficient lots for recurrence/shift detection')
+                entries.append(dict(base,points=points,spatial=spatial,step=str(meta.get('step_id','')),program=str(meta.get('step_seq','')),
+                                    temperature=str(meta.get('temperature','')),warnings=warnings,n=n,out_pct=pct,
+                                    recent_n=int(points['_recent'].sum()) if n else 0,
+                                    recent_out_pct=float(points.loc[points['_recent'],'_out'].mean()*100) if known and n and points['_recent'].any() else None,
+                                    latest_measurement=str(points['_dc_time'].max()) if n else '',
+                                    lots=int(points['fab_lot_id'].nunique()) if n else 0,
+                                    recent_lots=int(points.loc[points['_recent'],'fab_lot_id'].nunique()) if n else 0,
+                                    signals=[r for r in reasons if r not in ('No data in chart window','Spec unavailable')],
+                                    reason=' / '.join(reasons) or 'No configured signal'))
+    return entries
+
+
+def ml_trend_select(entries, settings):
+    """Spec-free ensemble on wafer/lot summaries, with FDR across the daily report.
+
+    Split comparisons use independent lot summaries. IF/LOF train only on historical
+    wafers and test newly measured wafers; their own training set is never scored as
+    the recent population. Missing dependencies fail explicitly, not as 'no anomaly'.
+    """
+    from scipy import stats
+    from itertools import combinations
+    modules=set(settings.get('modules') or ['split_difference','time_trend','spike_rate','isolation_forest','local_outlier_factor'])
+    modules.update(settings.get('diagnostic_modules',['equipment_difference','spatial_pattern']))
+    supported={'split_difference','time_trend','spike_rate','isolation_forest','local_outlier_factor','equipment_difference','spatial_pattern'}
+    if modules-supported:raise ValueError('Unknown ML modules: '+', '.join(sorted(modules-supported)))
+    if 'isolation_forest' in modules:from sklearn.ensemble import IsolationForest
+    if 'local_outlier_factor' in modules:from sklearn.neighbors import LocalOutlierFactor
+    minimum=max(6,int(settings.get('min_samples',12)));min_lots=max(3,int(settings.get('min_lots',3)))
+    effect_limit=float(settings.get('effect_sigma',1.5));tests=[];candidates=[]
+    def robust_scale(values):
+        a=np.asarray(values,dtype=float);med=np.median(a)
+        mad=np.median(abs(a-med))*1.4826
+        return max(float(mad),float(np.std(a))*.1,abs(float(med))*1e-9,1e-12)
+    def add(index,module,p,effect,message):
+        if np.isfinite(p):tests.append(dict(index=index,module=module,p=float(p),effect=float(effect),message=message))
+    for index,entry in enumerate(entries):
+        entry['low']=entry['high']=entry['out_pct']=None
+        entry['reason']='';entry['ml_findings']=[];entry['ml_test_count']=0;entry['ml_tested_modules']=[]
+        points=entry['points']
+        if points.empty:entry['warnings'].append('ML: no data');continue
+        points=points.dropna(subset=['_time']).copy()
+        if '_vehicle' not in points:points['_vehicle']=entry['vehicle']
+        diagnostic=entry.get('spatial',points).copy()
+        if '_vehicle' not in diagnostic:diagnostic['_vehicle']=entry['vehicle']
+        if not diagnostic.empty:
+            for (vehicle,knob),source in diagnostic.groupby(['_vehicle','_knob']):
+                if knob=='UNMATCHED':continue
+                if 'equipment_difference' in modules:
+                    eqcols=[c for c in source if c.startswith('__ml_') and ('EQP' in c.upper() or 'CHAMBER' in c.upper())]
+                    if not eqcols:entry['warnings'].append('Equipment check unavailable: no EQP/CHAMBER columns')
+                    for col in eqcols:
+                        recent_source=source.loc[source['_recent']].dropna(subset=[col])
+                        lot=recent_source.groupby([col,'fab_lot_id'])['_value'].median().reset_index()
+                        groups=[(k,g) for k,g in lot.groupby(col) if len(g)>=min_lots]
+                        if len(groups)<2:entry['warnings'].append(f'{col}: insufficient recent independent lots for equipment comparison')
+                        for (ka,a),(kb,b) in combinations(groups,2):
+                            overlap=set(a.fab_lot_id)&set(b.fab_lot_id)
+                            a=a.loc[~a.fab_lot_id.isin(overlap)];b=b.loc[~b.fab_lot_id.isin(overlap)]
+                            if min(len(a),len(b))<min_lots:continue
+                            effect=abs(a._value.median()-b._value.median())/max(robust_scale(a._value),robust_scale(b._value))
+                            add(index,'equipment_difference',stats.mannwhitneyu(a._value,b._value).pvalue,effect,
+                                f'{vehicle}/{knob}: {col[5:]} {ka} vs {kb}, recent lots={len(a)}/{len(b)}, effect={effect:.2f} sigma; association, not causation')
+                if 'spatial_pattern' in modules:
+                    coords=['chip_x_pos','chip_y_pos']
+                    if not set(coords).issubset(source):
+                        entry['warnings'].append('Spatial check unavailable: shot X/Y missing');continue
+                    sitekeys=coords+(['flat_zone'] if 'flat_zone' in source else [])
+                    sites=source.groupby(['fab_lot_id','wafer_id','_recent']+sitekeys)['_value'].median().reset_index()
+                    # Subtract wafer center: detect shape changes independently of overall level.
+                    sites['residual']=sites['_value']-sites.groupby(['fab_lot_id','wafer_id','_recent'])['_value'].transform('median')
+                    for site,g in sites.groupby(sitekeys):
+                        lot=g.groupby(['fab_lot_id','_recent']).residual.median().reset_index()
+                        b=lot.loc[~lot._recent];r=lot.loc[lot._recent]
+                        overlap=set(b.fab_lot_id)&set(r.fab_lot_id)
+                        b=b.loc[~b.fab_lot_id.isin(overlap)];r=r.loc[~r.fab_lot_id.isin(overlap)]
+                        if min(len(b),len(r))<min_lots:continue
+                        effect=abs(r.residual.median()-b.residual.median())/max(robust_scale(b.residual),robust_scale(source.loc[~source['_recent'],'_value']))
+                        add(index,'spatial_pattern',stats.mannwhitneyu(r.residual,b.residual).pvalue,effect,
+                            f'{vehicle}/{knob}: site {site} centered spatial shift, effect={effect:.2f} sigma')
+        # Shots are not independent ML samples. Collapse each wafer/measurement first.
+        keys=['_vehicle','fab_lot_id','wafer_id','_time','_knob']
+        wafer=points.groupby(keys,dropna=False).agg(value=('_value','median'),spread=('_value',lambda x: x.quantile(.9)-x.quantile(.1)),recent=('_recent','max')).reset_index()
+        if wafer.empty or not wafer.recent.any():entry['warnings'].append('ML: no newly measured matched wafers');continue
+        lots=wafer.groupby(['_vehicle','_knob','fab_lot_id'],dropna=False).agg(value=('value','median'),recent=('recent','max'),t=('_time','max')).reset_index()
+        if 'split_difference' in modules:
+            # Compare splits within each product; never mistake a vehicle offset for a knob effect.
+            for vehicle,source in lots.groupby('_vehicle'):
+                groups=[(k,g) for k,g in source.groupby('_knob') if k!='UNMATCHED' and len(g)>=min_lots]
+                for (ka,a),(kb,b) in combinations(groups,2):
+                    if not a.recent.any() and not b.recent.any():continue
+                    # Paired lots use Wilcoxon; disjoint lots use Mann-Whitney.
+                    paired=a.merge(b,on='fab_lot_id',suffixes=('_a','_b'))
+                    if len(paired)>=min_lots:
+                        delta=paired.value_a-paired.value_b
+                        p=stats.wilcoxon(delta).pvalue if delta.ne(0).any() else 1.
+                    else:
+                        a=a.loc[~a.fab_lot_id.isin(paired.fab_lot_id)]
+                        b=b.loc[~b.fab_lot_id.isin(paired.fab_lot_id)]
+                        if min(len(a),len(b))<min_lots:continue
+                        p=stats.mannwhitneyu(a.value,b.value,alternative='two-sided').pvalue
+                    effect=abs(float(a.value.median()-b.value.median()))/max(robust_scale(a.value),robust_scale(b.value))
+                    add(index,'split_difference',p,effect,f'{vehicle}: split {ka} vs {kb}, effect={effect:.2f} sigma')
+        for (vehicle,knob),g in wafer.groupby(['_vehicle','_knob']):
+            if knob=='UNMATCHED':continue
+            recent=g.loc[g.recent];base=g.loc[~g.recent]
+            if len(base)<minimum or len(recent)<max(3,minimum//3) or base.fab_lot_id.nunique()<min_lots:
+                entry['warnings'].append(f'ML {vehicle}/{knob}: insufficient historical/recent wafers');continue
+            prefix=f'{vehicle}/{knob}'
+            scale=robust_scale(base.value);center=float(base.value.median())
+            if 'time_trend' in modules:
+                series=lots.loc[lots._vehicle.eq(vehicle) & lots._knob.eq(knob)].sort_values('t')
+                t=(series.t-series.t.min()).dt.total_seconds().to_numpy()
+                if len(series)>=min_lots*2 and np.unique(t).size>=min_lots:
+                    rho,p=stats.spearmanr(t,series.value)
+                    effect=abs(float(recent.value.median()-base.value.median()))/scale
+                    add(index,'time_trend',p,effect,f'{prefix}: {"upward" if rho>0 else "downward"} trend, rho={rho:.2f}, effect={effect:.2f} sigma')
+            def rate_test(base_flags,recent_flags,module):
+                # Test lot-level affected fractions: raw shot count must not inflate significance.
+                b=pd.DataFrame(dict(lot=base.fab_lot_id.to_numpy(),flag=np.asarray(base_flags,dtype=float))).groupby('lot').flag.mean()
+                r=pd.DataFrame(dict(lot=recent.fab_lot_id.to_numpy(),flag=np.asarray(recent_flags,dtype=float))).groupby('lot').flag.mean()
+                # Overlapping lots are excluded to avoid treating repeat wafers as independent.
+                overlap=b.index.intersection(r.index);b=b.drop(overlap);r=r.drop(overlap)
+                if len(b)<min_lots or len(r)<min_lots:return
+                delta=float(r.mean()-b.mean());p=stats.mannwhitneyu(r,b,alternative='greater').pvalue
+                add(index,module,p,delta/max(float(settings.get('rate_increase',.15)),1e-9)*effect_limit,
+                    f'{prefix}: {module} affected fraction {b.mean():.1%} -> {r.mean():.1%}')
+            if 'spike_rate' in modules:
+                threshold=float(settings.get('spike_sigma',4))
+                rate_test(abs(base.value-center)>threshold*scale,abs(recent.value-center)>threshold*scale,'spike_rate')
+            ml_modules=modules & {'isolation_forest','local_outlier_factor'}
+            if ml_modules:
+                # Deterministic chronological train/calibration split prevents optimistic in-sample rates.
+                base=base.sort_values('_time');training=base.iloc[:max(minimum,len(base)//2)]
+                calibration=base.iloc[len(training):]
+                if len(calibration)<max(3,minimum//3):
+                    entry['warnings'].append(f'ML {prefix}: insufficient held-out baseline for IF/LOF');continue
+                limit=int(settings.get('model_max_samples',5000))
+                if len(training)>limit:training=training.iloc[np.linspace(0,len(training)-1,limit,dtype=int)]
+                features=['value','spread']
+                centers=training[features].median()
+                scales=pd.Series({c:robust_scale(training[c]) for c in features})
+                x=((training[features]-centers)/scales).to_numpy()
+                b=((calibration[features]-centers)/scales).to_numpy()
+                r=((recent[features]-centers)/scales).to_numpy()
+                contamination=float(settings.get('model_contamination',.05))
+                for module in sorted(ml_modules):
+                    if module=='isolation_forest':
+                        model=IsolationForest(n_estimators=100,contamination=contamination,random_state=int(settings.get('random_state',42)),n_jobs=1)
+                    else:model=LocalOutlierFactor(n_neighbors=min(20,len(training)-1),contamination=contamination,novelty=True,n_jobs=1)
+                    model.fit(x)
+                    original=base;base=calibration
+                    rate_test(model.predict(b)<0,model.predict(r)<0,module)
+                    base=original
+    # Benjamini-Hochberg controls the ensemble's large item count; effect gate is separate.
+    tests.sort(key=lambda row:row['p']);q=1.
+    for rank in range(len(tests),0,-1):
+        row=tests[rank-1];q=min(q,row['p']*len(tests)/rank);row['q']=q
+    for row in tests:
+        owner=entries[row['index']]
+        owner['ml_test_count']+=1
+        if row['module'] not in owner['ml_tested_modules']:owner['ml_tested_modules'].append(row['module'])
+        if row['q']<=float(settings.get('fdr_alpha',.05)) and row['effect']>=effect_limit:
+            entries[row['index']]['ml_findings'].append(row)
+    for entry in entries:
+        entry['ml_status']='flagged' if entry['ml_findings'] else ('no_findings' if entry['ml_test_count'] else 'not_tested')
+        if not entry['ml_findings']:
+            entry['reason']='No configured ML signal' if entry['ml_test_count'] else 'No eligible statistical tests'
+            continue
+        entry['ml_findings'].sort(key=lambda f:(f['q'],-f['effect']))
+        summaries=[]
+        for module in sorted({f['module'] for f in entry['ml_findings']}):
+            findings=[f for f in entry['ml_findings'] if f['module']==module]
+            best=findings[0]
+            summaries.append(f"{best['message']} (q={best['q']:.3g}; {len(findings)} checks)")
+        entry['reason']=' / '.join(summaries)
+        entry['warnings']=list(dict.fromkeys(entry['warnings']))
+        candidates.append(entry)
+    tested_items=sum(bool(e['ml_test_count']) for e in entries)
+    return candidates,dict(tested=len(entries),tested_items=tested_items,untested_items=len(entries)-tested_items,
+                           statistical_tests=len(tests),flagged=len(candidates),
+                           modules=sorted(modules),fdr_alpha=float(settings.get('fdr_alpha',.05)))
+
+
+def _ml_split_evidence(data, col, ka, kb, controls, settings):
+    """Outcome-blind, one-to-one matching inside root lots; never parse Split labels as doses."""
+    from scipy import stats
+    rows=[];total_a=total_b=0
+    controls=[c for c in controls if c!=col and c in data]
+    for root,g in data.groupby('root_lot_id',sort=True):
+        a=g.loc[g[col].astype(str).eq(str(ka))];b=g.loc[g[col].astype(str).eq(str(kb))]
+        total_a+=len(a);total_b+=len(b)
+        if a.empty or b.empty:continue
+        # A wafer group is bounded independently of the number of shots.
+        if max(len(a),len(b))>int(settings.get('influence_max_wafers_per_root',100)):continue
+        costs=np.zeros((len(a),len(b)));known=np.ones_like(costs,dtype=bool)
+        for c in controls:
+            av=a[c].astype('string').str.strip();bv=b[c].astype('string').str.strip()
+            valid=av.notna().to_numpy()[:,None]&bv.notna().to_numpy()[None,:]
+            known&=valid
+            costs+=(av.fillna('<MISSING>').to_numpy()[:,None]!=bv.fillna('<MISSING>').to_numpy()[None,:]) | ~valid
+        costs/=max(1,len(controls))
+        # Greedy deterministic matching, no reuse and no outcome-based selection.
+        used_a=set();used_b=set();pairs=[]
+        for flat in np.argsort(costs,axis=None,kind='stable'):
+            i,j=np.unravel_index(flat,costs.shape)
+            if i in used_a or j in used_b:continue
+            used_a.add(i);used_b.add(j)
+            pairs.append((float(a.iloc[i].y-b.iloc[j].y),float(costs[i,j]),bool(known[i,j])))
+            if len(used_a)==min(len(a),len(b)):break
+        rows.append(dict(root=str(root),delta=float(a.y.median()-b.y.median()),
+            balance=min(len(a),len(b))/max(len(a),len(b)),
+            pairs=pairs))
+    direction=np.sign(data.loc[data[col].astype(str).eq(str(ka))].y.median()-data.loc[data[col].astype(str).eq(str(kb))].y.median())
+    clean=[];similar=[]
+    tolerance=float(settings.get('influence_similar_mismatch',.15))
+    for r in rows:
+        exact=[d for d,c,k in r['pairs'] if c==0 and k and controls]
+        near=[d for d,c,k in r['pairs'] if c<=tolerance and k and controls]
+        if exact:clean.append(float(np.median(exact)))
+        if near and r['balance']>=float(settings.get('influence_min_balance',.5)):similar.append(float(np.median(near)))
+    minimum=max(3,int(settings.get('influence_min_matched_roots',5)))
+    mode='clean (scanned controls)' if len(clean)>=minimum else 'similar / balanced' if len(similar)>=minimum else 'unmatched'
+    selected=clean if mode.startswith('clean') else similar if mode.startswith('similar') else []
+    consistency=float(np.mean([np.sign(r['delta'])==direction for r in rows])) if rows and direction else 0.
+    matched_consistency=float(np.mean(np.sign(selected)==direction)) if selected and direction else 0.
+    return dict(match_tier=2 if mode.startswith('clean') else 1 if mode.startswith('similar') else 0,
+        match_label=mode,control_columns=[c[5:] for c in controls],clean_roots=len(clean),similar_roots=len(similar),
+        within_roots=len(rows),within_consistency=consistency,matched_consistency=matched_consistency,
+        matched_delta=float(np.median(selected)) if selected else None,
+        matched_p=float(stats.wilcoxon(selected).pvalue) if selected and np.any(np.asarray(selected)!=0) else 1.,
+        balance=min(total_a,total_b)/max(1,total_a,total_b),root_deltas=[{k:v for k,v in r.items() if k!='pairs'} for r in rows])
+
+
+def ml_influence_analyze(entries, settings):
+    """Exploratory associations AFTER anomaly selection, not causal/model importance.
+
+    Each test uses independent lot summaries (or within-lot pairs). Numerical
+    screening controls linear rank association with time; unpaired categories
+    use only time-overlapping strata. BH is applied across all attempted tests
+    in this selected report, before keeping the best pair per factor.
+    """
+    from scipy import stats
+    from itertools import combinations
+    import hashlib
+    import time
+    started=time.monotonic();budget=max(1.,float(settings.get('influence_seconds',60)))
+    minimum=max(5,int(settings.get('influence_min_lots',8)))
+    maximum=max(2,int(settings.get('influence_max_categories',12)))
+    permutations=min(9999,max(199,int(settings.get('influence_permutations',999))))
+    tests=[]
+    for entry in entries:
+        report=dict(candidates=[],skipped=[],tested=0,scope='selected anomalies / exploratory')
+        entry['_influence']=report
+        if not settings.get('influence_enabled',True):continue
+        if time.monotonic()-started>=budget:
+            report['skipped'].append(dict(column='*',reason='Influence time budget exhausted'));continue
+        raw=entry.get('spatial',pd.DataFrame()).copy()
+        pts=entry['points'].copy()
+        if raw.empty or pts.empty:
+            report['skipped'].append(dict(column='*',reason='No measured data'));continue
+        if '_vehicle' not in raw:raw['_vehicle']=entry['vehicle']
+        if '_vehicle' not in pts:pts['_vehicle']=entry['vehicle']
+        # Latest available measurement per wafer, then median of shots/aggregate rows.
+        if 'root_lot_id' not in raw or 'root_lot_id' not in pts:
+            report['skipped'].append(dict(column='*',reason='root_lot_id missing: independent-root analysis unavailable'));continue
+        keys=['_vehicle','root_lot_id','wafer_id']
+        clock='_dc_time' if '_dc_time' in pts else '_time'
+        pts=pts.loc[pts[clock].eq(pts.groupby(keys)[clock].transform('max'))]
+        response=pts.groupby(keys,dropna=False).agg(y=('_value','median'),t=('_time','max'),recent=('_recent','max')).reset_index()
+        rawclock='_dc_time' if '_dc_time' in raw else '_time'
+        raw=raw.loc[raw[rawclock].eq(raw.groupby(keys)[rawclock].transform('max'))]
+        columns=[c for c in raw if c.startswith('__ml_') and not re.search(r'(^|_)(TKOUT|TIME|DATE|TARGET|LABEL|SCORE|ANOMALY|PREDICTION|RESULT|SPEC)(_|$)',c[5:].upper())]
+        include=settings.get('influence_columns') or []
+        omit=settings.get('influence_exclude_columns') or []
+        import fnmatch
+        columns=[c for c in columns if (not include or any(fnmatch.fnmatchcase(c[5:].casefold(),str(p).casefold()) for p in include))
+                 and not any(fnmatch.fnmatchcase(c[5:].casefold(),str(p).casefold()) for p in omit)]
+        if not columns:report['skipped'].append(dict(column='*',reason='No eligible ML_TABLE columns'))
+        for vehicle,r in response.groupby('_vehicle',sort=True):
+            source=raw.loc[raw['_vehicle'].eq(vehicle)]
+            controls=[c for c in columns if c[5:].upper().startswith(('KNOB_','MASK_','SPLIT_'))]
+            control_values=source[keys+controls].drop_duplicates()
+            control_values=control_values.loc[~control_values.duplicated(keys,keep=False)]
+            for col in sorted(columns):
+                if time.monotonic()-started>=budget or len(tests)>=int(settings.get('influence_max_tests',240)):
+                    report['skipped'].append(dict(column='*',reason='Influence budget exhausted; remaining columns not tested'));break
+                name=col[5:]
+                seed=int.from_bytes(hashlib.sha256((str(settings.get('random_state',42))+str(vehicle)+entry['item']+col).encode()).digest()[:4],'little')
+                rng=np.random.default_rng(seed)
+                def skip(reason):report['skipped'].append(dict(vehicle=str(vehicle),column=name,reason=reason))
+                try:
+                    values=source[keys+[col]].dropna(subset=[col]).drop_duplicates()
+                    ambiguous=values.duplicated(keys,keep=False)
+                    if ambiguous.any():skip(f'Excluded {values.loc[ambiguous,keys].drop_duplicates().shape[0]} ambiguous wafer keys')
+                    values=values.loc[~ambiguous]
+                    data=r.merge(values,on=keys,how='inner',validate='one_to_one').dropna(subset=['y','t'])
+                    extra=[c for c in controls if c!=col]
+                    if extra:data=data.merge(control_values[keys+extra],on=keys,how='left',validate='one_to_one')
+                    # All inferential sample counts refer to ROOT lots, not split FAB lots.
+                    data['fab_lot_id']=data.root_lot_id
+                    data=data.loc[~data[col].astype(str).str.strip().str.upper().isin(['','NAN','NONE','UNMATCHED'])]
+                    coverage=len(data)/max(1,len(r))
+                    if coverage<float(settings.get('influence_min_coverage',.5)):skip(f'Coverage too low: {coverage:.0%}');continue
+                    if data.fab_lot_id.nunique()<minimum*2:skip('Insufficient independent lots');continue
+                    if not data.recent.any():skip('No new observations in matched data');continue
+                    number=pd.to_numeric(data[col],errors='coerce')
+                    categorical=(not pd.api.types.is_numeric_dtype(data[col]) or number.notna().mean()<.95
+                                 or data[col].nunique()<=maximum or name.upper().startswith(('FAB','EQP','CHAMBER','RECIPE','KNOB','SPLIT')))
+                    if categorical:
+                        if data[col].nunique()>maximum:skip(f'High cardinality: {data[col].nunique()} groups');continue
+                        data['x']=data[col].astype(str)
+                        lot=data.groupby(['fab_lot_id','x'],dropna=False).agg(y=('y','median'),t=('t','max'),recent=('recent','max')).reset_index()
+                        groups=[(key,g.set_index('fab_lot_id')) for key,g in lot.groupby('x') if len(g)>=minimum]
+                        attempted=0
+                        for (ka,a),(kb,b) in combinations(groups,2):
+                            if time.monotonic()-started>=budget or len(tests)>=int(settings.get('influence_max_tests',240)):break
+                            shared=a.index.intersection(b.index)
+                            if len(shared)>=minimum:
+                                aa=a.loc[shared];bb=b.loc[shared];diff=(aa.y-bb.y).to_numpy()
+                                ranks=stats.rankdata(abs(diff[diff!=0]));signs=np.sign(diff[diff!=0])
+                                effect=float(abs(np.dot(ranks,signs)/ranks.sum())) if len(ranks) else 0.
+                                p=float(stats.wilcoxon(diff).pvalue) if len(ranks) else 1.
+                                method='paired Wilcoxon';points=pd.concat([aa,bb]).reset_index()
+                            else:
+                                aa=a.drop(shared);bb=b.drop(shared)
+                                if min(len(aa),len(bb))<minimum:continue
+                                points=pd.concat([aa,bb]).reset_index()
+                                ticks=points.t.astype('int64')
+                                blocks=pd.qcut(ticks,q=min(4,max(1,len(points)//(minimum*2))),duplicates='drop',labels=False).fillna(0)
+                                mixed=points.assign(block=blocks).groupby('block').x.nunique()
+                                points=points.loc[blocks.isin(mixed[mixed>=2].index)].copy()
+                                blocks=blocks.loc[points.index].to_numpy();points=points.reset_index(drop=True)
+                                aa=points.loc[points.x.eq(ka)];bb=points.loc[points.x.eq(kb)]
+                                if min(len(aa),len(bb))<minimum:continue
+                                rank=stats.rankdata(points.y);labels=points.x.eq(ka).to_numpy()
+                                rank-=pd.Series(rank).groupby(blocks).transform('mean').to_numpy()
+                                observed=abs(rank[labels].mean()-rank[~labels].mean())
+                                exceed=0
+                                bins=[np.flatnonzero(blocks==block) for block in np.unique(blocks)]
+                                for _ in range(permutations):
+                                    shuffled=labels.copy()
+                                    for ids in bins:shuffled[ids]=rng.permutation(labels[ids])
+                                    exceed+=abs(rank[shuffled].mean()-rank[~shuffled].mean())>=observed-1e-12
+                                p=(exceed+1)/(permutations+1)
+                                u=stats.mannwhitneyu(aa.y,bb.y).statistic
+                                effect=float(abs(2*u/(len(aa)*len(bb))-1));method='time-stratified permutation'
+                            if not points.recent.any():continue
+                            test=dict(column=name,vehicle=str(vehicle),kind='categorical',comparison=f'{ka} vs {kb}',
+                                effect=effect,metric='rank-biserial',delta=float(aa.y.median()-bb.y.median()),p=p,
+                                n=int(points.fab_lot_id.nunique()),coverage=coverage,method=method,
+                                group_counts={str(ka):len(aa),str(kb):len(bb)},
+                                plot=points[['fab_lot_id','x','y','recent']].to_dict('records'),report=report)
+                            evidence=_ml_split_evidence(data,col,ka,kb,controls,settings)
+                            test.update(evidence)
+                            # Both global/root contrast and matched contrast must support a clean claim.
+                            if test['match_tier']:test['p']=max(test['p'],test['matched_p'])
+                            tests.append(test);attempted+=1
+                        if not attempted:skip('No supported group pair: too few lots or no temporal overlap')
+                    else:
+                        data['x']=number;data=data.dropna(subset=['x'])
+                        lot=data.groupby('fab_lot_id').agg(x=('x','median'),y=('y','median'),t=('t','max'),recent=('recent','max')).reset_index()
+                        if min(lot.x.nunique(),lot.y.nunique())<3:skip('Constant or nearly constant numeric field');continue
+                        xr=stats.rankdata(lot.x);yr=stats.rankdata(lot.y);tr=stats.rankdata(lot.t.astype('int64'))
+                        rho=float(stats.pearsonr(xr,yr).statistic)
+                        design=np.column_stack([np.ones(len(tr)),tr])
+                        xx=xr-design@np.linalg.lstsq(design,xr,rcond=None)[0]
+                        yy=yr-design@np.linalg.lstsq(design,yr,rcond=None)[0]
+                        denominator=np.linalg.norm(xx)*np.linalg.norm(yy)
+                        if denominator<1e-8 or np.linalg.norm(xx)/max(np.linalg.norm(xr-xr.mean()),1e-12)<.05:
+                            skip('Feature is confounded with time; residual variation too small');continue
+                        adjusted=float(np.dot(xx,yy)/denominator)
+                        exceed=sum(abs(np.dot(rng.permutation(xx),yy)/denominator)>=abs(adjusted)-1e-12 for _ in range(permutations))
+                        p=(exceed+1)/(permutations+1)
+                        time_rho=float(stats.spearmanr(lot.x,lot.t.astype('int64')).statistic) if lot.t.nunique()>1 else 0.
+                        tests.append(dict(column=name,vehicle=str(vehicle),kind='numeric',comparison='lot medians',metric='partial rank corr',
+                            rho=rho,adjusted_rho=adjusted,time_rho=time_rho,effect=abs(adjusted),p=p,n=len(lot),coverage=coverage,
+                            method='time-rank residual permutation',plot=lot[['fab_lot_id','x','y','recent']].to_dict('records'),report=report))
+                except (TypeError,ValueError) as exc:
+                    skip('Unsupported or invalid values: '+str(exc)[:100])
+    tests.sort(key=lambda r:r['p']);q=1.
+    for rank in range(len(tests),0,-1):
+        row=tests[rank-1];q=min(q,row['p']*len(tests)/rank);row['q']=q
+    for row in tests:
+        report=row.pop('report');report['tested']+=1
+        row['supported']=bool(row['q']<=float(settings.get('influence_fdr_alpha',.05)) and row['effect']>=float(settings.get('influence_min_effect',.3)))
+        report.setdefault('all_tests',[]).append(row)
+    for entry in entries:
+        report=entry['_influence'];best={}
+        ordering=lambda r:(r['supported'],r.get('match_tier',0) if r.get('matched_consistency',0)>=.75 else 0,
+            r.get('within_consistency',0),r['effect'],-r['q'],r['n'])
+        for row in report.get('all_tests',[]):
+            key=(row['vehicle'],row['column'])
+            if key not in best or ordering(row)>ordering(best[key]):best[key]=row
+        ranked=sorted(best.values(),key=ordering,reverse=True)
+        report['candidates']=[r for r in ranked if r['supported']][:min(6,max(1,int(settings.get('influence_top_k',6))))]
+        for i,row in enumerate(report['candidates'],1):row['rank']=i
+        report['family_tests']=len(tests)
+    return dict(items=len(entries),tests=len(tests),supported=sum(len(e['_influence']['candidates']) for e in entries),seconds=round(time.monotonic()-started,3),budget_seconds=budget)
+
+
+def mlmode_evaluate(settings, output_dir, seeds=(7,19,43)):
+    """Reproducible synthetic detector trials; never send mail or change Auto report rules."""
+    import json,copy
+    scenarios=['stable','constant','split_equal','oscillating','upward','downward','step_up','step_down',
+               'spike_burst','split_difference','dispersion_jump','insufficient_data']
+    negatives={'stable','constant','split_equal','oscillating'}
+    results=[];now=pd.Timestamp('2026-09-12 12:00')
+    for seed in seeds:
+        rng=np.random.default_rng(seed);entries=[]
+        for scenario in scenarios:
+            rows=[]
+            count=2 if scenario=='insufficient_data' else 120
+            for lot in range(count):
+                recent=lot>=100 if count>2 else True
+                stamp=(now-pd.Timedelta(hours=23-(lot-100))) if recent and count>2 else now-pd.Timedelta(days=30)+pd.Timedelta(hours=lot*6)
+                for wafer in (1,2):
+                    value=5.+float(rng.normal(0,.15));knob='ALL'
+                    if scenario=='constant':value=5.
+                    elif scenario=='upward':value+=lot*.04
+                    elif scenario=='downward':value-=lot*.04
+                    elif scenario=='step_up' and recent:value+=4
+                    elif scenario=='step_down' and recent:value-=4
+                    elif scenario=='spike_burst' and recent and rng.random()<.6:value+=5
+                    elif scenario in ('split_equal','split_difference'):
+                        knob='A' if wafer==1 else 'B'
+                        if scenario=='split_difference' and wafer==2:value+=3
+                    elif scenario=='oscillating':value+=.2*np.sin(lot*2*np.pi/10)
+                    elif scenario=='dispersion_jump' and recent:value=5+float(rng.normal(0,2))
+                    rows.append(dict(_vehicle='SYNTHETIC',fab_lot_id=f'L{lot}',wafer_id=wafer,_time=stamp,
+                                     _dc_time=stamp,_recent=recent,_knob=knob,_value=value,_out=False))
+            points=pd.DataFrame(rows)
+            entries.append(dict(vehicle='SYNTHETIC',item=scenario,category='Detector validation',step='S1',program='PGM',
+                                temperature='25',unit='a.u.',aggregation='wafer median',x_label='Synthetic process time',
+                                knob_label='Synthetic split' if scenario.startswith('split') else '',log_scale=False,
+                                low=None,high=None,out_pct=None,points=points,n=len(points),lots=count,
+                                recent_lots=int(points.loc[points._recent,'fab_lot_id'].nunique()),warnings=[],reason=''))
+        selected,summary=ml_trend_select(entries,settings)
+        selected_names={e['item'] for e in selected}
+        for entry in entries:
+            expected=None if entry['item']=='insufficient_data' else entry['item'] not in negatives
+            modules=sorted({r['module'] for r in entry.get('ml_findings',[])})
+            results.append(dict(seed=seed,scenario=entry['item'],expected=expected,detected=entry['item'] in selected_names,
+                                modules=';'.join(modules),reason=entry['reason'],diagnostic=' / '.join(entry['warnings'])))
+        print(f'[INFO] ML Lab synthetic seed={seed}: {summary["flagged"]}/{len(scenarios)} flagged',flush=True)
+    def metrics(module=None):
+        counts=dict(tp=0,fp=0,tn=0,fn=0)
+        for row in results:
+            if row['expected'] is None:continue
+            detected=(module in row['modules'].split(';')) if module else row['detected']
+            counts[('t' if detected==row['expected'] else 'f')+('p' if detected else 'n')]+=1
+        counts['precision']=counts['tp']/(counts['tp']+counts['fp']) if counts['tp']+counts['fp'] else None
+        counts['recall']=counts['tp']/(counts['tp']+counts['fn']) if counts['tp']+counts['fn'] else None
+        return counts
+    report=dict(kind='synthetic_only',seeds=list(seeds),scenarios=scenarios,ensemble=metrics(),
+                per_module={m:metrics(m) for m in summary['modules']},settings=settings,results=results,
+                limitation='Synthetic coverage only; production labels and human review are required before changing Auto report rules.')
+    os.makedirs(output_dir,exist_ok=True)
+    atomic_bytes(os.path.join(output_dir,'evaluation.json'),json.dumps(report,ensure_ascii=False,indent=2,default=str).encode('utf-8'))
+    atomic_bytes(os.path.join(output_dir,'evaluation.csv'),pd.DataFrame(results).to_csv(index=False).encode('utf-8-sig'))
+    lines=['# ML Lab 탐지 방법 검증','',
+           '가상 데이터 검증입니다. 기본 Auto report의 판정이나 설정을 변경하지 않았습니다.',
+           '실제 업무 자료의 정답 라벨/오탐 검토를 통과하기 전에는 자동 적용 근거로 사용하지 않습니다.','',
+           '| 모듈 | TP | FP | TN | FN | Precision | Recall |','|---|---:|---:|---:|---:|---:|---:|']
+    for module,m in [('ensemble',report['ensemble']),*report['per_module'].items()]:
+        fmt=lambda v:'N/A' if v is None else f'{v:.1%}'
+        lines.append(f"| {module} | {m['tp']} | {m['fp']} | {m['tn']} | {m['fn']} | {fmt(m['precision'])} | {fmt(m['recall'])} |")
+    lines+=['','모듈별 Recall은 공통 시나리오 전체 기준이므로, 담당 현상이 다른 단일 모듈 간 성능 순위로 해석하지 않습니다.',
+            '상세 시나리오/seed별 탐지 모듈과 자료 부족 진단은 evaluation.csv를 확인하세요.']
+    atomic_bytes(os.path.join(output_dir,'evaluation.md'),'\n'.join(lines).encode('utf-8'))
+    return report
+
+
+def cached_trend_band(vehicle_frame, item, percentile):
+    import pickle,hashlib
+    if vehicle_frame.empty:return None
+    source=vehicle_frame[['tkout_time',item]].dropna().sort_values('tkout_time')
+    if source.empty:return None
+    identity=(pd.util.hash_pandas_object(source,index=False).values.tobytes(),item,percentile,
+              pd.__version__,file_fingerprint([__file__]))
+    key=hashlib.sha256(pickle.dumps(identity,protocol=4)).hexdigest()
+    path=os.path.join(operations_root(),'cache','population',key+'.pkl')
+    if os.path.exists(path):
+        try:
+            with open(path,'rb') as stream:return pickle.load(stream)
+        except Exception:pass
+    source=source.assign(date=source['tkout_time'].dt.date)
+    aggs={'median':'median','q01':lambda x:x.quantile(.01),'q99':lambda x:x.quantile(.99)}
+    if percentile:
+        aggs['qlo']=lambda x:x.quantile(percentile/100)
+        aggs['qhi']=lambda x:x.quantile(1-percentile/100)
+    daily=source.groupby('date')[item].agg(**aggs).reset_index()
+    daily['date']=pd.to_datetime(daily['date'])
+    band=daily.set_index('date').sort_index().rolling('3D',min_periods=1).mean()
+    atomic_bytes(path,pickle.dumps(band,protocol=4))
+    return band
+

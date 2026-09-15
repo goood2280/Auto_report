@@ -523,13 +523,52 @@ class Config:
         self.theme_title_color = (31, 73, 125)     # 슬라이드/차트 제목·헤더 색상 (Dark Blue, 전 슬라이드 통일)
 
         # ──────────────────────────────────────────────────────
-        # GPT 연동 기능 ON/OFF (GPT feature toggles)
-        # GPT(gpt_oss_client) 연결이 필요한 기능을 끄거나 켭니다.
-        # False로 두면 해당 GPT 기능을 완전히 스킵합니다(호출 자체를 하지 않음).
-        # 오프라인/사내망 외 환경이거나 GPT 미사용 시 False로 설정하세요.
-        # ──────────────────────────────────────────────────────
-        self.use_gpt_summary = True        # GPT 리포트 요약(요약문) 사용 여부 (텍스트 요약에만 영향)
-        self.use_gpt_multistep = True      # AI 다단계 해석(triage→root-cause→final) 사용 (use_gpt_summary=True일 때)
+        # 이전 YAML과의 호환성 필드. Main은 LLM 연결/호출 없이 False로 고정한다.
+        self.use_gpt_summary = False
+        self.use_gpt_multistep = False
+        self.mail_connect_timeout_sec = 10
+        self.mail_read_timeout_sec = 90
+        self.mail_max_attempts = 3
+
+        # 독립 일일 서비스 수신처: 제품 YAML email_receiver와 분리합니다.
+        # 실제 메일 주소 또는 메일링 XLSX의 정확한 시트명을 각각 지정하세요.
+        # 제품 미선택/수신처 미설정 시 외부 발송하지 않습니다. 수정 후 Scheduler 재시작.
+        self.watchdog = dict(
+            enabled=True, daily_time='09:00', recipients=[], mail_vehicle='',
+        )  # 운영 확인: team/부서 수신처
+        # 두 모드의 아이템별 색상: reformatter split_check에 ML_TABLE의 임의 열 이름 지정.
+        # 예: FAB_ETCH / Recipe / FAB_ETCH;KNOB_IMPLANT (여러 열은 값 조합). 접두사 제한 없음.
+        self.daily_trend = dict(
+            enabled=False, daily_time='09:30', products=[], recipients=[], mail_vehicle='',
+            summary_max_items=12,  # 메일 상단 우선 확인 항목 수. 전체 항목은 본문·PPT·catalog에 보존.
+            ml_table_dir='RUN/DB', ml_join_keys=['root_lot_id','wafer_id'],
+            chart_dpi=150, trend_marker_size=18, trend_recent_marker_size=32, trend_palette_colors=64, trend_background_alpha=0.3, html_legend_limit=6, html_columns=4, ppt_max_bytes=10_000_000, html_max_bytes=2_000_000,
+            max_mail_parts=10,
+            category_order=[],  # CAT2 이름을 원하는 순서대로: ['Transistor', 'Leakage', ...]; 미지정은 뒤에 이름순
+        )  # 선택 제품 전체 Category + 당일 측정 lot 강조: 관련 team/부서 수신처
+        self.mlmode = dict(
+            enabled=False, daily_time='10:00', products=[], recipients=[], mail_vehicle='',
+            summary_max_items=12,
+            with_vehicle={},  # 예: {'vehicle_A': ['Vehicle_B']}; 미지정 제품은 제품 YAML with_vehicle 사용
+            ml_table_dir='RUN/DB', ml_join_keys=['root_lot_id','wafer_id'],
+            chart_dpi=150, trend_palette_colors=64, html_columns=4, ppt_max_bytes=10_000_000, html_max_bytes=2_000_000,
+            mail_max_bytes=20_000_000,
+            modules=['split_difference','time_trend','spike_rate','isolation_forest','local_outlier_factor'],
+            diagnostic_modules=['equipment_difference','spatial_pattern'], equipment_columns=[],
+            min_samples=12, min_lots=3, fdr_alpha=0.05, effect_sigma=1.5,
+            spike_sigma=4.0, rate_increase=0.15, model_contamination=0.05,
+            model_max_samples=5000, random_state=42,
+            influence_enabled=True, influence_columns=[], influence_exclude_columns=[],
+            influence_max_columns=80, influence_top_k=6, influence_min_lots=8,
+            influence_max_categories=12, influence_min_coverage=.5,
+            influence_min_effect=.3, influence_fdr_alpha=.05, influence_permutations=999,
+            influence_seconds=60, influence_max_tests=240, influence_max_join_rows=200000,
+            influence_max_wafers_per_root=100, influence_min_matched_roots=5,
+            influence_similar_mismatch=.15, influence_min_balance=.5,
+        )  # 분석 담당자 검토용: 탐지 근거·연관 후보 제공. 기본 Auto report 판정에는 반영하지 않음.
+        self.report_max_attempts = 3
+        self.et_refresh_days = 2
+        self.et_full_refresh_days = 7
         self.use_email_send = False        # 사내 메일 API로 PPT+HTML 발송 on/off (True면 리포트 발행 후 메일 전송)
         self.use_s3_upload = True          # 생성 PPT의 S3(DX) 업로드 on/off
         self.use_description_page = True   # PPT CAT2 간지(Description) 페이지 삽입 on/off
