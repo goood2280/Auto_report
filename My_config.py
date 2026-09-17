@@ -538,6 +538,7 @@ class Config:
         )  # 운영 확인: team/부서 수신처
         # 두 모드의 아이템별 색상: reformatter split_check에 ML_TABLE의 임의 열 이름 지정.
         # 예: FAB_ETCH / Recipe / FAB_ETCH;KNOB_IMPLANT (여러 열은 값 조합). 접두사 제한 없음.
+        # CUSTOM 검색은 fnmatch 와일드카드 지원: FAB 1.0*ppid (대소문자 무시, 복수 매칭은 값 조합).
         self.daily_trend = dict(
             enabled=False, daily_time='09:30', products=[], recipients=[], mail_vehicle='',
             summary_max_items=12,  # 메일 상단 우선 확인 항목 수. 전체 항목은 본문·PPT·catalog에 보존.

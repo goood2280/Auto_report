@@ -4771,8 +4771,9 @@ def daily_trend_ml(frame, reformatter, vehicle, settings):
     """Join only requested ML columns; ambiguous wafer keys are never guessed.
 
     Reformatter tkout_time/split_check accepts an exact column or a process step,
-    resolved to TKOUT_TIME_<step>/KNOB_<step>. split_check accepts ANY exact
-    Parquet column (e.g. FAB_ETCH, recipe, numeric codes), case-insensitively.
+    resolved to TKOUT_TIME_<step>/KNOB_<step>. split_check accepts ANY Parquet
+    column (e.g. FAB_ETCH, recipe, numeric codes), case-insensitively, and CUSTOM
+    searches may use fnmatch wildcards (e.g. ``FAB 1.0*ppid``).
     Multiple grouping columns use ';'; the KNOB_ prefix is only a legacy fallback.
     """
     columns={str(c).lower():c for c in reformatter.columns}
@@ -4803,6 +4804,21 @@ def daily_trend_ml(frame, reformatter, vehicle, settings):
             if deep or m['time'] or m['split']:m['warnings'].append('ML_TABLE unavailable: '+type(exc).__name__)
         return frame,mappings
     lookup={c.casefold():c for c in names}
+
+    def resolve_columns(token, prefix='', allow_wildcard=False):
+        """Resolve exact/legacy names first, then CUSTOM wildcard column searches."""
+        candidates=[str(token),prefix+str(token)]
+        for candidate in candidates:
+            col=lookup.get(candidate.casefold())
+            if col:return [col]
+        if not allow_wildcard or not any(ch in str(token) for ch in '*?['):return []
+        import fnmatch
+        resolved=[]
+        for candidate in candidates:
+            pattern=candidate.casefold()
+            for col in names:
+                if col not in resolved and fnmatch.fnmatchcase(col.casefold(),pattern):resolved.append(col)
+        return resolved
     equipment=[c for c in names if c.upper().startswith(('EQP_','EQP_ID_','CHAMBER_')) or c.upper() in ('EQP','EQP_ID','CHAMBER')] if deep else []
     explicit=settings.get('equipment_columns')
     if explicit:equipment=[lookup[c.casefold()] for c in explicit if c.casefold() in lookup]
@@ -4840,8 +4856,10 @@ def daily_trend_ml(frame, reformatter, vehicle, settings):
             resolved=[]
             for token in tokens:
                 if not token:continue
-                col=lookup.get(token.casefold()) or lookup.get((prefix+token).casefold())
-                if col:resolved.append(col);wanted.add(col)
+                matches=resolve_columns(token,prefix,allow_wildcard=(key=='split'))
+                if matches:
+                    resolved.extend(col for col in matches if col not in resolved)
+                    wanted.update(matches)
                 else:m['warnings'].append(f'ML column missing: {token} (fallback: {prefix}{token})')
             m[key+'_columns']=resolved
     left_lookup={c.casefold():c for c in frame}
