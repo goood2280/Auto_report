@@ -307,7 +307,7 @@ def _build_inline_pivot(inlinedata, inline_file_path, inline_file_sheet, vehicle
 
         inlinedata_filtered_pivot = pd.merge(inlinedata_spec, inlinedata_filtered_pivot, how='right', on='STEP_DESC_ITEM_ID')
 
-        # [PATCH] Inline Table 멀티 인덱스 (UCL 앞 4열: Module / Step desc / ITEMNAME / Item)
+        # Inline Table 멀티 인덱스 (UCL 앞 4열: Module / Step desc / ITEMNAME / Item)
         #  - Module    : inline setting의 실제 Module 열 (inline_grouped_dict)  → 첫번째 인덱스
         #  - Step desc : STEP_DESC 열 (inline_grouped_dict_STEP_DESC)
         #  - ITEMNAME  : inline setting의 ITEMNAME 열 (inline_grouped_dict_ITEMNAME)
@@ -416,16 +416,10 @@ def _filter_normal_shots(frame, zones):
 
 
 def _trigger_receivers(path, recipient):
-    """Explicit address or exact mailing sheet; never fall back to a different group."""
+    """직접 주소는 엑셀 없이, 그룹명은 지정된 시트의 명단으로 발송한다."""
     if '@' in recipient:
-        addresses = [a.strip() for a in recipient.split(',') if a.strip()]
-        if not addresses or any(not re.fullmatch(r'[^\s@,]+@[^\s@,]+\.[^\s@,]+', a) for a in addresses):
-            raise ValueError('잘못된 트리거 이메일 주소')
-        return [dict(email=a, recipientType='TO', seq=i) for i, a in enumerate(addresses, 1)]
-    with pd.ExcelFile(path) as book:
-        if recipient not in book.sheet_names:
-            raise ValueError(f'트리거 수신 그룹 없음: {recipient}')
-    return get_email_list(path, recipient)
+        return email_receivers(recipient.split(','))
+    return get_email_list(path, recipient, default_group=None)
 
 
 def _trend_artifacts(charts, title):
@@ -741,13 +735,12 @@ def _send_report_files(html_path,ppt_path,receivers,title,identity):
 
 
 def _parse_command(arguments):
-    """Translate explicit operator commands to the existing product/trigger pipeline."""
+    """기본 실행, 초기 DB 적재, 개인 발송 명령을 기존 리포트 흐름으로 연결한다."""
     import argparse
     parser = argparse.ArgumentParser(description='Auto Report: DB 초기 적재 및 지정 수신처 발행')
     action = parser.add_mutually_exclusive_group()
     action.add_argument('--init-db', metavar='VEHICLE', help='최근 200일 DB 적재 (리포트/메일 없음)')
-    action.add_argument('--send-dept', metavar='SHEET', help='메일링 엑셀의 부서 시트에만 강제 발송')
-    action.add_argument('--send-user', metavar='ID_OR_EMAIL', help='한 명에게만 강제 발송 (ID 기본 @samsung.com)')
+    action.add_argument('--send-user', metavar='EMAIL', help='엑셀을 읽지 않고 입력한 이메일 한 명에게만 발송')
     parser.add_argument('--prime-key', help='발행 대상 vehicle_lot_step')
     parser.add_argument('--single', action='store_true', help='viewing_period 없이 대상 lot/step ET만 조회')
     parser.add_argument('legacy', nargs='?', help='기존 vehicle 또는 _TRIGGER 명령')
@@ -759,29 +752,25 @@ def _parse_command(arguments):
         if not vehicle or _parse_trigger(vehicle)[0] is not None:
             parser.error('--init-db에는 TRIGGER 대신 제품명을 지정합니다')
         return dict(argument=vehicle, kind='init_db', recipient=None)
-    if args.send_dept is not None or args.send_user is not None:
+    if args.send_user is not None:
         if args.legacy or not args.prime_key:
             parser.error('지정 발송에는 --prime-key vehicle_lot_step이 필요합니다')
-        kind = 'department' if args.send_dept is not None else 'person'
-        recipient = (args.send_dept if kind == 'department' else args.send_user).strip()
-        if not recipient or any(c in recipient for c in '\r\n'):
-            parser.error('수신처가 비어 있거나 잘못되었습니다')
-        if kind == 'person':
-            recipient = recipient if '@' in recipient else recipient + '@samsung.com'
-            if not re.fullmatch(r'[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+', recipient):
-                parser.error('--send-user에는 ID 또는 이메일 주소 한 개만 지정합니다')
+        try:
+            recipient = normalize_email(args.send_user)
+        except ValueError as exc:
+            parser.error(str(exc))
         argument = '_TRIGGER_' + ('SINGLE_' if args.single else '') + args.prime_key
         mode, _, _, _, _ = _parse_trigger(argument)
         if mode != ('SINGLE' if args.single else 'TRIGGER'):
             parser.error('--prime-key에는 TRIGGER 접두어 없는 vehicle_lot_step을 지정합니다')
-        return dict(argument=argument, kind=kind, recipient=recipient)
+        return dict(argument=argument, kind='person', recipient=recipient)
     if not args.legacy or args.prime_key or args.single:
-        parser.error('vehicle, TRIGGER 또는 --init-db / --send-dept / --send-user 명령을 지정하세요')
+        parser.error('vehicle, TRIGGER 또는 --init-db / --send-user 명령을 지정하세요')
     return dict(argument=args.legacy, kind='legacy', recipient=None)
 
 
 def _apply_command_settings(command, config):
-    """Apply invocation-only overrides; explicit delivery never falls back to default groups."""
+    """YAML은 변경하지 않고 이번 실행의 적재·발송 설정만 적용한다."""
     if command['kind'] == 'init_db':
         config.settings.update(DB_Setting_mode=True, QueryTimeSpan=200, now_minus=0,
                                test_mode=False, report_making=False, use_email_send=False,
@@ -790,24 +779,12 @@ def _apply_command_settings(command, config):
             config.settings['SplitTimeSpan'] = 7
         print('[INFO] DB 초기 적재: 오늘 포함 최근 200일, 전체 조회, 리포트/메일/S3 비활성')
         return None
-    if command['kind'] not in ('department', 'person'):
+    if command['kind'] != 'person':
         return None
-    recipient = command['recipient']
-    if command['kind'] == 'department':
-        path = config.get('email_list_path')
-        with pd.ExcelFile(path) as book:
-            if recipient not in book.sheet_names:
-                raise ValueError(f'발송 부서 시트 없음: {recipient}')
-        receivers = get_email_list(path, recipient)
-    else:
-        receivers = [dict(email=recipient)]
-    addresses = list(dict.fromkeys(r['email'] for r in receivers))
-    if not addresses or any(not re.fullmatch(r'[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+', a) for a in addresses):
-        raise ValueError('지정 수신처가 비어 있거나 이메일 주소가 잘못되었습니다')
-    mail = ','.join(addresses)
+    mail = normalize_email(command['recipient'])
     config.settings.update(DB_Setting_mode=False, report_making=True, use_email_send=True,
                            use_s3_upload=False, email_receiver=[mail])
-    print(f'[INFO] 지정 수신처 강제 발송: {command["kind"]}, {len(addresses)}명 (기본 수신 그룹 대체)')
+    print('[INFO] 개인 발송: 입력한 이메일 1명만 사용 (메일링 엑셀 조회 없음)')
     return mail
 
 
@@ -816,12 +793,8 @@ def _main_impl(command=None):
 
     command = command or _parse_command(sys.argv[1:])
     raw_arg = command['argument']
-    trigger_flag = False
-
     trigger_mode, vehicle_name, trigger_lot, trigger_step, trigger_mail = _parse_trigger(raw_arg)
     trigger_flag = trigger_mode is not None
-    if trigger_flag:
-        raw_arg = f"{vehicle_name}_{trigger_lot}_{trigger_step}"
 
     # config.yaml에서 설정 로드
     GLOBAL_CONFIG.load_from_yaml(vehicle_name)
@@ -870,7 +843,7 @@ def _main_impl(command=None):
     specific_dc_layer = GLOBAL_CONFIG.get("specific_dc_layer")
 
     # =============================================== Folder path 생성 ==================================================================
-    # NOTE: DB_et_LOTWF_raw / DB_et_LOTWF_pivot_raw 삭제됨 — daily DB에서 DuckDB로 직접 조회
+    # ET 원시는 제품별 daily DB에서 직접 조회한다.
 
     # RUN/TEMP = 임시 산출물 폴더
     _temp_dir = os.path.join(ROOT, 'TEMP')
@@ -949,7 +922,6 @@ def _main_impl(command=None):
             _RUN.stage('et_query')
             etdata_query()
             print('[INFO] ==============et_query 수행완료==============')
-            # NOTE: et_LOTWF_generator 삭제됨 — daily DB에서 DuckDB로 직접 조회
             log_to_file("Query Success...", query_log)
 
             _RUN.stage('wip_query')
@@ -1022,28 +994,17 @@ def _main_impl(command=None):
             dc_done_list = dc_done_list.drop(columns=['dc_layer_check'])
             print(f"[INFO] specific_dc_layer 타겟 필터 후 LOT: {len(dc_done_list)}건")
 
-        # trigger_flag = True
-
-        if trigger_flag :
-            #trigger
-            parts = raw_arg.strip().rsplit("_", 2)
+        # 수동 발행은 파싱된 lot·step 하나만 대상으로 한다.
+        if trigger_flag:
             dc_done_list = {
-                'lot_id': [parts[1]],
-                'dc_step_id': [parts[2]],
+                'lot_id': [trigger_lot],
+                'dc_step_id': [trigger_step],
                 'dc_done': [True],
                 'dc_done_before': [False]
             }
 
-        #수동발행 필요 시 
-            # dc_done_list = {
-            #     'lot_id': 'A488GA.1',
-            #     'dc_step_id': 'CC942300',
-            #     'dc_done': [True],
-            #     'dc_done_before': [False]
-            # }
-
         if trigger_flag:
-            print("[INFO] 강제발행모드입니다. 쿼리 수행되지않고 현재 DB에서 리포팅만 실행합니다.")
+            print("[INFO] 수동 발행: ET/WIP는 현재 DB 사용, Inline은 기존 방식으로 조회합니다.")
             # 수신처: Scheduler.py가 환경변수 AUTO_REPORT_EMAIL_RECEIVER로 지정하면 그 그룹에만 발송된다
             #        (My_config.load_from_yaml에서 config.yaml의 email_receiver를 덮어씀)
             if os.getenv('AUTO_REPORT_EMAIL_RECEIVER'):
@@ -1068,7 +1029,7 @@ def _main_impl(command=None):
                 search_strings = dc_done_list['search_key'].unique().tolist() #측정된 {fab_lot_id}_{dc_step_id} list
 
                 # ================================================================
-                # DuckDB: daily Hive 파티션에서 직접 조회 (LOTWF 제거)
+                # DuckDB: daily Hive 파티션 조회
                 # ================================================================
                 DB_et_daily = GLOBAL_CONFIG.get('DB_et_daily')
 
@@ -1087,9 +1048,6 @@ def _main_impl(command=None):
                 addp['addpscale'] = addp['SCALE FACTOR'].astype(str) + '*(' + addp['ADDP FORM'].astype(str) + ')'
                 ALIAS = list(map(str, addp.ALIAS))
                 FORMULA = list(map(str, addp.addpscale))
-
-                # Hive 파티션 glob 패턴
-                hive_glob = os.path.join(DB_et_daily, '*', '*.parquet').replace('\\', '/')
 
                 if trigger_mode == 'FORCE':
                     viewing_period = _force_viewing_period(
@@ -1149,7 +1107,6 @@ def _main_impl(command=None):
                         with_vehicle_Table = pd.DataFrame() 
                         for with_vehicle_now in with_vehicle :
                             wv_daily_path = DB + with_vehicle_now + '_daily'
-                            wv_hive_glob = os.path.join(wv_daily_path, '*', '*.parquet').replace('\\', '/')
 
                             print(f'[INFO] with_vehicle={with_vehicle_now}, viewing_period={viewing_period}')
 
@@ -1242,7 +1199,6 @@ def _main_impl(command=None):
                 # Add TEMPERATURE Modified
                 merged_df['temperature'] = merged_df['temperature'].apply(lambda a: int(np.round(a / 5) * 5))
                 # =====================================================================================================
-                # merged_df = merged_df[merged_df['step_seq'] == 'N02V98HI']
 
                 _RUN.stage('coordinate_join')
                 # Add coordinate_file
@@ -1328,9 +1284,9 @@ def _main_impl(command=None):
                         os.makedirs(report_temp_dir(),exist_ok=True)
                         print_status("Report 발행 시작", "info", f"{search_key}")
 
-                        target_lot_id = search_key.split('_')[0] #{fab_lot_id}
+                        target_lot_id = _lot
                         target_root_lot_id = target_lot_id[:5] #{root_lot_id}
-                        target_DC_step_id = search_key.split('_')[1] #{DC_step_id}
+                        target_DC_step_id = _step
                         target_DC_step = GLOBAL_CONFIG.get("dc_dict").get(target_DC_step_id) #{DC_step}
                         target_step_merged = (target_DC_step or target_DC_step_id) + "(" + target_DC_step_id + ")" #{DC_step_id}({DC_step})
 
@@ -1345,8 +1301,6 @@ def _main_impl(command=None):
                             continue
 
 
-                        # print('***** fab_lot_id + step_id : ', search_key)
-                        # print('***** root_lot_id + step_id : ', match_key)
 
                         df = merged_df[merged_df['match_key'] == match_key].copy()
 
@@ -1441,11 +1395,6 @@ def _main_impl(command=None):
 
                         df = pd.concat([df, pass_df], axis=1)
                         # ============================================ VIP_group 생성 ===========================================
-
-                        # match_key와 맞는 data filtering
-                        wf_matching_list = list(zip(df['FAB_LOT_ID'], df['WAFER_ID'].astype(str).apply(lambda x: '#' + x)))
-                        wf_matching_list = list(set(wf_matching_list))
-                        # print('wf_matching_list : ',wf_matching_list)
 
                         # VIP_group_raw 생성
                         selected_columns = ['WAFER_ID'] + [col for col in df.columns if col.startswith('pass_rate_')]
@@ -1582,13 +1531,9 @@ def _main_impl(command=None):
                         # 1-4. Save ppt - 메일링 버전
                         if not os.path.exists(low_qual_ppt_save_path):
                             os.makedirs(low_qual_ppt_save_path)
-                        try:
-                            _RUN.stage('ppt_save')
-                            atomic_output(f'{low_qual_ppt_save_path}{final_ppt_file_name_DX}', prs_low_qual.save)
-                            print('[INFO]..저장 완료..\n')
-                        except PermissionError:
-                            raise
-                            print(f"[WARN] PermissionError: PPT 파일을 저장할 수 없습니다 (파일이 열려있을 수 있습니다): {final_ppt_file_name_DX}")
+                        _RUN.stage('ppt_save')
+                        atomic_output(f'{low_qual_ppt_save_path}{final_ppt_file_name_DX}', prs_low_qual.save)
+                        print('[INFO]..저장 완료..\n')
 
                         # =====================================================================================================
                         VIP_group = VIP_group.map(lambda x: x.strip() if isinstance(x, str) else x)
@@ -1666,8 +1611,7 @@ def _main_impl(command=None):
                         # _existing_pr 필터(VIP_group_raw 생성 직후)로 미측정 항목은 이미 제거됨.
                         # 여기서 다시 dropna 하면 lot-wafer 분리 시 일부 lot에만 데이터가 있는
                         # 항목이 잘못 제거되어 "HTML에 2개만 표시"되는 버그 발생.
-                        # (NaN 셀은 HTML 렌더러가 회색으로 표기 — line 1440 참조)
-                        # VIP_group_HTML = VIP_group_HTML.dropna(how='all')  # 제거: PPT와 일관성 유지
+                        # NaN 셀은 HTML에서 빈 셀로 표시한다.
 
                         # ==================== Score Board HTML 렌더링 (Manual) ====================
                         # Pandas의 to_html()이 만드는 불안정한 멀티인덱스 태그를 방지하기 위해 HTML 태그를 한 땀 한 땀 생성

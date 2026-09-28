@@ -471,7 +471,7 @@ class Config:
         # PPT 설명 문서 경로
         self.description_ppt_path = os.path.join(
             self.base_path, 'HOL_Auto_Report_Description.pptx')
-        # 이상 해석 지식베이스(MD) — AI 다단계 해석의 root-cause 단계가 참고
+        # PCHK 매핑과 공간 패턴 라벨의 참고 문서
         self.anomaly_knowledge_path = os.path.join(
             self.base_path, 'ANOMALY_KNOWLEDGE.md')
         # 메일링 리스트 엑셀 파일 경로
@@ -603,7 +603,7 @@ class Config:
 
         # ──────────────────────────────────────────────────────
         # Commonality / 이상 해석 엔진 (anomaly_engine.analyze_commonality)
-        # AI 없이도 코드로 동작하는 1차 자동 해석의 임계값들.
+        # 통계 자동 분석의 판정 임계값.
         # 모두 이 파일에서 조정 → README "Anomaly Trend Chart 우선순위" 참고
         # ──────────────────────────────────────────────────────
         self.anomaly_lot_dispersion_ratio = 2.0  # 주의(산포): target wafer 내부 산포가 '보통 wafer 산포'의 이 배수 초과 시 주의
@@ -841,7 +841,7 @@ class Config:
         self.description_image_jpeg_quality = 85   # 재압축 JPEG 시작 품질(0~100)
 
         # ── Anomaly 상세(통계 자동 분석) PPT 페이지 분할 ──
-        #   1페이지: Rule Check 결과 + 첫 N개 finding / 2페이지부터: 페이지당 M개 finding
+        #   페이지별 통계 finding 수를 설정한다.
         self.anomaly_detail_first_page_items = 5   # 1페이지 finding 수
         self.anomaly_detail_page_items = 15        # 2페이지부터 페이지당 finding 수
 
@@ -849,7 +849,7 @@ class Config:
         # 내부 상태 저장소 (Internal state storage)
         # ──────────────────────────────────────────────────────
         self.env = {}               # .env 환경 변수 저장소
-        self.settings = {}          # YAML에서 로드된 원본 설정 (per-vehicle)
+        self.settings = {}          # 제품 YAML + 해당 실행의 CLI 설정
         self.generated_vars = {}    # 종속 변수 저장 (경로, HTML 등)
 
         # ── DC Step 매핑 (코드에서 직접 관리, YAML 의존 없음) ──
@@ -923,40 +923,24 @@ class Config:
         return (bg, fg)
 
     # ================================================================
-    # 환경 변수 로드 (Environment variable loading)
+    # 환경 변수 로드
     # ================================================================
 
     def _load_env_variables(self):
-        """환경 변수를 읽어서 self.env에 저장합니다.
-        (Load all OS environment variables into self.env dict.)
-
-        .env 파일의 키-값 쌍을 self.env 딕셔너리에 저장하여
-        get() 메서드로 접근할 수 있게 합니다.
-        """
+        """.env를 로드한 뒤 현재 프로세스 환경 변수를 저장한다."""
         load_dotenv()
         for key, value in os.environ.items():
             self.env[key] = value
 
     # ================================================================
-    # YAML 설정 로드 (YAML configuration loading)
+    # 제품별 YAML 설정 로드
     # ================================================================
 
     def load_from_yaml(self, item_name, yaml_path=None):
-        """reformatter/config.yaml에서 특정 vehicle 설정을 로드합니다.
-        (Load vehicle-specific settings from reformatter/config.yaml.)
+        """제품 YAML을 로드하고 Scheduler 수신 그룹과 파생 경로를 적용한다.
 
-        설정 파일 경로는 이 모듈(My_config.py / Main.py가 위치한 디렉토리)을
-        기준으로 한 상대 경로(reformatter/config.yaml)로 해석합니다. 따라서
-        현재 작업 디렉토리(cwd)와 무관하게 항상 올바른 파일을 찾습니다.
-
-        Args:
-            item_name (str): Vehicle 이름 (예: 'vehicle_A')
-            yaml_path (str, optional): YAML 설정 파일 경로.
-                생략 시 base_path 기준 reformatter/config.yaml 사용.
-
-        Raises:
-            ValueError: item_name이 YAML에 존재하지 않을 경우
-        """
+        기본 파일 경로는 소스 폴더의 reformatter/config.yaml이다.
+        CLI 개인 발송 설정은 이 메서드 호출 후 Main에서 적용한다."""
         if yaml_path is None:
             yaml_path = os.path.join(self.base_path, 'reformatter', 'config.yaml')
 
@@ -986,18 +970,11 @@ class Config:
         self._generate_dependent_vars()
 
     # ================================================================
-    # 종속 변수 생성 (Dependent variable generation)
+    # 제품별 경로와 HTML 생성
     # ================================================================
 
     def _generate_dependent_vars(self):
-        """로드된 설정을 기반으로 종속 변수를 생성합니다.
-        (Generate dependent variables from loaded settings.)
-
-        다음 항목들을 생성합니다:
-        - url: 메일 발송 API URL
-        - html_code: 리포트 HTML 템플릿 (모듈 내장 _REPORT_HTML_TEMPLATE에서 로드)
-        - 파일 시스템 경로: ROOT, DB, Report, Log 디렉토리 및 파일
-        """
+        """제품 설정으로 메일 API URL, HTML 템플릿, 저장 경로를 만든다."""
 
         # ── 메일 발송 API URL 생성 ──
         self.generated_vars["url"] = (
@@ -1016,116 +993,54 @@ class Config:
         template = template.replace('{{system_admin}}', self.settings.get('system_admin', ''))
         self.generated_vars['html_code'] = template
 
-        # ── DB 경로 생성 (DB directory paths) ──
-        # ROOT: 실행 기반 디렉토리
-        # DB: 데이터베이스 저장 디렉토리
-        # DB_et_daily: vehicle별 일일 ET 데이터 디렉토리
-        self.generated_vars["ROOT"] = (
-            os.path.join(self.base_path, 'RUN') + os.sep)
-        self.generated_vars["DB"] = (
-            os.path.join(self.base_path, 'RUN', 'DB') + os.sep)
-        self.generated_vars["DB_et_daily"] = (
-            os.path.join(self.base_path, 'RUN', 'DB',
-                         self.settings['vehicle'] + '_daily') + os.sep)
+        vehicle = self.settings['vehicle']
+        root = os.path.join(self.base_path, 'RUN')
+        directories = {
+            'ROOT': root,
+            'DB': os.path.join(root, 'DB'),
+            'DB_et_daily': os.path.join(root, 'DB', vehicle + '_daily'),
+            'Report': os.path.join(root, 'Report'),
+            'low_qual_ppt_save_path': os.path.join(root, 'Report', vehicle, 'Mail'),
+            'html_save_path': os.path.join(root, 'Report', vehicle, 'HTML'),
+            'log': os.path.join(root, 'log'),
+        }
+        # 기존 호출부가 파일명을 연결하므로 디렉터리 끝의 구분자를 유지한다.
+        self.generated_vars.update({key: path + os.sep for key, path in directories.items()})
 
-        # ── Report 경로 생성 (Report directory paths) ──
-        # Report: 리포트 루트 디렉토리
-        # low_qual_ppt_save_path: 메일용 저화질 PPT 저장 경로
-        # html_save_path: HTML 리포트 저장 경로
-        self.generated_vars["Report"] = (
-            os.path.join(self.base_path, 'RUN', 'Report') + os.sep)
-        self.generated_vars["low_qual_ppt_save_path"] = (
-            os.path.join(self.base_path, 'RUN', 'Report',
-                         self.settings["vehicle"], 'Mail') + os.sep)
-        self.generated_vars["html_save_path"] = (
-            os.path.join(self.generated_vars["Report"],
-                         self.settings["vehicle"], 'HTML') + os.sep)
-
-        # ── Log 경로 생성 (Log file paths) ──
-        # 각종 로그 파일 경로를 vehicle별로 생성합니다.
-        self.generated_vars["log"] = (
-            os.path.join(self.base_path, 'RUN', 'log') + os.sep)
-        # 통합 로그: query/loop/error 로그를 '제품명_log.txt' 하나로 합침(rotation은 코드에서 30MB).
-        _prod_name = self.settings.get('prod', self.settings['vehicle'])
-        _unified_log = os.path.join(self.base_path, 'RUN', 'log', f'{_prod_name}_log.txt')
-        self.generated_vars["unified_log"] = _unified_log
-        self.generated_vars["query_log"] = _unified_log
-        self.generated_vars["loop_log"] = _unified_log
-        self.generated_vars["error_log"] = _unified_log
-        self.generated_vars["et_log_path"] = os.path.join(
-            self.base_path, 'RUN', 'log',
-            self.settings['vehicle'] + '_et_log.csv')
-        self.generated_vars["Final_et_log_path"] = os.path.join(
-            self.base_path, 'RUN', 'log',
-            self.settings['vehicle'] + '_et_log_Final.csv')
-        self.generated_vars["running_log"] = os.path.join(
-            self.base_path, 'RUN', 'log', 'running_log.txt')
+        log_dir = directories['log']
+        product = self.settings.get('prod', vehicle)
+        unified_log = os.path.join(log_dir, f'{product}_log.txt')
+        # query/loop/error 출력은 제품별 통합 로그 하나에 기록한다.
+        for key in ('unified_log', 'query_log', 'loop_log', 'error_log'):
+            self.generated_vars[key] = unified_log
+        self.generated_vars.update(
+            et_log_path=os.path.join(log_dir, f'{vehicle}_et_log.csv'),
+            Final_et_log_path=os.path.join(log_dir, f'{vehicle}_et_log_Final.csv'),
+            running_log=os.path.join(log_dir, 'running_log.txt'),
+        )
 
     # ================================================================
-    # DC Step 조회 메서드 (DC Step lookup methods)
+    # DC Step 조회
     # ================================================================
 
     def get_dc_step_from_id(self, step_id, default=None):
-        """step_id로부터 DC step 이름을 조회합니다.
-        (Look up DC step name from a step_id using dc_dict.)
-
-        Args:
-            step_id (str): 조회할 Step ID (예: 'NU467300')
-            default: step_id가 없을 때 반환할 기본값
-
-        Returns:
-            str or default: DC step 이름 (예: 'M1DC') 또는 기본값
-        """
+        """step_id에 대응하는 DC step 이름을 반환한다."""
         return self.dc_dict.get(step_id, default)
 
     def get_step_ids_from_dc_step(self, dc_step, default=None):
-        """DC step 이름으로부터 해당하는 step_id 목록을 조회합니다.
-        (Get list of step_ids for a given DC step from self.dc_step_to_ids.)
-
-        Args:
-            dc_step (str): DC step 이름 (예: 'M1DC')
-            default: dc_step이 없을 때 반환할 기본값
-
-        Returns:
-            list or default: step_id 리스트 또는 기본값
-        """
+        """DC step에 대응하는 step_id 목록을 반환한다."""
         return self.dc_step_to_ids.get(dc_step, default)
 
     # ================================================================
-    # 범용 값 조회 (General value lookup)
+    # 설정 조회 우선순위
     # ================================================================
 
     def get(self, key, default=None):
-        """설정값을 우선순위에 따라 조회합니다.
-        (Retrieve a config value by priority: settings → generated_vars → env → instance attr.)
-
-        조회 우선순위 (lookup priority):
-        1. self.settings   – YAML에서 로드된 vehicle별 설정
-        2. self.generated_vars – 종속적으로 생성된 변수 (경로, HTML 등)
-        3. self.env         – .env 환경 변수
-        4. self 인스턴스 속성 – __init__에서 정의된 전역 설정
-
-        Args:
-            key (str): 조회할 설정 키
-            default: 키가 없을 때 반환할 기본값
-
-        Returns:
-            설정값 또는 기본값
-        """
-        # 1. YAML 원본 설정에서 검색
-        if key in self.settings:
-            return self.settings[key]
-        # 2. 종속 변수에서 검색
-        if key in self.generated_vars:
-            return self.generated_vars[key]
-        # 3. 환경 변수에서 검색
-        if key in self.env:
-            return self.env[key]
-        # 4. 인스턴스 속성에서 검색
-        if hasattr(self, key):
-            return getattr(self, key)
-        # 5. 기본값 반환
-        return default
+        """제품 설정(CLI 포함) → 파생 변수 → 환경 변수 → 코드 기본값 순으로 조회한다."""
+        for source in (self.settings, self.generated_vars, self.env):
+            if key in source:
+                return source[key]
+        return getattr(self, key, default)
 
     # ── 그룹 뷰(읽기 전용): 평탄 키는 그대로 유지, 관심사별로 묶어 보여준다 ──
     def detect_config(self):

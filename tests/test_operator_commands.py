@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import Main as main
 import My_Function as mf
+from My_config import Config
 
 
 def config(**settings):
@@ -34,13 +35,16 @@ def test_default_mail_domain_and_existing_address(tmp_path):
     assert mf.get_email_list(path, 'HOL', domain='example.test')[0]['email'] == 'wrong.recipient@example.test'
 
 
-@pytest.mark.parametrize('identity', ['person.one', 'person.one@samsung.com'])
+@pytest.mark.parametrize('identity', ['person.one@samsung.com', 'person.two@example.test'])
 def test_person_overrides_default_groups_and_disabled_delivery(identity, monkeypatch):
+    def forbid_excel(*args, **kwargs):
+        pytest.fail('개인 발송에서 메일링 엑셀을 읽으면 안 됩니다')
+    monkeypatch.setattr(pd, 'ExcelFile', forbid_excel)
     command = main._parse_command(['--send-user', identity, '--prime-key', 'vehicle_A_L001.1_S1', '--single'])
     assert command['argument'] == '_TRIGGER_SINGLE_vehicle_A_L001.1_S1'
     cfg = config(email_receiver=['HOL', 'OTHER'], use_email_send=False, DB_Setting_mode=True, report_making=False)
     recipient = main._apply_command_settings(command, cfg)
-    assert cfg.settings['email_receiver'] == ['person.one@samsung.com']
+    assert cfg.settings['email_receiver'] == [identity]
     assert cfg.settings['use_email_send'] is True
     assert cfg.settings['report_making'] is True
     assert cfg.settings['DB_Setting_mode'] is False
@@ -49,21 +53,21 @@ def test_person_overrides_default_groups_and_disabled_delivery(identity, monkeyp
     calls = []
     monkeypatch.setattr(main, '_durable_mail', lambda *args: calls.append(args) or 'sent')
     assert main._send_report_files('report.html', 'report.pptx', [recipient], 'title', 'id') == 'sent'
-    assert [r['email'] for r in calls[0][1]] == ['person.one@samsung.com']
+    assert [r['email'] for r in calls[0][1]] == [identity]
 
 
-def test_department_exact_sheet_only(tmp_path, monkeypatch):
-    command = main._parse_command(['--send-dept', 'PROCESS TEAM', '--prime-key', 'vehicle_A_L001.1_S1'])
-    cfg = config(email_list_path=mailing_book(tmp_path), email_receiver=['HOL'])
-    recipient = main._apply_command_settings(command, cfg)
+def test_default_delivery_reads_configured_excel_sheet(tmp_path, monkeypatch):
+    command = main._parse_command(['vehicle_A'])
+    cfg = config(email_list_path=mailing_book(tmp_path), email_receiver=['PROCESS TEAM'], use_email_send=True)
+    assert main._apply_command_settings(command, cfg) is None
     monkeypatch.setattr(main, 'GLOBAL_CONFIG', cfg)
     calls = []
     monkeypatch.setattr(main, '_durable_mail', lambda *args: calls.append(args) or 'sent')
-    main._send_report_files('report.html', 'report.pptx', [recipient], 'title', 'id')
+    main._send_report_files('report.html', 'report.pptx', cfg.get('email_receiver'), 'title', 'id')
     assert {r['email'] for r in calls[0][1]} == {'person.one@samsung.com', 'person.two@samsung.com'}
-    for sheet in ('MISSING', 'EMPTY', 'person@samsung.com'):
+    for sheet in ('MISSING', 'EMPTY'):
         with pytest.raises(ValueError):
-            main._apply_command_settings(dict(command, recipient=sheet), cfg)
+            main._trigger_receivers(cfg.get('email_list_path'), sheet)
 
 
 @pytest.mark.parametrize('args', [
@@ -73,10 +77,43 @@ def test_department_exact_sheet_only(tmp_path, monkeypatch):
     ['--init-db', 'V', '--single'], ['--single', 'V'],
     ['--init-db', 'V', '--send-user', 'one'],
     ['--init-db', ''], ['--init-db', '_TRIGGER_V_L_S'],
+    ['--send-dept', 'PROCESS TEAM', '--prime-key', 'V_L_S'],
+    ['--send-user', 'person.one', '--prime-key', 'V_L_S'],
+    ['--send-user', 'a@samsung.com,b@samsung.com', '--prime-key', 'V_L_S'],
 ])
 def test_invalid_commands_fail_before_processing(args):
     with pytest.raises(SystemExit):
         main._parse_command(args)
+
+
+def test_config_lookup_preserves_priority_and_explicit_false_values():
+    cfg = Config.__new__(Config)
+    cfg.settings = {'key': None}
+    cfg.generated_vars = {'key': False}
+    cfg.env = {'key': 'environment'}
+    cfg.key = 'code-default'
+    assert cfg.get('key', 'fallback') is None
+    cfg.settings.clear()
+    assert cfg.get('key') is False
+    cfg.generated_vars.clear()
+    assert cfg.get('key') == 'environment'
+    cfg.env.clear()
+    assert cfg.get('key') == 'code-default'
+    assert cfg.get('missing', 'fallback') == 'fallback'
+
+
+def test_config_paths_keep_product_scope_and_trailing_separator(tmp_path):
+    import os
+    cfg = Config.__new__(Config)
+    cfg.base_path = str(tmp_path)
+    cfg.settings = dict(vehicle='vehicle_A', prod='PRODUCT', YOUR_PROJECT='TEST', KNOXID='test.user')
+    cfg.generated_vars = {}
+    cfg._generate_dependent_vars()
+    paths = cfg.generated_vars
+    assert paths['DB_et_daily'] == str(tmp_path / 'RUN' / 'DB' / 'vehicle_A_daily') + os.sep
+    assert paths['html_save_path'] == str(tmp_path / 'RUN' / 'Report' / 'vehicle_A' / 'HTML') + os.sep
+    assert paths['query_log'] == paths['loop_log'] == paths['error_log'] == str(tmp_path / 'RUN' / 'log' / 'PRODUCT_log.txt')
+    assert paths['Final_et_log_path'] == str(tmp_path / 'RUN' / 'log' / 'vehicle_A_et_log_Final.csv')
 
 
 def test_init_forces_200_days_despite_previous_incremental_refresh(tmp_path, monkeypatch):

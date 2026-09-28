@@ -5,7 +5,7 @@
 > `effect_sigma`·`--convert-nl-rules`·`--rule-digest` 언급은 과거 기록으로 보고 따르지 않는다.
 > ML mode는 라이브러리 기법(검정 + sklearn IF/LOF + 탐색적 연관 분석)만 사용한다.
 
-> **운영 명령 안내:** [빠른 시작](#빠른-시작)에서 200일 초기 적재·부서/개인 지정 발송·한 랏 조회 명령을 확인하세요.
+> **운영 명령 안내:** [빠른 시작](#빠른-시작)에서 200일 초기 적재·엑셀 명단/개인 발송·한 랏 조회 명령을 확인하세요.
 
 ## 일일 서비스 변경 (2026-09-19, 2026-09-22 갱신)
 
@@ -272,13 +272,12 @@ python setup.py            # 현재 폴더에 번들 파일 추출
 | 초기 DB에 최근 200일 적재 | `python Main.py --init-db vehicle_A` |
 | 평소 자동 실행 | `python Main.py vehicle_A` |
 | 지정 prime_key 한 랏만, ET 기간 제한 없이 생성 | `python Main.py "_TRIGGER_SINGLE_vehicle_A_T6677.1_test"` |
-| 부서에만 강제 발송 | `python Main.py --send-dept "PROCESS TEAM" --prime-key "vehicle_A_T6677.1_test"` |
-| 한 사람에게만 강제 발송 | `python Main.py --send-user "user.id" --prime-key "vehicle_A_T6677.1_test"` |
+| 한 사람에게만 강제 발송 | `python Main.py --send-user "user.id@samsung.com" --prime-key "vehicle_A_T6677.1_test"` |
 | CLI 도움말 | `python Main.py --help` |
 
-부서·개인 발송 명령 끝에 `--single`을 붙이면 기간 제한 없이 지정 lot·step의 ET 데이터만 사용합니다.
-기존 TRIGGER는 메일 설정을 따릅니다. **`--send-dept` / `--send-user`는 해당 실행에서 메일을 켜고,
-기본 수신 그룹을 지정 수신처로 대체합니다.**
+기본 발송은 제품 설정 `email_receiver`에 지정된 엑셀 시트의 명단을 사용합니다.
+**`--send-user`는 메일링 엑셀을 읽지 않고 입력한 이메일 주소 한 명에게만 발송합니다.**
+끝에 `--single`을 붙이면 기간 제한 없이 지정 lot·step의 ET 데이터만 사용합니다.
 
 새 제품은 YAML 제품 블록과 reformatter를 먼저 준비한 뒤 초기 DB 적재를 실행하세요.
 200일 적재는 사내 원천에 실제로 있는 데이터를 저장합니다. 실행 명령을 추가한 것만으로 적재가 시작되지는 않습니다.
@@ -363,70 +362,75 @@ flowchart TD
     class DB,LOG store;
 ```
 
-### 6) 부서 또는 개인에게만 강제 발송
+### 6) 메일 발송 — 엑셀 명단 또는 개인 한 명
 
-**부서:** `HOL_Auto_Report_Mailing_List.xlsx` 또는 제품 `email_list_path`가 가리키는 파일의
-정확한 **시트명**을 지정합니다. 그 시트의 `KNOX_ID`에 등록된 사람에게만 보냅니다.
+**기본 발송은 엑셀 명단을 그대로 사용합니다.** 제품의 `email_list_path`에 지정된 메일링 엑셀에서
+`email_receiver`에 지정된 시트를 읽고, 그 안의 `KNOX_ID` 명단으로 보냅니다.
+ID만 기입된 셀에는 `@samsung.com`을 붙이고, 완전한 이메일 주소는 그대로 사용합니다.
 
 ```bash
-python Main.py --send-dept "PROCESS TEAM" --prime-key "vehicle_A_T6677.1_test"
+# 제품별 자동 발행 → 설정된 엑셀 시트 명단으로 발송
+python Main.py vehicle_A
+
+# 특정 prime_key 수동 발행 → 같은 엑셀 시트 명단으로 발송
+python Main.py "_TRIGGER_vehicle_A_T6677.1_test"
 ```
 
-**개인:** KNOX ID 또는 이메일 주소 **한 개**를 지정합니다. 엑셀의 수신 그룹은 사용하지 않습니다.
+기본 발송과 기존 TRIGGER는 제품의 `use_email_send=True` 설정을 따릅니다.
+Scheduler의 `AUTO_REPORT_EMAIL_RECEIVER`가 있으면 그 값에 해당하는 시트를 사용합니다.
+별도의 부서 지정 명령은 필요하지 않습니다.
+
+**개인 발송은 엑셀을 읽지 않습니다.** `--send-user`에 `@`와 도메인을 포함한 이메일 주소
+한 개를 입력하면, 기존 수신 그룹을 대체하고 그 사람에게만 보냅니다.
 
 ```bash
-# user.id@samsung.com 한 명에게 발송
-python Main.py --send-user "user.id" --prime-key "vehicle_A_T6677.1_test"
-
-# 전체 주소를 입력하면 그대로 사용
 python Main.py --send-user "user.id@samsung.com" --prime-key "vehicle_A_T6677.1_test"
 
-# 오래된 prime_key도 날짜 제한 없이, 해당 lot·step의 ET만 사용
-python Main.py --send-user "user.id" --prime-key "vehicle_A_T6677.1_test" --single
-python Main.py --send-dept "PROCESS TEAM" --prime-key "vehicle_A_T6677.1_test" --single
+# 기간 제한 없이 해당 lot·step의 ET만 사용하여 한 명에게 발송
+python Main.py --send-user "user.id@samsung.com" --prime-key "vehicle_A_T6677.1_test" --single
 ```
 
-| 항목 | 지정 발송 동작 |
-|---|---|
-| 발행 대상 | `--prime-key`의 lot·step 하나. 일반 AUTO의 완료 대상 선정과 별개 |
-| 기본 조회 범위 | 기존 `viewing_period`, 형제 lot·비교 제품 포함 가능 |
-| `--single` | ET 기간 제한 제거, 형제 lot·다른 step·비교 제품 제외 |
-| 발행 / 발송 설정 | 이번 실행만 `DB_Setting_mode=False`, `report_making=True`, `use_email_send=True` |
-| 수신처 우선순위 | 명령의 수신처가 YAML과 `AUTO_REPORT_EMAIL_RECEIVER`를 대체 |
-| 기본 메일 도메인 | ID만 있으면 `@samsung.com` 추가. 엑셀 `KNOX_ID`에도 동일 적용 |
-| 잘못된 수신처 | 없는 부서 시트·빈 명단·잘못된 주소는 오류. 다른 그룹으로 대체하지 않음 |
-| 개인 여러 명 입력 | 콤마·세미콜론 목록은 거부. `--send-user`는 한 명 전용 |
-| 외부 연결 | 메일 API·발신 계정·TICKET 등 기존 사내 설정 필요 |
-| S3 업로드 | 지정 발송에서는 비활성 |
+| 항목 | 기본 발송 / 기존 TRIGGER | `--send-user` |
+|---|---|---|
+| 수신자 결정 | 설정된 엑셀 시트의 `KNOX_ID` 명단 | 명령에 입력한 이메일 한 개 |
+| 메일링 엑셀 읽기 | 필요 | 읽지 않음; 파일 없어도 개인 발송 가능 |
+| 도메인 보완 | 엑셀의 ID에 `@samsung.com` 추가 | 보완하지 않음; 완전한 이메일 주소 필수 |
+| 발송 활성화 | `use_email_send` 설정 | 이번 실행만 `use_email_send=True` |
+| 발행 설정 | 제품 설정 | 이번 실행만 `report_making=True`, `DB_Setting_mode=False` |
+| 기본 수신 그룹 | 그대로 사용 | YAML / Scheduler 수신 그룹을 사용하지 않음 |
+| S3 업로드 | AUTO는 제품 설정, TRIGGER는 비활성 | 비활성 |
 
-Inline Table은 기존 root lot 기반 조회를 유지합니다. `--single`의 기간/lot 제한은 ET 데이터에 적용됩니다.
-메일 API 응답이 불확실한 경우 운영 로그에서 발송 여부를 확인하세요. 기존 중복 방지·발송 상태 기록을 그대로 사용합니다.
+`--send-user`는 ID만 입력하거나 콤마·세미콜론으로 여러 주소를 입력하면 오류로 종료합니다.
+메일 API·발신 계정·TICKET 등 기존 사내 설정은 필요합니다. 설정 파일 자체는 변경하지 않습니다.
+엑셀 시트가 없거나 명단이 비었으면 기본 발송은 오류로 종료하며 다른 시트로 대체하지 않습니다.
+
+`--single`을 생략하면 기존 `viewing_period`와 비교 데이터를 사용합니다. `--single`의 기간/lot 제한은
+ET에 적용되며, Inline Table은 기존 root lot 기반 조회를 유지합니다.
+메일 API 응답이 불확실하면 운영 로그에서 발송 여부를 확인하세요.
 
 ```mermaid
 flowchart TD
-    CMD["발행 명령 + prime_key"] --> CFG["제품 설정 로드"]
-    CFG --> ROUTE{"명령의 수신처"}
-    ROUTE -->|"--send-dept"| DEPT["정확한 부서 시트 조회<br/>KNOX_ID → 이메일"]
-    ROUTE -->|"--send-user"| USER["한 명 주소 검증<br/>ID → ID@samsung.com"]
-    ROUTE -->|"기존 TRIGGER · ALL 제외"| DEFAULT["기존 수신처 · 발송 설정"]
-    DEPT --> EXPLICIT["지정 수신처만 확정<br/>이번 실행 메일 ON"]
-    USER --> EXPLICIT
-    EXPLICIT --> SCOPE{"SINGLE / --single?"}
-    DEFAULT --> SCOPE
-    SCOPE -->|"예"| ONE["daily DB 전체 날짜<br/>대상 lot·step ET만 조회"]
-    SCOPE -->|"아니오"| PERIOD["모드별 viewing_period<br/>기존 비교 데이터"]
-    ONE --> REPORT["분석 → PPT · HTML 저장"]
-    PERIOD --> REPORT
+    CMD["제품 / prime_key 명령"] --> CFG["제품 설정 로드"]
+    CFG --> ROUTE{"--send-user 사용?"}
+    ROUTE -->|"아니오"| SHEET["설정된 엑셀 시트 읽기<br/>KNOX_ID 명단 → 이메일"]
+    ROUTE -->|"예"| USER["완전한 이메일 한 개 검증<br/>메일링 엑셀 읽지 않음"]
+    SHEET --> DEFAULT["시트 명단으로 수신자 확정<br/>use_email_send 설정 유지"]
+    USER --> ONE["입력한 한 명만 수신자 확정<br/>이번 실행 메일 ON"]
+    DEFAULT --> SCOPE["모드에 맞는 ET 조회<br/>SINGLE은 날짜 제한 없이 lot·step 하나"]
+    ONE --> SCOPE
+    SCOPE --> REPORT["분석 → PPT · HTML 저장"]
     REPORT --> SCORE[("DB/Score/제품_score.csv<br/>prime_key 기준 갱신")]
-    SCORE --> MAIL["확정 수신처로 발송<br/>기존 TRIGGER는 use_email_send 확인"]
+    SCORE --> MAIL["발송이 활성화되면<br/>확정된 수신자에게 메일 전송"]
     MAIL --> OPS[("운영 기록<br/>성공 · 실패 · 응답 불확실")]
     classDef command fill:#eff6ff,stroke:#2563eb,color:#172554;
     classDef store fill:#f0fdf4,stroke:#16a34a,color:#14532d;
     classDef send fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
-    class CMD,CFG,ONE,PERIOD command;
+    class CMD,CFG,SCOPE command;
     class SCORE,OPS store;
-    class EXPLICIT,MAIL send;
+    class ONE,MAIL send;
 ```
+
+위 흐름은 일반 Score Board 리포트 기준입니다. Trend 전용 `TRIGGER_ALL`은 Score CSV를 저장하지 않습니다.
 
 ### 7) 기존 수동 트리거 모드
 
@@ -450,9 +454,9 @@ python Main.py "_TRIGGER_ALL_POWER_USER_vehicle_A_T6677.1_test"
 ```
 
 기존 TRIGGER는 **`use_email_send=True`일 때만** 발송합니다. FORCE는 조회 기간을 확장하는 모드이며,
-메일을 강제로 켜는 명령은 아닙니다. 강제 메일 발송에는 앞 절의 `--send-dept` / `--send-user`를 사용하세요.
+메일을 강제로 켜는 명령은 아닙니다. 강제 메일 발송에는 앞 절의 `--send-user`를 사용하세요.
 ET/WIP는 현재 저장된 DB를 이용하고, Inline은 기존 방식으로 조회합니다.
-Scheduler JSON 규약은 기존 TRIGGER를 유지하며 새 지정 발송 명령은 Main CLI에서 실행합니다.
+Scheduler JSON 규약은 기존 TRIGGER를 유지하며 개인 발송 명령은 Main CLI에서 실행합니다.
 
 - **SINGLE:** 저장된 모든 날짜에서 대상 ET만 조회합니다. 원시 데이터가 없으면 오류이며 DB를 복원하지 않습니다.
 - **FORCE:** `Final_et_log`의 진행날짜가 없으면 오류입니다. 기간 내 prime_key는 기존 범위를 유지합니다.

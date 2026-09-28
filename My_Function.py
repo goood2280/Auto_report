@@ -83,28 +83,34 @@ def log_to_file(message, log_path):
         print(f"[WARN] log_to_file 실패: {e}")
 
 
-def get_email_list(file_path, target_group, default_group='HOL', domain="@samsung.com"):
-    """메일링 리스트 엑셀에서 수신 그룹(시트)의 KNOX_ID를 읽어 수신자 리스트를 반환.
+def normalize_email(address, default_domain=None):
+    """이메일 한 개를 검증한다. 도메인 보완은 엑셀의 KNOX_ID에만 사용한다."""
+    address = str(address).strip()
+    if default_domain and address and '@' not in address:
+        address += '@' + default_domain.strip().lstrip('@')
+    if not re.fullmatch(r'[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+', address):
+        raise ValueError('이메일 주소 한 개를 입력하세요 (예: user.id@samsung.com)')
+    return address
 
-    target_group에 해당하는 시트가 있으면 그 시트를, 없으면 default_group 시트를 사용한다.
-    각 KNOX_ID에 '@'가 없으면 domain을 붙여 이메일을 구성하고,
-    메일 API용 [{"email", "recipientType":"TO", "seq"}] 형태로 반환한다.
-    """
+
+def email_receivers(addresses):
+    """주소를 검증·중복 제거하고 메일 API 수신자 목록으로 변환한다."""
+    addresses = list(dict.fromkeys(normalize_email(address) for address in addresses))
+    if not addresses:
+        raise ValueError('메일 수신처가 비어 있습니다')
+    return [dict(email=address, recipientType='TO', seq=i)
+            for i, address in enumerate(addresses, start=1)]
+
+
+def get_email_list(file_path, target_group, default_group='HOL', domain="@samsung.com"):
+    """엑셀 시트의 KNOX_ID 명단을 읽는다. default_group=None이면 정확한 시트만 허용한다."""
     with pd.ExcelFile(file_path) as xls:
         sheet_name = target_group if target_group in xls.sheet_names else default_group
+        if sheet_name is None or sheet_name not in xls.sheet_names:
+            raise ValueError(f'메일 수신 그룹 없음: {target_group}')
         df = xls.parse(sheet_name)
     email_list = df['KNOX_ID'].dropna().astype(str).str.strip()
-    email_list = email_list[email_list.ne('')].drop_duplicates().tolist()
-    domain = '@' + domain.strip().lstrip('@')
-    final_email_list = [
-        {
-        "email": email.strip() if "@" in email else f"{email.strip()}{domain}",
-        "recipientType": "TO",
-        "seq": i
-        }
-        for i, email in enumerate(email_list, start=1)
-    ]
-    return final_email_list
+    return email_receivers(normalize_email(value, domain) for value in email_list if value)
 
 
 def reformatter_verify(reformatter):
@@ -551,8 +557,8 @@ def clear_run_temp_files():
     """RUN/TEMP 폴더의 '임시 그림파일(png 등 이미지)'만 삭제(그 외 파일·폴더는 유지).
 
     랏 리포트 1건 생성이 끝난 뒤 호출 — Trend PNG({alias}.png) 등 임시 이미지만 비운다.
-    (AI 인풋파일은 RUN/AI에 별도 보관하며 삭제하지 않는다. anomaly_basis 등 비이미지
-     산출물도 그대로 남긴다.) HTML은 이미지가 base64로 내장돼 있어 삭제 후에도 정상.
+    anomaly_basis 등 비이미지 산출물은 유지한다.
+    HTML에는 이미지가 base64로 내장되어 있어 임시 이미지 삭제 후에도 표시된다.
     """
     _tdir = report_temp_dir()
     if not os.path.isdir(_tdir):
@@ -701,7 +707,7 @@ def insert_score_board(VIP_group, prs, lot_id, title, spec_data=None, config=Non
     _present = {}
     for c, lw in zip(_cols, _lw):
         _present[(lw[0], lw[1])] = c
-    # HTML Score Board와 동일하게 '실제 데이터가 있는 wafer'만 표시(#1~25 고정 배열 폐기).
+    # HTML Score Board와 동일하게 실제 데이터가 있는 wafer만 표시한다.
     # lot은 target 먼저(_lots 정렬), lot 내 wafer 오름차순.
     order = []   # (orig_col, lot, wafer)
     for _lot in _lots:
@@ -984,7 +990,7 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         for _f in _by_cat[_c]:
             _blocks.append(('F', _f))
     # 페이지 분할 — finding('F') 개수 기준: 1페이지 5개(참고사항 동거),
-    #   2페이지부터 15개씩. (헤더/Rule Check 줄은 개수에 포함하지 않되 안전 상한 40블록)
+    #   2페이지부터 15개씩. 카테고리 헤더는 제외하되 페이지당 최대 40블록을 유지한다.
     _FIRST_F = int(getattr(GLOBAL_CONFIG, 'anomaly_detail_first_page_items', 5) or 5)
     _NEXT_F = int(getattr(GLOBAL_CONFIG, 'anomaly_detail_page_items', 15) or 15)
     _MAX_BLOCKS = 40
@@ -4153,6 +4159,8 @@ def etdata_query():
 
         paired_date_list = [[date_list[i], date_list[i+1]] for i in range(len(date_list)-1)]
         print(f"[Date Ranges] {paired_date_list}")
+        # 모든 기간에 같은 REAL 항목을 조회한다. ADDP는 리포트 생성 단계에서 계산한다.
+        item_ids = item_et.loc[item_et['CATEGORY'].eq('REAL'), 'ITEMID'].tolist()
 
         for paired_dates in paired_date_list :
             dateFrom = (datetime.strptime(paired_dates[0], date_format) + timedelta(days=1)).strftime(date_format)
@@ -4160,14 +4168,6 @@ def etdata_query():
             print("\n" + "="*60)
             print(f"[Query Setting] {GLOBAL_CONFIG.get('SplitTimeSpan')}일치 Query")
             print(f"[Query Period] {dateFrom} ~ {dateTo}")
-
-            is_real = item_et['CATEGORY'] == 'REAL' 
-            is_addp = item_et['CATEGORY'] == 'ADDP' 
-            real = item_et[is_real]
-            addp = item_et[is_addp]
-            real = real.loc[:,['ITEMID', 'ALIAS', 'SCALE FACTOR','ABSOLUTE']]
-            ITEMID_List=real.ITEMID.tolist()
-            addp = addp.loc[:,['ALIAS', 'ADDP FORM','SCALE FACTOR']]
 
             start_time = time.time()
 
@@ -4178,7 +4178,7 @@ def etdata_query():
                         'dateTo': dateTo, 
                         'process_id' : GLOBAL_CONFIG.get("process_id"),
                         'line_id': GLOBAL_CONFIG.get("line_id"),
-                        'item_id' : ITEMID_List,  #ITEM ID_REAL
+                        'item_id': item_ids,
                         'not_like_conditions': {'subitem_id' : ['Q%','AVG','MAX','MIN','RANGE','STD']}, #불필요 통계치
                         'like_conditions': {'step_seq' : GLOBAL_CONFIG.get("setting_stepseq")}
                         }
