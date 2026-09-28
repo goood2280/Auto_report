@@ -2855,17 +2855,18 @@ def _render_item_charts_uncached(task):
                     wv = tdf[tdf['mask'] != main_vehicle]
                 else:
                     veh_other = tdf[~tdf.index.isin(tgt_idx)]; wv = tdf.iloc[0:0]
-                # (배경) 타 root의 main-vehicle lot — root_lot_id 그룹별 색·모양, 범례는 1개로 통합
+                # main vehicle은 with_vehicle보다 높은 zorder로 그려 겹치는 점도
+                # 초록색(C_VEHICLE)이 회색(C_WV) 앞에 보이게 한다.
                 if len(veh_other) > 0:
                     ax.scatter(veh_other['tkout_time'], veh_other[item_name], s=10, alpha=0.5,
                                color=C_VEHICLE, label=str(main_vehicle),
-                               edgecolors='black', linewidths=0.3, zorder=2)
+                               edgecolors='black', linewidths=0.3, zorder=4)
                 if len(wv) > 0:
                     # with_vehicle은 mask(=실제 vehicle 명)별로 분리하여 각각 다른 색 + 개별 범례
                     for _wi, _wv_name in enumerate(sorted(wv['mask'].dropna().unique()) if has_mask else []):
                         _wv_grp = wv[wv['mask'] == _wv_name]
                         if len(_wv_grp) == 0: continue
-                        ax.scatter(_wv_grp['tkout_time'], _wv_grp[item_name], s=10, alpha=0.5, color=C_WV, label=str(_wv_name), edgecolors='black', linewidths=0.3, zorder=3)
+                        ax.scatter(_wv_grp['tkout_time'], _wv_grp[item_name], s=10, alpha=0.5, color=C_WV, label=str(_wv_name), edgecolors='black', linewidths=0.3, zorder=2)
                 if len(tgt) > 0:
                     _report_lot = str(target_lot_id)
                     # ── 리포트 root의 lot_id별로 각각 범례 표기 ──
@@ -4700,8 +4701,9 @@ def daily_trend_ml(frame, reformatter, vehicle, settings):
     """Join only requested ML columns; ambiguous wafer keys are never guessed.
 
     Reformatter tkout_time/split_check accepts an exact column or a process step,
-    resolved to TKOUT_TIME_<step>/KNOB_<step>. split_check accepts ANY exact
-    Parquet column (e.g. FAB_ETCH, recipe, numeric codes), case-insensitively.
+    resolved to TKOUT_TIME_<step>/KNOB_<step>. split_check accepts ANY Parquet
+    column (e.g. FAB_ETCH, recipe, numeric codes), case-insensitively, and CUSTOM
+    searches may use fnmatch wildcards (e.g. ``FAB 1.0*ppid``).
     Multiple grouping columns use ';'; the KNOB_ prefix is only a legacy fallback.
     """
     columns={str(c).lower():c for c in reformatter.columns}
@@ -4732,6 +4734,21 @@ def daily_trend_ml(frame, reformatter, vehicle, settings):
             if deep or m['time'] or m['split']:m['warnings'].append('ML_TABLE unavailable: '+type(exc).__name__)
         return frame,mappings
     lookup={c.casefold():c for c in names}
+
+    def resolve_columns(token, prefix='', allow_wildcard=False):
+        """Resolve exact/legacy names first, then CUSTOM wildcard column searches."""
+        candidates=[str(token),prefix+str(token)]
+        for candidate in candidates:
+            col=lookup.get(candidate.casefold())
+            if col:return [col]
+        if not allow_wildcard or not any(ch in str(token) for ch in '*?['):return []
+        import fnmatch
+        resolved=[]
+        for candidate in candidates:
+            pattern=candidate.casefold()
+            for col in names:
+                if col not in resolved and fnmatch.fnmatchcase(col.casefold(),pattern):resolved.append(col)
+        return resolved
     equipment=[c for c in names if c.upper().startswith(('EQP_','EQP_ID_','CHAMBER_')) or c.upper() in ('EQP','EQP_ID','CHAMBER')] if deep else []
     explicit=settings.get('equipment_columns')
     if explicit:equipment=[lookup[c.casefold()] for c in explicit if c.casefold() in lookup]
@@ -4769,8 +4786,10 @@ def daily_trend_ml(frame, reformatter, vehicle, settings):
             resolved=[]
             for token in tokens:
                 if not token:continue
-                col=lookup.get(token.casefold()) or lookup.get((prefix+token).casefold())
-                if col:resolved.append(col);wanted.add(col)
+                matches=resolve_columns(token,prefix,allow_wildcard=(key=='split'))
+                if matches:
+                    resolved.extend(col for col in matches if col not in resolved)
+                    wanted.update(matches)
                 else:m['warnings'].append(f'ML column missing: {token} (fallback: {prefix}{token})')
             m[key+'_columns']=resolved
     left_lookup={c.casefold():c for c in frame}
