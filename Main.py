@@ -740,14 +740,82 @@ def _send_report_files(html_path,ppt_path,receivers,title,identity):
     return 'sent' if all(v=='sent' for v in states) else ('unknown' if 'unknown' in states else 'failed')
 
 
-def _main_impl():
+def _parse_command(arguments):
+    """Translate explicit operator commands to the existing product/trigger pipeline."""
+    import argparse
+    parser = argparse.ArgumentParser(description='Auto Report: DB 초기 적재 및 지정 수신처 발행')
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument('--init-db', metavar='VEHICLE', help='최근 200일 DB 적재 (리포트/메일 없음)')
+    action.add_argument('--send-dept', metavar='SHEET', help='메일링 엑셀의 부서 시트에만 강제 발송')
+    action.add_argument('--send-user', metavar='ID_OR_EMAIL', help='한 명에게만 강제 발송 (ID 기본 @samsung.com)')
+    parser.add_argument('--prime-key', help='발행 대상 vehicle_lot_step')
+    parser.add_argument('--single', action='store_true', help='viewing_period 없이 대상 lot/step ET만 조회')
+    parser.add_argument('legacy', nargs='?', help='기존 vehicle 또는 _TRIGGER 명령')
+    args = parser.parse_args(arguments)
+    if args.init_db is not None:
+        if args.legacy or args.prime_key or args.single:
+            parser.error('--init-db는 제품명만 지정합니다')
+        vehicle = args.init_db.strip()
+        if not vehicle or _parse_trigger(vehicle)[0] is not None:
+            parser.error('--init-db에는 TRIGGER 대신 제품명을 지정합니다')
+        return dict(argument=vehicle, kind='init_db', recipient=None)
+    if args.send_dept is not None or args.send_user is not None:
+        if args.legacy or not args.prime_key:
+            parser.error('지정 발송에는 --prime-key vehicle_lot_step이 필요합니다')
+        kind = 'department' if args.send_dept is not None else 'person'
+        recipient = (args.send_dept if kind == 'department' else args.send_user).strip()
+        if not recipient or any(c in recipient for c in '\r\n'):
+            parser.error('수신처가 비어 있거나 잘못되었습니다')
+        if kind == 'person':
+            recipient = recipient if '@' in recipient else recipient + '@samsung.com'
+            if not re.fullmatch(r'[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+', recipient):
+                parser.error('--send-user에는 ID 또는 이메일 주소 한 개만 지정합니다')
+        argument = '_TRIGGER_' + ('SINGLE_' if args.single else '') + args.prime_key
+        mode, _, _, _, _ = _parse_trigger(argument)
+        if mode != ('SINGLE' if args.single else 'TRIGGER'):
+            parser.error('--prime-key에는 TRIGGER 접두어 없는 vehicle_lot_step을 지정합니다')
+        return dict(argument=argument, kind=kind, recipient=recipient)
+    if not args.legacy or args.prime_key or args.single:
+        parser.error('vehicle, TRIGGER 또는 --init-db / --send-dept / --send-user 명령을 지정하세요')
+    return dict(argument=args.legacy, kind='legacy', recipient=None)
+
+
+def _apply_command_settings(command, config):
+    """Apply invocation-only overrides; explicit delivery never falls back to default groups."""
+    if command['kind'] == 'init_db':
+        config.settings.update(DB_Setting_mode=True, QueryTimeSpan=200, now_minus=0,
+                               test_mode=False, report_making=False, use_email_send=False,
+                               use_s3_upload=False, et_force_full_refresh=True)
+        if config.get('SplitTimeSpan') is None:
+            config.settings['SplitTimeSpan'] = 7
+        print('[INFO] DB 초기 적재: 오늘 포함 최근 200일, 전체 조회, 리포트/메일/S3 비활성')
+        return None
+    if command['kind'] not in ('department', 'person'):
+        return None
+    recipient = command['recipient']
+    if command['kind'] == 'department':
+        path = config.get('email_list_path')
+        with pd.ExcelFile(path) as book:
+            if recipient not in book.sheet_names:
+                raise ValueError(f'발송 부서 시트 없음: {recipient}')
+        receivers = get_email_list(path, recipient)
+    else:
+        receivers = [dict(email=recipient)]
+    addresses = list(dict.fromkeys(r['email'] for r in receivers))
+    if not addresses or any(not re.fullmatch(r'[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+', a) for a in addresses):
+        raise ValueError('지정 수신처가 비어 있거나 이메일 주소가 잘못되었습니다')
+    mail = ','.join(addresses)
+    config.settings.update(DB_Setting_mode=False, report_making=True, use_email_send=True,
+                           use_s3_upload=False, email_receiver=[mail])
+    print(f'[INFO] 지정 수신처 강제 발송: {command["kind"]}, {len(addresses)}명 (기본 수신 그룹 대체)')
+    return mail
+
+
+def _main_impl(command=None):
     global _LOG_PATH
 
-    if len(sys.argv) != 2:
-        print("Usage: python main.py <ItemName>")
-        sys.exit(1)
-
-    raw_arg = sys.argv[1]
+    command = command or _parse_command(sys.argv[1:])
+    raw_arg = command['argument']
     trigger_flag = False
 
     trigger_mode, vehicle_name, trigger_lot, trigger_step, trigger_mail = _parse_trigger(raw_arg)
@@ -757,6 +825,9 @@ def _main_impl():
 
     # config.yaml에서 설정 로드
     GLOBAL_CONFIG.load_from_yaml(vehicle_name)
+    explicit_mail = _apply_command_settings(command, GLOBAL_CONFIG)
+    if explicit_mail:
+        trigger_mail = explicit_mail
 
     # =============================================== Config get ==================================================================
 
@@ -3678,14 +3749,14 @@ def main():
         with open(sys.argv[2],encoding='utf-8') as stream:request=json.load(stream)
         result=_watchdog_report(request)
         return 0 if result['status'] in ('sent','preview','disabled') else 1
-    if argument.startswith('--'):
-        return _main_impl()
+    command = _parse_command(sys.argv[1:])
+    argument = command['argument']
     _RUN=OperationRun(argument)
     try:
         _,vehicle,_,_,_=_parse_trigger(argument)
         lock_name=re.sub(r'[^A-Za-z0-9_.-]','_',vehicle)
         with process_lock(os.path.join(operations_root(),'locks',lock_name+'.lock')):
-            _main_impl()
+            _main_impl(command)
             return _RUN.finish()
     except BaseException as exc:
         _RUN.finish(exc)

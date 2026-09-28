@@ -5,6 +5,8 @@
 > `effect_sigma`·`--convert-nl-rules`·`--rule-digest` 언급은 과거 기록으로 보고 따르지 않는다.
 > ML mode는 라이브러리 기법(검정 + sklearn IF/LOF + 탐색적 연관 분석)만 사용한다.
 
+> **운영 명령 안내:** [빠른 시작](#빠른-시작)에서 200일 초기 적재·부서/개인 지정 발송·한 랏 조회 명령을 확인하세요.
+
 ## 일일 서비스 변경 (2026-09-19, 2026-09-22 갱신)
 
 기본 AUTO의 대상 선정·판정·메일·S3 경로는 유지합니다. 아래 세 서비스는 메일 및 로컬 산출물만 사용하며 S3에 업로드하지 않습니다.
@@ -239,11 +241,11 @@ DC 측정 결과를 자동으로 통계 분석하고, 리포트를 자동 생성
 
 ### setup.py (자가추출 번들)
 
-`setup.py`는 위 6개 파일(자기 자신 제외)을 임베드한 **배포용 번들**입니다.
+`setup.py`는 실행 소스·Scheduler·README·설치 후 가이드를 임베드한 **배포용 번들**입니다.
 소스를 수정한 뒤에는 `python gen_setup.py`(로컬 전용 스크립트)로 재생성합니다.
 
 ```bash
-python setup.py            # 현재 폴더에 6개 파일 추출
+python setup.py            # 현재 폴더에 번들 파일 추출
                            # (이미 있는 파일은 <파일명>.bak 으로 백업 후 덮어씀)
 ```
 
@@ -253,29 +255,33 @@ python setup.py            # 현재 폴더에 6개 파일 추출
 
 - **코어 코드는 `Main.py` / `My_config.py` / `My_Function.py` / `anomaly_engine.py` 4개 + `ANOMALY_KNOWLEDGE.md`** 뿐입니다.
 - `bigdataquery`(DB 쿼리)는 사내 환경 모듈로 번들에 포함하지 않습니다. LLM 클라이언트는 사용하지 않습니다.
-  - `bigdataquery`는 `Main.py`/`My_Function.py`가 직접 import 하므로, 사내든 로컬이든 **해당 모듈이 경로에 있어야** 합니다.
+  - `bigdataquery`는 `My_Function.py`가 실제 조회 시 지연 import 하므로, 사내든 로컬이든 **해당 모듈이 경로에 있어야** 합니다.
 - 과거 `templates/report.html`로 분리돼 있던 HTML 템플릿은 추가 파일이 따라가지 않도록 `My_config.py`의 `_REPORT_HTML_TEMPLATE` 상수로 **내장**했습니다.
 
 ---
 
 ## 빠른 시작
 
-```bash
-# 1) 소스 추출
-python setup.py
+설치 폴더에서 명령을 실행합니다. `<제품명>`은 `reformatter/config.yaml`의 제품 키와
+`<제품명>_reformatter.csv` 파일명에 사용되는 **vehicle**입니다.
+`prime_key`는 `<제품명>_<lot_id>_<step_id>`입니다.
 
-# 2) 기본 실행 (vehicle_A)
-python Main.py vehicle_A
+| 목적 | 명령 |
+|---|---|
+| 설치 / 업데이트 | `python setup.py` |
+| 초기 DB에 최근 200일 적재 | `python Main.py --init-db vehicle_A` |
+| 평소 자동 실행 | `python Main.py vehicle_A` |
+| 지정 prime_key 한 랏만, ET 기간 제한 없이 생성 | `python Main.py "_TRIGGER_SINGLE_vehicle_A_T6677.1_test"` |
+| 부서에만 강제 발송 | `python Main.py --send-dept "PROCESS TEAM" --prime-key "vehicle_A_T6677.1_test"` |
+| 한 사람에게만 강제 발송 | `python Main.py --send-user "user.id" --prime-key "vehicle_A_T6677.1_test"` |
+| CLI 도움말 | `python Main.py --help` |
 
-# 3) 강제 발행 (특정 LOT 즉시 리포트)
-python Main.py _TRIGGER_vehicle_A_T6677.1_test
-#                          └vehicle┘ └lot┘ └step┘
-```
+부서·개인 발송 명령 끝에 `--single`을 붙이면 기간 제한 없이 지정 lot·step의 ET 데이터만 사용합니다.
+기존 TRIGGER는 메일 설정을 따릅니다. **`--send-dept` / `--send-user`는 해당 실행에서 메일을 켜고,
+기본 수신 그룹을 지정 수신처로 대체합니다.**
 
-새 vehicle 추가:
-1. `reformatter/config.yaml`에 vehicle 블록 추가
-2. `reformatter/<vehicle>_reformatter.csv` 작성 (항목 정의: REAL / ADDP)
-3. `python Main.py <vehicle>`
+새 제품은 YAML 제품 블록과 reformatter를 먼저 준비한 뒤 초기 DB 적재를 실행하세요.
+200일 적재는 사내 원천에 실제로 있는 데이터를 저장합니다. 실행 명령을 추가한 것만으로 적재가 시작되지는 않습니다.
 
 ---
 
@@ -293,7 +299,7 @@ python Main.py _TRIGGER_vehicle_A_T6677.1_test
 ```bash
 python setup.py              # 현재 폴더에 전체 소스 추출 (기존 파일은 .bak 백업 후 덮어씀)
 ```
-→ `Main.py / My_Function.py / My_config.py / anomaly_engine.py / ANOMALY_KNOWLEDGE.md / README.md`가 풀립니다(SHA-256 검증).
+→ 실행 소스, `Scheduler.py`, `README.md`, `gen_setup.py`, `docs/guide/` 등 번들 파일이 풀립니다(SHA-256 검증).
 
 ### 3) 필요 파일 (실행 전 준비)
 
@@ -317,70 +323,147 @@ python setup.py              # 현재 폴더에 전체 소스 추출 (기존 파
 - **발송/업로드**: `use_email_send`(사내 메일 API), `use_s3_upload`(S3/DX 업로드), `use_description_page`(CAT2 간지).
 - 자세한 표는 [설정 가이드](#설정-가이드-my_configpy) 참조.
 
-### 5) 실행
+### 5) 초기 DB 적재 — 최근 200일
 
 ```bash
-python Main.py <vehicle>                       # 예약/조건에 따라 대상 lot 자동 리포트
-python Main.py _TRIGGER_<vehicle>_<lot>_<step> # 특정 LOT 즉시 강제 발행
-#              예) _TRIGGER_vehicle_A_T6677.1_test
+python Main.py --init-db vehicle_A
 ```
 
-### 6) 수동 트리거 모드 (2026-09-11)
+YAML을 수정하지 않고 **이번 프로세스에서만** 초기 적재 모드를 자동 적용합니다.
 
-기존 TRIGGER를 유지하며 다음 모드를 추가합니다. 맨 앞 `_`는 생략해도 됩니다.
-`vehicle`은 `reformatter/<vehicle>_reformatter.csv` 파일명과 일치해야 합니다.
-`lot` / `step`에 `_`는 사용할 수 없습니다. vehicle과 메일 주소·그룹명의 `_`는 지원합니다.
-명령 인수는 아래처럼 따옴표로 감싸서 실행하세요.
+| 실행 설정 | 적용값 / 동작 |
+|---|---|
+| `DB_Setting_mode` | `True` |
+| `QueryTimeSpan` / `now_minus` | `200` / `0` — 오늘 포함 최근 200개 날짜 |
+| `test_mode` | `False` — 실제 ET / WIP 조회 실행 |
+| 조회 방식 | 기존 증분 갱신 기록과 관계없이 200일 전체 범위 조회 |
+| `SplitTimeSpan` | 제품 설정 유지, 미설정이면 7일 단위. 1 이상 필수 |
+| `report_making` / `use_email_send` / `use_s3_upload` | 모두 `False` |
+| 저장 | 일별 ET parquet, ET 로그, WIP 및 측정 완료 상태 |
+
+예를 들어 2026-09-28 실행 시 **2026-03-13 ~ 2026-09-28**을 조회합니다.
+재실행해도 같은 날짜 파일을 갱신하며, 조회 범위 밖 파일을 삭제하지 않습니다.
+실패한 경우 원천 연결·로그를 확인하고 같은 명령을 다시 실행하면 전체 범위를 재조회합니다.
+완료 후 `python Main.py vehicle_A`를 실행하면 원래 제품 설정으로 돌아갑니다.
+초기 적재에서는 HTML/PPT/Score CSV를 생성하지 않습니다. Score는 리포트 생성 시 저장됩니다.
+
+```mermaid
+flowchart TD
+    CMD["--init-db 제품명"] --> CFG["제품 설정 로드<br/>실행 중에만 설정 적용"]
+    CFG --> RANGE["오늘 포함 최근 200일<br/>증분 캐시 우회 · 기간 분할"]
+    RANGE --> ET["ET 원천 조회"]
+    ET --> DB[("DB/제품_daily<br/>날짜별 parquet")]
+    ET --> LOG[("ET 측정 로그")]
+    DB --> WIP["WIP 조회 · 완료 상태 갱신"]
+    LOG --> WIP
+    WIP --> END["적재 종료<br/>리포트 · 메일 · S3 없음"]
+    classDef input fill:#eff6ff,stroke:#2563eb,color:#172554;
+    classDef store fill:#f0fdf4,stroke:#16a34a,color:#14532d;
+    class CMD,CFG,RANGE input;
+    class DB,LOG store;
+```
+
+### 6) 부서 또는 개인에게만 강제 발송
+
+**부서:** `HOL_Auto_Report_Mailing_List.xlsx` 또는 제품 `email_list_path`가 가리키는 파일의
+정확한 **시트명**을 지정합니다. 그 시트의 `KNOX_ID`에 등록된 사람에게만 보냅니다.
 
 ```bash
-python Main.py "_TRIGGER_vehicle_A_T6677.1_test"
-python Main.py "_TRIGGER_FORCE_user@example.com_vehicle_A_T6677.1_test"
-python Main.py "_TRIGGER_NORMAL_vehicle_A_T6677.1_test"
-python Main.py "_TRIGGER_SINGLE_vehicle_A_T6677.1_test"
-python Main.py "_TRIGGER_ALL_user@example.com_vehicle_A_T6677.1_test"
-# mail에 메일링 엑셀의 정확한 시트명도 사용 가능
-python Main.py "_TRIGGER_ALL_POWER_USER_vehicle_A_T6677.1_test"
+python Main.py --send-dept "PROCESS TEAM" --prime-key "vehicle_A_T6677.1_test"
 ```
+
+**개인:** KNOX ID 또는 이메일 주소 **한 개**를 지정합니다. 엑셀의 수신 그룹은 사용하지 않습니다.
+
+```bash
+# user.id@samsung.com 한 명에게 발송
+python Main.py --send-user "user.id" --prime-key "vehicle_A_T6677.1_test"
+
+# 전체 주소를 입력하면 그대로 사용
+python Main.py --send-user "user.id@samsung.com" --prime-key "vehicle_A_T6677.1_test"
+
+# 오래된 prime_key도 날짜 제한 없이, 해당 lot·step의 ET만 사용
+python Main.py --send-user "user.id" --prime-key "vehicle_A_T6677.1_test" --single
+python Main.py --send-dept "PROCESS TEAM" --prime-key "vehicle_A_T6677.1_test" --single
+```
+
+| 항목 | 지정 발송 동작 |
+|---|---|
+| 발행 대상 | `--prime-key`의 lot·step 하나. 일반 AUTO의 완료 대상 선정과 별개 |
+| 기본 조회 범위 | 기존 `viewing_period`, 형제 lot·비교 제품 포함 가능 |
+| `--single` | ET 기간 제한 제거, 형제 lot·다른 step·비교 제품 제외 |
+| 발행 / 발송 설정 | 이번 실행만 `DB_Setting_mode=False`, `report_making=True`, `use_email_send=True` |
+| 수신처 우선순위 | 명령의 수신처가 YAML과 `AUTO_REPORT_EMAIL_RECEIVER`를 대체 |
+| 기본 메일 도메인 | ID만 있으면 `@samsung.com` 추가. 엑셀 `KNOX_ID`에도 동일 적용 |
+| 잘못된 수신처 | 없는 부서 시트·빈 명단·잘못된 주소는 오류. 다른 그룹으로 대체하지 않음 |
+| 개인 여러 명 입력 | 콤마·세미콜론 목록은 거부. `--send-user`는 한 명 전용 |
+| 외부 연결 | 메일 API·발신 계정·TICKET 등 기존 사내 설정 필요 |
+| S3 업로드 | 지정 발송에서는 비활성 |
+
+Inline Table은 기존 root lot 기반 조회를 유지합니다. `--single`의 기간/lot 제한은 ET 데이터에 적용됩니다.
+메일 API 응답이 불확실한 경우 운영 로그에서 발송 여부를 확인하세요. 기존 중복 방지·발송 상태 기록을 그대로 사용합니다.
+
+```mermaid
+flowchart TD
+    CMD["발행 명령 + prime_key"] --> CFG["제품 설정 로드"]
+    CFG --> ROUTE{"명령의 수신처"}
+    ROUTE -->|"--send-dept"| DEPT["정확한 부서 시트 조회<br/>KNOX_ID → 이메일"]
+    ROUTE -->|"--send-user"| USER["한 명 주소 검증<br/>ID → ID@samsung.com"]
+    ROUTE -->|"기존 TRIGGER · ALL 제외"| DEFAULT["기존 수신처 · 발송 설정"]
+    DEPT --> EXPLICIT["지정 수신처만 확정<br/>이번 실행 메일 ON"]
+    USER --> EXPLICIT
+    EXPLICIT --> SCOPE{"SINGLE / --single?"}
+    DEFAULT --> SCOPE
+    SCOPE -->|"예"| ONE["daily DB 전체 날짜<br/>대상 lot·step ET만 조회"]
+    SCOPE -->|"아니오"| PERIOD["모드별 viewing_period<br/>기존 비교 데이터"]
+    ONE --> REPORT["분석 → PPT · HTML 저장"]
+    PERIOD --> REPORT
+    REPORT --> SCORE[("DB/Score/제품_score.csv<br/>prime_key 기준 갱신")]
+    SCORE --> MAIL["확정 수신처로 발송<br/>기존 TRIGGER는 use_email_send 확인"]
+    MAIL --> OPS[("운영 기록<br/>성공 · 실패 · 응답 불확실")]
+    classDef command fill:#eff6ff,stroke:#2563eb,color:#172554;
+    classDef store fill:#f0fdf4,stroke:#16a34a,color:#14532d;
+    classDef send fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
+    class CMD,CFG,ONE,PERIOD command;
+    class SCORE,OPS store;
+    class EXPLICIT,MAIL send;
+```
+
+### 7) 기존 수동 트리거 모드
+
+기존 명령은 계속 사용할 수 있습니다. 맨 앞 `_`는 생략할 수 있습니다.
+`vehicle`에는 `_`를 사용할 수 있지만 `lot` / `step`에는 사용할 수 없습니다.
 
 | 모드 | 데이터 / 리포트 | 수신처 |
 |---|---|---|
-| TRIGGER | 기존 조회 기간의 전체 shot, 일반 리포트 | 기존 config / Scheduler 환경변수 |
-| TRIGGER_FORCE_{mail} | 일반 리포트. 대상 lot+step의 prime key 진행날짜가 조회 기간보다 오래되면 그 날짜 **2일 전**까지 조회 시작일을 확장 | 지정 mail만 |
-| TRIGGER_NORMAL | Extractor 좌표 파일 `Zone_Define`의 **13pt 열이 O / y / true**인 shot만 포함한 일반 리포트 | 기존 config / Scheduler 환경변수 |
-| TRIGGER_SINGLE | `viewing_period` 없이 지정한 **prime_key의 lot+step 하나만** 현재 daily DB 전체 기간에서 조회. 형제 lot·다른 step·with_vehicle 비교 제품의 ET 데이터 제외 | 기존 config / Scheduler 환경변수 |
-| TRIGGER_ALL_{mail} | **CAT2(category)가 비어 있지 않은 모든 항목**의 Trend만, category별 HTML/PPTX | 지정 mail만 |
+| `TRIGGER_<prime_key>` | 기존 조회 기간, 일반 리포트 | YAML / Scheduler 환경변수 |
+| `TRIGGER_SINGLE_<prime_key>` | ET 기간 제한 없이 지정 lot·step만 | YAML / Scheduler 환경변수 |
+| `TRIGGER_FORCE_<mail>_<prime_key>` | 오래된 prime_key의 진행날짜 **2일 전**까지 조회 기간 확장 | 지정 주소 또는 시트 |
+| `TRIGGER_NORMAL_<prime_key>` | 좌표 파일의 `13pt`가 O / y / true인 shot만 | YAML / Scheduler 환경변수 |
+| `TRIGGER_ALL_<mail>_<prime_key>` | CAT2가 있는 모든 항목의 Trend 전용 HTML/PPT | 지정 주소 또는 시트 |
 
-모든 트리거는 쿼리를 재실행하지 않고 현재 daily DB를 사용합니다. 실제 메일 발송은
-`use_email_send=True`여야 합니다. `{mail}`은 실제 이메일 주소(여러 주소는 콤마 구분) 또는
-메일링 엑셀의 정확한 시트명입니다. 없는 시트는 오류로 처리하며 기본 그룹으로 대체하지 않습니다.
-Scheduler JSON 규약은 기존 TRIGGER 그대로 유지됩니다. 추가 모드는 위 Main CLI로 실행합니다.
+```bash
+python Main.py "_TRIGGER_vehicle_A_T6677.1_test"
+python Main.py "_TRIGGER_SINGLE_vehicle_A_T6677.1_test"
+python Main.py "_TRIGGER_FORCE_user.id@samsung.com_vehicle_A_T6677.1_test"
+python Main.py "_TRIGGER_NORMAL_vehicle_A_T6677.1_test"
+python Main.py "_TRIGGER_ALL_POWER_USER_vehicle_A_T6677.1_test"
+```
 
-- **SINGLE**: `python Main.py "_TRIGGER_SINGLE_<prime_key>"` (`prime_key = vehicle_lot_step`).
-  예: `python Main.py "_TRIGGER_SINGLE_vehicle_A_T6677.1_test"`.
-  저장된 모든 날짜 파티션에서 해당 lot/step의 ET 데이터만 읽으며, 날짜 제한을 늘리는 FORCE와 달리
-  다른 lot을 trend에 포함하지 않습니다. 보관된 대상 데이터가 없으면 오류로 종료합니다.
-  Inline Table은 기존 root lot 기반 조회를 유지합니다. 설정 파일의 viewing_period는 바뀌지 않습니다.
+기존 TRIGGER는 **`use_email_send=True`일 때만** 발송합니다. FORCE는 조회 기간을 확장하는 모드이며,
+메일을 강제로 켜는 명령은 아닙니다. 강제 메일 발송에는 앞 절의 `--send-dept` / `--send-user`를 사용하세요.
+ET/WIP는 현재 저장된 DB를 이용하고, Inline은 기존 방식으로 조회합니다.
+Scheduler JSON 규약은 기존 TRIGGER를 유지하며 새 지정 발송 명령은 Main CLI에서 실행합니다.
 
-- **FORCE**: `Final_et_log`의 대상 lot+step 진행날짜를 사용하며, 여러 prime key이면 가장 오래된
-  날짜를 포함합니다. 확장 전/후 시작일과 일수를 로그에 남깁니다. 이미 기간 내이면 그대로 유지합니다.
-  날짜가 없으면 오류로 중단하며, 보관되지 않은 원시 DB를 복원하거나 다시 쿼리하지 않습니다.
-- **NORMAL**: 대소문자와 앞뒤 공백을 무시합니다. `1`, `yes`, 빈 값은 포함하지 않습니다.
-  MASK + CHIP_X_POS + CHIP_Y_POS + FLAT_ZONE_POS로 shot을 매칭하여 대상·비교 trend 모두 필터합니다.
-  Point 집계 전에 적용합니다. 13pt 열이 없으면 오류로 중단합니다.
-- **ALL**: REPORT ORDER나 PPT_ONLY 여부에 관계없이 CAT2가 있는 REAL/ADDP 및 그 파생 항목을
-  포함합니다. 조회 기간 내 데이터가 없는 항목은 로그에 남기고 생략합니다. 표·WF Map·설명 간지·
-  이상 분석 없이 category별로 슬라이드당 최대 6개 Trend를 배치합니다.
-  HTML의 모든 이미지는 base64 data URI입니다. **메일 HTML 본문 UTF-8 크기 < 2,000,000 bytes,
-  PPTX 파일 크기 < 10,000,000 bytes**를 직렬화 후 검사하며 초과하면 전체 차트 해상도/품질을
-  단계적으로 줄입니다. 항목 수를 줄여 맞추지 않으며 한계에 도달하면 발송을 중단합니다.
-  첨부 PPTX를 포함한 메일 전체의 2MB 제한을 뜻하지 않습니다.
-  파일명은 `<날짜>-<vehicle>-<lot>-<step>-ALL-Trends.html/.pptx`이며 기존 HTML/PPT 폴더에 저장합니다.
-  ALL 산출물은 메일용이며 S3 업로드 및 별도 다이제스트 발송을 하지 않습니다.
+- **SINGLE:** 저장된 모든 날짜에서 대상 ET만 조회합니다. 원시 데이터가 없으면 오류이며 DB를 복원하지 않습니다.
+- **FORCE:** `Final_et_log`의 진행날짜가 없으면 오류입니다. 기간 내 prime_key는 기존 범위를 유지합니다.
+- **NORMAL:** 대소문자·공백을 무시합니다. `1`, `yes`, 빈 값은 제외합니다. `13pt` 열이 없으면 오류입니다.
+- **ALL:** REPORT ORDER / PPT_ONLY와 관계없이 CAT2가 있는 항목의 Trend만 만듭니다.
+  표·WF Map·이상 분석·Score CSV는 생성하지 않습니다. HTML 2MB, PPTX 10MB 미만으로 조정하며 S3에는 업로드하지 않습니다.
 
 Trend는 PPT/HTML 모두 고정 canvas와 여백을 사용합니다. 긴 Y축 제목은 작은 글씨로 줄이고
 극단적으로 긴 경우 잘라 표시하며, 제목 길이 때문에 플롯 높이를 압축하지 않습니다.
 
-### 7) 출력물
+### 8) 출력물
 
 | 경로 | 내용 |
 |---|---|

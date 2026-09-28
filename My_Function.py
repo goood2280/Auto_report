@@ -83,18 +83,19 @@ def log_to_file(message, log_path):
         print(f"[WARN] log_to_file 실패: {e}")
 
 
-def get_email_list(file_path, target_group, default_group='HOL', domain="@url"):
+def get_email_list(file_path, target_group, default_group='HOL', domain="@samsung.com"):
     """메일링 리스트 엑셀에서 수신 그룹(시트)의 KNOX_ID를 읽어 수신자 리스트를 반환.
 
     target_group에 해당하는 시트가 있으면 그 시트를, 없으면 default_group 시트를 사용한다.
     각 KNOX_ID에 '@'가 없으면 domain을 붙여 이메일을 구성하고,
     메일 API용 [{"email", "recipientType":"TO", "seq"}] 형태로 반환한다.
     """
-    xls = pd.ExcelFile(file_path)
-    sheet_name = target_group if target_group in xls.sheet_names else default_group
-    df = xls.parse(sheet_name)
-    email_list = df['KNOX_ID'].dropna().drop_duplicates(keep='first').tolist()
-    domain = domain.strip()
+    with pd.ExcelFile(file_path) as xls:
+        sheet_name = target_group if target_group in xls.sheet_names else default_group
+        df = xls.parse(sheet_name)
+    email_list = df['KNOX_ID'].dropna().astype(str).str.strip()
+    email_list = email_list[email_list.ne('')].drop_duplicates().tolist()
+    domain = '@' + domain.strip().lstrip('@')
     final_email_list = [
         {
         "email": email.strip() if "@" in email else f"{email.strip()}{domain}",
@@ -4125,7 +4126,8 @@ def etdata_query():
                                  str(GLOBAL_CONFIG.get('DB_et_daily'))+str(GLOBAL_CONFIG.get('setting_stepseq'))+
                                  str(GLOBAL_CONFIG.get('QueryTimeSpan'))+str(GLOBAL_CONFIG.get('now_minus'))).encode()).hexdigest()
         refresh=ops_get('et_refresh',GLOBAL_CONFIG.get('vehicle'),{})
-        full=(refresh.get('signature')!=signature or time.time()-refresh.get('full_at',0)>=GLOBAL_CONFIG.get('et_full_refresh_days',7)*86400)
+        full=(GLOBAL_CONFIG.get('et_force_full_refresh', False)
+              or refresh.get('signature')!=signature or time.time()-refresh.get('full_at',0)>=GLOBAL_CONFIG.get('et_full_refresh_days',7)*86400)
         if not full and refresh.get('success_at'):
             incremental=datetime.fromtimestamp(refresh['success_at'])-timedelta(days=GLOBAL_CONFIG.get('et_refresh_days',2)+1)
             sub_from_date_time=max(sub_from_date_time,incremental)
@@ -4137,6 +4139,8 @@ def etdata_query():
         start_date = datetime.strptime(dateFrom, date_format)
         end_date = datetime.strptime(dateTo, date_format)
         interval = timedelta(days=GLOBAL_CONFIG.get("SplitTimeSpan"))
+        if interval.days <= 0:
+            raise ValueError('SplitTimeSpan은 1일 이상이어야 합니다')
 
         date_list = []
         current_date = start_date
@@ -4144,7 +4148,7 @@ def etdata_query():
             date_list.append(current_date.strftime(date_format))
             current_date += interval
 
-        if date_list[-1] != end_date:
+        if not date_list or date_list[-1] != dateTo:
             date_list.append(end_date.strftime(date_format))
 
         paired_date_list = [[date_list[i], date_list[i+1]] for i in range(len(date_list)-1)]
