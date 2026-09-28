@@ -30,8 +30,9 @@ from My_Function import *
 from My_Function import _filter_inline_by_vehicle  # import * 는 언더스코어 이름 미포함
 from My_config import GLOBAL_CONFIG
 from anomaly_engine import analyze_commonality, render_findings_html, item_excluded
+from operator_console import STAGES, color
 
-# 순수 통계 판정만 사용(외부 LLM·룰 없음)
+# 측정값 기반 통계 판정
 
 warnings.filterwarnings("ignore", message="DataFrame is highly fragmented")
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -82,7 +83,8 @@ _COL = {'reset': '\x1b[0m', 'green': '\x1b[92m', 'blue': '\x1b[94m', 'red': '\x1
         'yellow': '\x1b[93m', 'cyan': '\x1b[96m', 'bold': '\x1b[1m'}
 
 def _c(text, color):
-    return f"{_COL.get(color, '')}{text}{_COL['reset']}"
+    from operator_console import color as console_color
+    return console_color(text, {'green':'ok','red':'error','yellow':'warn'}.get(color,'info'))
 
 def _safe_console_print(text, **kwargs):
     """콘솔 인코딩(cp949 등)이 표현 못하는 문자가 있어도 죽지 않게 출력."""
@@ -132,8 +134,8 @@ def _run_log_print(*args, **kwargs):
 def print_status(category, state, detail=''):
     """중요 상태를 색으로 강조 출력. 마커는 cp949 콘솔 호환 위해 ASCII 사용.
     state: ok(초록)/fail(빨강)/info(파랑)/skip(노랑)/on(초록)/off(노랑)."""
-    tag, color = {'ok': ('[ OK ]', 'green'), 'fail': ('[FAIL]', 'red'), 'info': ('[ >> ]', 'blue'),
-                  'skip': ('[SKIP]', 'yellow'), 'on': ('[ ON ]', 'green'), 'off': ('[ OFF]', 'yellow')
+    tag, color = {'ok': ('[완료]', 'green'), 'fail': ('[실패]', 'red'), 'info': ('[진행]', 'blue'),
+                  'skip': ('[건너뜀]', 'yellow'), 'on': ('[사용]', 'green'), 'off': ('[사용 안 함]', 'yellow')
                   }.get(state, ('[ -- ]', 'cyan'))
     print(_c(f"{tag} {category}" + (f": {detail}" if detail else ""), color))
 
@@ -405,6 +407,70 @@ def _force_viewing_period(log_frame, lot, step, days, now):
     return days
 
 
+_UPLOAD_POOL = None
+_UPLOADS = []   # [(search_key, report record, Future)]
+
+
+def _upload_async(client, local_path, bucket, key, record, search_key):
+    """S3 전송을 백그라운드 스레드로. 실행 이력(record)은 메인 스레드의 _drain_uploads 만 고친다."""
+    global _UPLOAD_POOL
+    if _UPLOAD_POOL is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _UPLOAD_POOL = ThreadPoolExecutor(max_workers=max(1, int(GLOBAL_CONFIG.get('s3_upload_threads', 2) or 2)),
+                                          thread_name_prefix='s3-upload')
+
+    def job():
+        started = time.time()
+        client.upload_file(local_path, bucket, key)
+        return f'{bucket}/{key} ({time.time() - started:.1f}s)'
+    _UPLOADS.append((search_key, record, _UPLOAD_POOL.submit(job)))
+
+
+def _drain_uploads(block=True):
+    """끝난(또는 block=True 면 전부) S3 전송 결과를 실행 이력에 반영."""
+    remaining = []
+    for search_key, record, future in _UPLOADS:
+        if not block and not future.done():
+            remaining.append((search_key, record, future))
+            continue
+        try:
+            detail = future.result()
+            record['upload'] = 'success'
+            print_status("S3 업로드", "ok", detail)
+        except Exception as exc:
+            record['upload'] = 'failed'
+            if _RUN:
+                _RUN.data["issues"].append(f"S3 업로드 실패: {search_key}")
+            print_status("S3 업로드", "fail", f"{search_key}: {exc}")
+        record['updated'] = time.time()
+        if record.get('id'):
+            ops_put('reports', record['id'], record)
+    _UPLOADS[:] = remaining
+
+
+def _release_memory():
+    try:
+        import resource_governor
+        resource_governor.release_memory()
+    except Exception:
+        gc.collect()
+
+
+def _force_viewing_period_all(log_frame, lots, steps, days, now):
+    """여러 대상의 FORCE 기간 = 가장 오래된 대상 기준. 로그에 없는 대상은 경고만 하고 건너뛴다."""
+    found, missing = [], []
+    for lot, step in trigger_pairs(lots, steps):
+        try:
+            found.append(_force_viewing_period(log_frame, lot, step, days, now))
+        except ValueError:
+            missing.append(f'{lot}_{step}')
+    if missing:
+        print(f'[WARN] FORCE: 측정 로그에 없는 대상 {len(missing)}건은 기간 계산에서 제외: {missing[:5]}')
+    if not found:
+        raise ValueError(f'FORCE: {missing[:3]} prime key 진행날짜를 log에서 찾지 못했습니다')
+    return max(found)
+
+
 def _filter_normal_shots(frame, zones):
     flag = next((c for c in zones if str(c).strip().lower() == '13pt'), None)
     if flag is None:
@@ -420,6 +486,41 @@ def _trigger_receivers(path, recipient):
     if '@' in recipient:
         return email_receivers(recipient.split(','))
     return get_email_list(path, recipient, default_group=None)
+
+
+def _all_trend_sheets(tiles, columns=2, width=1280):
+    """ALL Trends 메일용 — 차트들을 2열 시트 이미지로 합쳐 메일 1통의 이미지 수를 _mail_image_limit 이하로 맞춘다.
+    각 칸 위에 항목명(ASCII)을 그려 넣어 어떤 차트인지 이미지 안에서도 읽힌다."""
+    import io
+    import math
+    from PIL import Image, ImageDraw, ImageFont
+    limit = _mail_image_limit()
+    per_sheet = max(columns * 3, math.ceil(len(tiles) / limit))
+    per_sheet += (-per_sheet) % columns
+    cell = width // columns
+    try:
+        font = ImageFont.truetype('DejaVuSans.ttf', 15)
+    except Exception:
+        try:
+            font = ImageFont.truetype('arial.ttf', 15)
+        except Exception:
+            font = ImageFont.load_default()
+    sheets = []
+    for start in range(0, len(tiles), per_sheet):
+        chunk = tiles[start:start + per_sheet]
+        scaled = [im.resize((cell, max(1, round(im.height * cell / im.width))), Image.Resampling.LANCZOS) for _, _, im in chunk]
+        row_h = max(im.height for im in scaled) + 24
+        rows = math.ceil(len(chunk) / columns)
+        canvas = Image.new('RGB', (cell * columns, row_h * rows), 'white')
+        draw = ImageDraw.Draw(canvas)
+        for i, ((cat, name, _), im) in enumerate(zip(chunk, scaled)):
+            x, y = (i % columns) * cell, (i // columns) * row_h
+            draw.text((x + 6, y + 3), re.sub(r'[^\x20-\x7E]', '?', str(name))[:70], fill=(0, 51, 102), font=font)
+            canvas.paste(im, (x, y + 24))
+        buf = io.BytesIO()
+        canvas.save(buf, 'JPEG', quality=80, optimize=True)
+        sheets.append((list(dict.fromkeys(c for c, _, _ in chunk)), [n for _, n, _ in chunk], buf.getvalue()))
+    return sheets
 
 
 def _trend_artifacts(charts, title):
@@ -440,6 +541,7 @@ def _trend_artifacts(charts, title):
         body = ['<!doctype html><html><meta charset="utf-8"><body>', '<h1>' + html.escape(title) + '</h1>']
         category = None
         count = 0
+        tiles = []   # 메일 본문은 차트 여러 개를 합친 시트 이미지로(메일 API 첨부 개수 한도 — _mail_image_limit)
         for name, (cat, raw) in ordered:
             im = Image.open(io.BytesIO(raw)).convert('RGB')
             im = im.resize((max(1, int(im.width * scale)), max(1, int(im.height * scale))), Image.Resampling.LANCZOS)
@@ -460,15 +562,20 @@ def _trend_artifacts(charts, title):
             label.text = name
             label.paragraphs[0].font.size = Pt(10)
             slide.shapes.add_picture(io.BytesIO(encoded), Inches(x), Inches(y + .24), width=Inches(5.0))
-            uri = _img_datauri(encoded)
-            body.append('<div><h3>' + html.escape(name) + '</h3><img width="640" src="' + uri + '"></div>')
+            tiles.append((cat, name, im))
             count += 1
+        sheets = _all_trend_sheets(tiles)
+        body = body[:2]
+        for cats, names, png in sheets:
+            body.append('<h2>' + html.escape(' / '.join(cats)) + '</h2><p style="font-size:12px;color:#555">'
+                        + html.escape(', '.join(names)) + '</p><img width="1280" style="width:100%;max-width:1280px;height:auto" src="'
+                        + _img_datauri(png) + '">')
         body.append('</body></html>')
         content = ''.join(body)
         ppt = io.BytesIO()
         prs.save(ppt)
         if len(content.encode('utf-8')) < 2_000_000 and ppt.tell() < 10_000_000:
-            _assert_inline_images(content, len(charts))
+            _assert_inline_images(content, len(sheets))
             print('[INFO] HTML 인라인 이미지 검증 OK')
             return content, ppt.getvalue()
     raise ValueError('ALL: 모든 trend를 유지하면서 HTML 2MB/PPTX 10MB 미만으로 축소할 수 없습니다')
@@ -495,7 +602,7 @@ def _publish_all_trends(frame, reformatter, vehicle, lot, root, dc, step, recipi
     if _RUN and _RUN.current:html_path,ppt_path=_RUN.current['paths']['html'],_RUN.current['paths']['ppt']
     state=_send_report_files(html_path,ppt_path,[recipient],f'[HOL] {vehicle} {lot} {step} ALL Trends',identity)
     if _RUN and _RUN.current:_RUN.current['email']=state
-    if state in ('failed','unknown'):raise RuntimeError(f'ALL 메일 발송 {state}')
+    if state not in ('sent','disabled'):raise RuntimeError(f'ALL 메일 발송 {state}')
     if _RUN and _RUN.current:_RUN.finish_report('success')
     print(f'[INFO] ALL {len(charts)} trends: HTML {len(content.encode("utf-8"))} bytes / PPTX {len(ppt)} bytes')
 
@@ -526,6 +633,11 @@ class OperationRun:
             self.current['timings'][previous]=self.current['timings'].get(previous,0)+round(elapsed,3)
             self.save_report()
         self.data['stage']=name;self.stage_started=time.perf_counter();self.persist()
+        if previous != name:
+            target = self.current or self.data
+            identity = ' / '.join(str(target.get(k)) for k in ('vehicle','lot','step') if target.get(k))
+            print_status(STAGES.get(name, name), 'info',
+                         (identity + ' · ' if identity else '') + f'이전 단계 {elapsed:.1f}초')
 
     def save_report(self):
         if self.current:
@@ -674,6 +786,30 @@ def _observe_measurements(log_frame, eligible, config):
     if records:ops_many('measurements',records)
 
 
+def _mail_attachment_guard(content, attachments, config):
+    """발송 직전 최종 가드 — 본문 인라인 이미지 + 첨부 파일 수가 mail_attach_limit(기본 10)을 넘지 않게 한다.
+
+    사내 메일 API 는 본문 data:image 를 첨부로 떼어 세는 경우가 있어 합계가 10을 넘으면
+    'Attach file count is over 10' 으로 메일 전체를 거부한다(2026-07 실제 발생). 발행물(Daily/ML/Auto Report)은
+    만들 때 이미 이미지 수를 맞추므로 보통은 아무것도 바꾸지 않는다. 그래도 넘으면 메일 본문의 뒤쪽 이미지를
+    안내 문구로 바꿔 발송이 실패하지 않게 한다(저장된 HTML·첨부 PPT 에는 그림이 그대로 있다).
+    반환: (발송할 본문, 원래 이미지 수)
+    """
+    pattern=r'<img\s[^>]*src="data:image/[^"]*"[^>]*>'
+    images=re.findall(pattern,content,re.DOTALL)
+    limit=int(config.get('mail_attach_limit',10) or 10)
+    allowed=max(0,limit-attachments)
+    if len(images)<=allowed:return content,len(images)
+    note=('<div style="font-size:12px;color:#737373;border:1px dashed #a3a3a3;padding:6px 10px;margin:4px 0">'
+          '그림 생략 — 메일 첨부 개수 한도('+str(limit)+'개) 때문에 본문에서 뺐습니다. 첨부 PPT 에 모두 있습니다.</div>')
+    drop=len(images)-allowed
+    for tag in reversed(images[-drop:]):
+        at=content.rfind(tag)
+        if at>=0:content=content[:at]+note+content[at+len(tag):]
+    print(f'[WARN] 메일 본문 이미지 {len(images)}장 + 첨부 {attachments}개 > 한도 {limit}개 — 뒤쪽 이미지 {drop}장을 안내 문구로 바꿔 발송')
+    return content,len(images)
+
+
 def _durable_mail(identity, recipients, title, html_path, ppt_path, config):
     """Persist before sending. Read/connection loss is uncertain and never auto-resubmitted."""
     import hashlib
@@ -696,6 +832,7 @@ def _durable_mail(identity, recipients, title, html_path, ppt_path, config):
         ppt=None
         if ppt_path:
             with open(ppt_path,'rb') as stream:ppt=stream.read()
+        content,record['inline_images']=_mail_attachment_guard(content,1 if ppt_path else 0,config)
         payload=dict(content=content,receiverList=recipients,senderMailAddress=f"{config.get('KNOXID')}@samsung.com",
                      statusCode='SENT',title=title)
         mime='text/csv' if str(ppt_path).lower().endswith('.csv') else 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
@@ -707,6 +844,10 @@ def _durable_mail(identity, recipients, title, html_path, ppt_path, config):
         code=response.status_code
         record['status']='sent' if code==200 else ('unknown' if code>=500 else 'failed')
         record['reason']=f'HTTP {code}'
+        if code!=200:
+            # 메일 API 의 거부 사유(예: 'Attach file count is over 10')를 이력에 남긴다 — 관리 화면이 쉬운 말로 옮긴다.
+            try:record['reason']+=' '+re.sub(r'\s+',' ',str(response.text or ''))[:300]
+            except Exception:pass
     except requests.exceptions.ConnectTimeout:
         record.update(status='retryable',reason='연결 시간 초과 (전송 전)')
     except (requests.exceptions.Timeout,requests.exceptions.ConnectionError) as exc:
@@ -740,7 +881,7 @@ def _parse_command(arguments):
     parser = argparse.ArgumentParser(description='Auto Report: DB 초기 적재 및 지정 수신처 발행')
     action = parser.add_mutually_exclusive_group()
     action.add_argument('--init-db', metavar='VEHICLE', help='최근 200일 DB 적재 (리포트/메일 없음)')
-    action.add_argument('--send-user', metavar='EMAIL', help='엑셀을 읽지 않고 입력한 이메일 한 명에게만 발송')
+    action.add_argument('--send-user', metavar='USER', help='엑셀을 읽지 않고 USER@samsung.com 한 명에게만 발송')
     parser.add_argument('--prime-key', help='발행 대상 vehicle_lot_step')
     parser.add_argument('--single', action='store_true', help='viewing_period 없이 대상 lot/step ET만 조회')
     parser.add_argument('legacy', nargs='?', help='기존 vehicle 또는 _TRIGGER 명령')
@@ -756,7 +897,7 @@ def _parse_command(arguments):
         if args.legacy or not args.prime_key:
             parser.error('지정 발송에는 --prime-key vehicle_lot_step이 필요합니다')
         try:
-            recipient = normalize_email(args.send_user)
+            recipient = samsung_email(args.send_user)
         except ValueError as exc:
             parser.error(str(exc))
         argument = '_TRIGGER_' + ('SINGLE_' if args.single else '') + args.prime_key
@@ -781,6 +922,7 @@ def _apply_command_settings(command, config):
         return None
     if command['kind'] != 'person':
         return None
+    # parser가 user 부분에 고정 도메인을 붙였으며, 여기서도 완성 주소를 재검증한다.
     mail = normalize_email(command['recipient'])
     config.settings.update(DB_Setting_mode=False, report_making=True, use_email_send=True,
                            use_s3_upload=False, email_receiver=[mail])
@@ -799,6 +941,9 @@ def _main_impl(command=None):
     # config.yaml에서 설정 로드
     GLOBAL_CONFIG.load_from_yaml(vehicle_name)
     explicit_mail = _apply_command_settings(command, GLOBAL_CONFIG)
+    # 관리 화면의 생성 전용 요청은 이 자식 프로세스에만 적용한다.
+    if os.getenv('AUTO_REPORT_GENERATE_ONLY') == '1':
+        GLOBAL_CONFIG.settings.update(use_email_send=False, use_s3_upload=False)
     if explicit_mail:
         trigger_mail = explicit_mail
 
@@ -915,18 +1060,27 @@ def _main_impl(command=None):
 
     if reformatter_check :
         conn = duckdb.connect()
+        # DuckDB 기본값(모든 코어·RAM 80%)은 같은 서버의 다른 Main/S3 작업과 자원을 다툰다 → 남은 만큼만.
+        try:
+            import resource_governor
+            _duck = resource_governor.duckdb_settings(GLOBAL_CONFIG)
+            conn.execute(f"SET threads={int(_duck['threads'])}")
+            conn.execute(f"SET memory_limit='{_duck['memory_limit']}'")
+            print(f"[PERF] DuckDB threads {_duck['threads']} / memory_limit {_duck['memory_limit']}")
+        except Exception as _duck_err:
+            print(f"[WARN] DuckDB 자원 한도 설정 생략: {_duck_err}")
 
         #test_mode True일 경우 etdata_query 진행하지않고 Report 생성만 진행
         if not test_mode and not trigger_flag:
             # ── ET 데이터 쿼리 (Hive 파티션으로 daily 폴더에 저장) ──
             _RUN.stage('et_query')
             etdata_query()
-            print('[INFO] ==============et_query 수행완료==============')
+            print_status('DC 측정 데이터 갱신', 'ok', '조회 결과를 제품별 DB에 반영했습니다.')
             log_to_file("Query Success...", query_log)
 
             _RUN.stage('wip_query')
             wipdata_query()
-            print('[INFO] ==============wip_query 수행완료==============')
+            print_status('공정 진행 현황 갱신', 'ok', 'Lot별 현재 공정과 DC 측정 완료 여부를 비교합니다.')
 
         _RUN.stage('measurement_selection')
         et_log = pd.read_csv(et_log_path) # n일 치 et_log
@@ -982,7 +1136,7 @@ def _main_impl(command=None):
         if not trigger_flag:dc_done_list=_retry_candidates(dc_done_list,final_lot_log,vehicle)
 
         if not trigger_flag:
-            print(f"[INFO] {datetime_now} 측정완료 LOT 확인 됨 (총 {len(dc_done_list)}건)")
+            print_status('발행 후보 확인', 'info', f'신규 측정 완료 또는 재시도 대상 {len(dc_done_list)}건')
 
         if ptype_lot_turnoff == True or ptype_lot_turnoff == 'True' :
             dc_done_list = dc_done_list[~dc_done_list['lot_id'].str.startswith('A4')]
@@ -992,16 +1146,21 @@ def _main_impl(command=None):
             dc_done_list['dc_layer_check'] = dc_done_list['dc_step_id'].map(GLOBAL_CONFIG.get("dc_dict"))
             dc_done_list = dc_done_list[dc_done_list['dc_layer_check'] == 'MFDC']
             dc_done_list = dc_done_list.drop(columns=['dc_layer_check'])
-            print(f"[INFO] specific_dc_layer 타겟 필터 후 LOT: {len(dc_done_list)}건")
+            print(f"[INFO] 제품에 지정된 DC Layer 조건 적용 후 발행 후보: {len(dc_done_list)}건")
 
-        # 수동 발행은 파싱된 lot·step 하나만 대상으로 한다.
+        # 수동 발행은 명령에 적힌 lot·step 만 대상으로 한다(쉼표로 여러 개 — trigger_pairs 규칙).
+        # 여러 Lot 을 한 번에 돌리면 DB 조회·피벗·좌표 결합을 한 번만 하고 Lot 별 리포트만 반복한다.
         if trigger_flag:
+            _pairs = trigger_pairs(trigger_lot, trigger_step)
             dc_done_list = {
-                'lot_id': [trigger_lot],
-                'dc_step_id': [trigger_step],
-                'dc_done': [True],
-                'dc_done_before': [False]
+                'lot_id': [p[0] for p in _pairs],
+                'dc_step_id': [p[1] for p in _pairs],
+                'dc_done': [True] * len(_pairs),
+                'dc_done_before': [False] * len(_pairs)
             }
+            if len(_pairs) > 1:
+                print(f'[INFO] 수동 발행 대상 {len(_pairs)}건을 한 번의 데이터 적재로 처리합니다: '
+                      + ', '.join(f'{a}/{b}' for a, b in _pairs[:10]) + (' …' if len(_pairs) > 10 else ''))
 
         if trigger_flag:
             print("[INFO] 수동 발행: ET/WIP는 현재 DB 사용, Inline은 기존 방식으로 조회합니다.")
@@ -1009,7 +1168,7 @@ def _main_impl(command=None):
             #        (My_config.load_from_yaml에서 config.yaml의 email_receiver를 덮어씀)
             if os.getenv('AUTO_REPORT_EMAIL_RECEIVER'):
                 print(f"[INFO] 트리거 수신 그룹 지정: {email_receiver}")
-        print("[INFO] 리포팅 진행할 LOT LIST")
+        print_status('이번 작업 대상', 'info', '아래 Lot ID와 DC Step별로 리포트를 처리합니다.')
         dc_done_list = pd.DataFrame(dc_done_list)
         _observe_measurements(final_lot_log,dc_done_list,GLOBAL_CONFIG)
         if not trigger_flag and report_making and not DB_Setting_mode:
@@ -1020,8 +1179,8 @@ def _main_impl(command=None):
             dc_done_list=_resume_saved(dc_done_list,vehicle)
 
         if (not DB_Setting_mode) & (report_making):
-            print(f"[INFO] DB_Setting_mode =  {DB_Setting_mode}")
-            print(f"[INFO] report_making = {report_making}")
+            print_status('리포트 작성 시작', 'info',
+                         '메일 발송 사용' if GLOBAL_CONFIG.get('use_email_send',False) else '파일 생성·저장만 수행 (메일 없음)')
             if not dc_done_list.empty:
 
                 #dc_done_list
@@ -1050,13 +1209,14 @@ def _main_impl(command=None):
                 FORMULA = list(map(str, addp.addpscale))
 
                 if trigger_mode == 'FORCE':
-                    viewing_period = _force_viewing_period(
+                    viewing_period = _force_viewing_period_all(
                         final_lot_log, trigger_lot, trigger_step, viewing_period, datetime_now)
 
                 # DuckDB로 viewing_period 범위의 raw 데이터 로드
                 _RUN.stage('raw_load')
                 if trigger_mode == 'SINGLE':
-                    print(f'[INFO] SINGLE {vehicle}_{trigger_lot}_{trigger_step}: 기간 제한 없이 한 lot/step만 조회')
+                    # 쉼표 목록이면 여러 Lot/Step 을 한 번에(기간 제한 없이 대상 행만) 읽는다.
+                    print(f'[INFO] SINGLE {vehicle}_{trigger_lot}_{trigger_step}: 기간 제한 없이 지정 lot/step만 조회')
                     raw_df = load_daily_projected(conn, DB_et_daily, None, reformatter,
                                                   lot=trigger_lot, step=trigger_step)
                 else:
@@ -1102,13 +1262,13 @@ def _main_impl(command=None):
                 merged_df['mask'] = vehicle
                 # ── with_vehicle 데이터 로드 & Merge (daily Hive 파티션 사용) ──
                 if trigger_mode != 'SINGLE' and vehicle not in with_vehicle:
-                    print("[INFO] with_vehicle안에 vehicle 없음. 진행")
+                    print('[INFO] 추가 비교 제품에 현재 제품은 없습니다. 선택된 비교 제품만 추가합니다.')
                     try : 
                         with_vehicle_Table = pd.DataFrame() 
                         for with_vehicle_now in with_vehicle :
                             wv_daily_path = DB + with_vehicle_now + '_daily'
 
-                            print(f'[INFO] with_vehicle={with_vehicle_now}, viewing_period={viewing_period}')
+                            print(f'[INFO] 비교 제품 {with_vehicle_now}: 최근 {viewing_period}일 측정 데이터 읽기')
 
                             # daily Hive 파티션에서 with_vehicle 데이터 로드
                             wv_reformatter = pd.read_csv(f'reformatter/{with_vehicle_now}_reformatter.csv')
@@ -1291,7 +1451,7 @@ def _main_impl(command=None):
                         target_step_merged = (target_DC_step or target_DC_step_id) + "(" + target_DC_step_id + ")" #{DC_step_id}({DC_step})
 
                         match_key = target_root_lot_id + "_" + target_DC_step_id #match_key = {root_lot_id}_{DC_step_id}
-                        # 리포트 키 = {fab_lot_id}_{step_id}(원본 키) — anomaly_basis/ai_input/
+                        # 리포트 키 = {fab_lot_id}_{step_id}(원본 키) — 통계 분석 근거/산출물
                         # rule_check/ARCHIVE 산출물 파일명이 전부 이 키를 공유(step별 덮어쓰기 방지)
                         report_key = f"{target_lot_id}_{target_DC_step_id}"
                         if trigger_mode == 'ALL':
@@ -1348,10 +1508,10 @@ def _main_impl(command=None):
                         print(f'[INFO] 대상 Wafer 목록: {target_wafer_id_list}')
 
                         #Inline Data 추출
-                        print(f'{target_root_lot_id} inline data 추출 시작!')
+                        print_status('Inline 측정 조회', 'info', f'Root Lot {target_root_lot_id}')
                         _RUN.stage('inline_query')
                         inlinedata = inlinedata_query(target_root_lot_id)
-                        print(f'{target_root_lot_id} inline data 추출 완료!')
+                        print_status('Inline 측정 조회', 'ok', f'Root Lot {target_root_lot_id}')
 
                         # =====================================================================================================
 
@@ -1457,7 +1617,8 @@ def _main_impl(command=None):
                         clear_anomaly_inside_run()
 
                         # 1-1. Title page 투입
-                        print(f'[INFO]..{vehicle}_{target_lot_id}_{target_step_merged}_HOL_AUTO_REPORT 저화질 버전 제작 시작..\n')
+                        print_status('메일 첨부용 PPT 작성', 'info',
+                                     f'제품 {vehicle} / Lot {target_lot_id} / DC Step {target_step_merged}')
                         prs_low_qual = make_title_page(vehicle, target_lot_id, target_step_merged)
 
                         # 1-2. Scoreboard 투입 (lot_id 분리 — HTML과 동일하게 (lot,wafer) 컬럼)
@@ -1494,9 +1655,9 @@ def _main_impl(command=None):
                                 knowledge_text=_ANOMALY_KNOWLEDGE_TEXT,
                                 item_stats_out=anomaly_item_stats,
                                 report_key=report_key)
-                            print(f"[INFO] commonality 분석: {len(code_findings)}건 finding")
+                            print_status('측정 결과 통계 분석', 'ok', f'Spec 이탈·변화 등 검토 항목 {len(code_findings)}건')
                         except Exception as ce:
-                            print(f"[WARN] commonality 분석 스킵 (오류): {ce}")
+                            print(f"[WARN] 통계 분석을 완료하지 못했습니다. 리포트 내용 확인 필요: {ce}")
                         # 발행 스냅샷(RUN/ARCHIVE/<key>/) — 부가 산출물.
                         #   지워지거나 없어도 리포트 발행/판정에 영향 없음(저장 실패도 무시).
                         if getattr(GLOBAL_CONFIG, 'use_archive_snapshot', True):
@@ -1532,8 +1693,19 @@ def _main_impl(command=None):
                         if not os.path.exists(low_qual_ppt_save_path):
                             os.makedirs(low_qual_ppt_save_path)
                         _RUN.stage('ppt_save')
+                        # 메일 첨부 한도: 차트까지 만든 뒤 남은 용량으로 Description 이미지 화질을 정하고,
+                        # 그래도 넘으면 큰 이미지부터 줄여 한도(ppt_mail_max_mb × ppt_budget_ratio) 아래로 맞춘다.
+                        try:
+                            _fit = fit_ppt_budget(prs_low_qual, GLOBAL_CONFIG)
+                            print_status('PPT 용량 맞춤', 'ok' if _fit['after'] <= _fit['limit'] else 'fail',
+                                         f"{_fit['before']/1e6:.2f}MB → {_fit['after']/1e6:.2f}MB (한도 {_fit['limit']/1e6:.1f}MB) · "
+                                         f"설명 이미지 {_fit['desc_images']}장 {_fit['desc_level']}"
+                                         + (f" · 생략 {_fit['desc_dropped']}" if _fit['desc_dropped'] else '')
+                                         + (f" · 차트 축소 {_fit['charts_shrunk']}" if _fit['charts_shrunk'] else ''))
+                        except Exception as _fit_err:
+                            print(f"[WARN] PPT 용량 맞춤 생략: {_fit_err}")
                         atomic_output(f'{low_qual_ppt_save_path}{final_ppt_file_name_DX}', prs_low_qual.save)
-                        print('[INFO]..저장 완료..\n')
+                        print_status('PPT 파일 저장', 'ok', '이어서 HTML 메일 본문을 작성합니다.')
 
                         # =====================================================================================================
                         VIP_group = VIP_group.map(lambda x: x.strip() if isinstance(x, str) else x)
@@ -1604,7 +1776,7 @@ def _main_impl(command=None):
                         # v9.3.x: 모든 index에 값이 없는 wafer 열 제거 — 측정 데이터가 전혀 없는
                         #   wafer는 회색 빈 열만 차지하므로 가독성을 위해 열 자체를 숨긴다.
                         VIP_group_HTML = VIP_group_HTML.dropna(axis=1, how='all')
-                        print("score board lots :", _lots_sorted)
+                        print('[INFO] Pass Rate 표에 포함된 Lot:', ', '.join(map(str,_lots_sorted)))
 
                         # 측정값이 전혀 없는 행 제거 — PPT와 동일하게 lot-wafer reindex 후에도
                         # 첫 번째 dropna(VIP_group_HTML 초기 생성 시)를 통과한 항목은 유지.
@@ -1646,7 +1818,8 @@ def _main_impl(command=None):
                         _SB_PAD = 'padding:4px 6px; white-space:nowrap;'
                         _sb_waf_w = 40      # wafer 셀 폭(숫자 잘림 방지) inline min-width
                         _SB_WAF = (f'{_SB_BD} text-align:center; width:{_sb_waf_w}px; min-width:{_sb_waf_w}px; '
-                                   f'max-width:{_sb_waf_w}px; padding:2px 1px; font-size:10px; white-space:nowrap;')
+                                   f'max-width:{_sb_waf_w}px; padding:3px 1px; font-size:11px; white-space:nowrap; '
+                                   'font-variant-numeric:tabular-nums;')
                         _SB_CAT = f'{_SB_BD} {_SB_PAD} text-align:center; min-width:77px;'      # category 고정열
                         _SB_ITEM = f'{_SB_BD} {_SB_PAD} text-align:center; min-width:240px;'    # Item 고정열
                         sb_html = ''
@@ -1812,7 +1985,7 @@ def _main_impl(command=None):
                         lot_detail_html += '  </tbody>\n</table>\n'
 
                         # ==================== [0] Anomaly: 코드 통계 분석 + Trend chart ====================
-                        # analyze_commonality가 순수 통계 Finding을 산출한다(외부 LLM 없음).
+                        # analyze_commonality가 측정값으로 통계 검토 항목을 산출한다.
                         _top_n = getattr(GLOBAL_CONFIG, 'anomaly_trend_chart_top_n', 3)
 
                         # 1) 코드 통계 분석 결과(위 1-3b에서 계산) → HTML 요약
@@ -2342,6 +2515,15 @@ def _main_impl(command=None):
                             '<div id="target4"></div>',
                             ''
                         )
+                        # 가독성: 메일 클라이언트는 <style> 을 무시하므로 inline 10px(표 셀) 글자를 11px 로 올린다.
+                        # data URI(base64)에는 ':' 가 없어 이미지 내용과 겹치지 않는다.
+                        html_content = html_content.replace('font-size:10px', 'font-size:11px')
+                        # 메일 본문 한도(2MB) 확인 — 넘으면 발송 전에 알린다(이미지는 _img_datauri 가 장당 상한 관리).
+                        _html_bytes = len(html_content.encode('utf-8'))
+                        _html_limit = int(float(GLOBAL_CONFIG.get('html_mail_max_mb', 2.0) or 2.0) * 1_000_000)
+                        if _html_bytes > _html_limit:
+                            print_status('HTML 용량', 'fail', f'{_html_bytes/1e6:.2f}MB > 한도 {_html_limit/1e6:.1f}MB — '
+                                         'html_inline_img_max_kb 또는 Anomaly Trend 차트 수를 줄이세요')
 
                         # ==================== 인라인 이미지 불변식 검증 (수정 금지) ====================
                         # 불변식: 리포트 HTML의 모든 <img> src는 반드시 data:image(base64) 인라인이어야
@@ -2379,14 +2561,10 @@ def _main_impl(command=None):
                             # 개인 이름 경로 없이 bucket_dx 기준 clean key(vehicle/파일명) 사용
                             s3_key = f'{vehicle}/{final_ppt_file_name_DX}'
                             _s3_local = f'{low_qual_ppt_save_path}{final_ppt_file_name_DX}'
-                            try:
-                                client.upload_file(_s3_local, bucket_dx, s3_key)
-                                _RUN.current["upload"]="success"
-                                print_status("S3 업로드", "ok", f"{bucket_dx}/{s3_key}")
-                            except Exception as s3e:
-                                _RUN.current["upload"]="failed"
-                                _RUN.data["issues"].append(f"S3 업로드 실패: {search_key}")
-                                print_status("S3 업로드", "fail", f"{search_key}: {s3e}")
+                            # 전송은 네트워크 대기라 백그라운드 스레드로 보내고, 그동안 다음 Lot 차트를 그린다.
+                            # 결과는 메인 스레드가 _drain_uploads()로 실행 이력에 반영한다.
+                            _RUN.current["upload"]="sending"
+                            _upload_async(client, _s3_local, bucket_dx, s3_key, _RUN.current, search_key)
                         else:
                             _RUN.current["upload"]="unavailable"
                             print_status("S3 업로드", "off", f"{search_key} → S3 미연결 스킵")
@@ -2397,10 +2575,11 @@ def _main_impl(command=None):
                                                   _RUN.current['id'])
                         _RUN.current['email']=_state
                         _RUN.save_report()
-                        if _state in ('failed','unknown'):
+                        if _state not in ('sent','disabled'):
                             raise RuntimeError(f'메일 발송 {_state}: 운영 이력에서 수신처별 결과 확인 필요')
 
-                        log_to_file(f"{search_key} Report 발행 완료", query_log)
+                        _completion = '리포트 발행 완료' if _state == 'sent' else '리포트 생성·저장 완료 (메일 없음)'
+                        log_to_file(f"{search_key} {_completion}", query_log)
                         _RUN.finish_report('success')
                         # 소요 시간 + 산출물(HTML/PPT) 용량 출력
                         _elapsed = time.perf_counter() - _t_report_start
@@ -2412,7 +2591,7 @@ def _main_impl(command=None):
                                 return "N/A"
                         _html_mb = _mb(f'{html_save_path}{fname}')
                         _ppt_mb = _mb(f'{low_qual_ppt_save_path}{final_ppt_file_name_DX}')
-                        print_status("Report 발행 완료", "ok",
+                        print_status(_completion, "ok",
                                      f"{search_key} — 소요 {_elapsed:.1f}s, HTML {_html_mb}, PPT {_ppt_mb}")
 
                     except Exception as e:
@@ -2428,19 +2607,20 @@ def _main_impl(command=None):
                         clear_temp_inside_run()
                         clear_anomaly_inside_run()
                         clear_run_temp_files()   # 랏 리포트 완료 후 RUN/TEMP 내부 파일 비우기(폴더 유지)
-                        gc.collect()
+                        _drain_uploads(block=False)   # 끝난 S3 전송 결과만 반영(기다리지 않음)
+                        _release_memory()             # gc + (Linux) 빈 힙을 OS 에 반환 — 여러 Lot 연속 처리 시 RSS 누적 방지
 
+                _drain_uploads(block=True)
             else:
-                print("[INFO] dc_done_list가 비어있습니다. Report 발행 대상 없음")
+                print_status('발행 대상 확인', 'skip', '현재 조건에 맞는 신규·재시도 Lot이 없습니다.')
 
         else:
-            print(f"[INFO] DB_Setting_mode = {DB_Setting_mode}, report_making = {report_making}")
-            print("[INFO] Report 미발행 모드")
+            print_status('데이터 적재 완료', 'ok', '이번 작업은 DB 갱신만 수행하며 리포트를 발행하지 않습니다.')
 
         conn.close()
 
         shutdown_chart_pool()   # 병렬 렌더링 워커 풀 정리 (atexit에도 등록되어 있으나 명시 종료)
-        print(f'[INFO] ============== {vehicle} 전체 프로세스 완료 ==============')
+        print_status('제품 처리 종료', 'info', f'{vehicle} · 생성·저장·메일 결과를 최종 확인합니다.')
 
     else:
         raise ValueError("reformatter 검증 실패")
@@ -2483,10 +2663,11 @@ def _service_html_start(title, purpose, stamp=''):
     """Shared, mail-safe shell matching the production Auto Report template."""
     import html
     esc=lambda value:html.escape(str(value))
+    stamp=re.sub(r'(\d{2}:\d{2}):\d{2}(?:\.\d+)?',r'\1',str(stamp))   # 초·마이크로초는 읽기만 어렵다
     return ('<!doctype html><html lang="ko"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(title)+
             '</title></head><body style="margin:0;background:#ffffff">'
-            '<div id="top" style="font-family:Segoe UI,Arial,Malgun Gothic,sans-serif;font-size:12px;'
+            '<div id="top" style="font-family:Segoe UI,Arial,Malgun Gothic,sans-serif;font-size:13px;'
             'color:#1a1a1a;line-height:1.5;padding:16px 24px;background:#ffffff">'
             '<h1 style="color:#003366;font-size:20px;border-bottom:2px solid #003366;'
             'padding-bottom:6px;margin:0 0 6px">'+esc(title)+'</h1>'
@@ -2543,7 +2724,10 @@ def _trend_review(entry, ml=False):
         return '탐지 없음','#1f497d','실행된 검정에서 설정 기준을 만족하는 후보가 없습니다.'
     if 'auto_findings' in entry:
         findings=entry['auto_findings']
-        if findings:return ('이상' if any(f['severity']=='CRITICAL' for f in findings) else '주의'),'#b4232d','아래 Lot별 Auto Report 판정 근거를 확인하세요.'
+        if findings:
+            critical=any(f['severity']=='CRITICAL' for f in findings)
+            # 이상=빨강, 주의=주황 — 격자에서 색만 봐도 심각도가 갈린다.
+            return ('이상' if critical else '주의'),('#b4232d' if critical else '#b45309'),'아래 Lot별 Auto Report 판정 근거를 확인하세요.'
         if entry.get('warnings'):return '자료 확인','#a45100','자료 제한을 확인한 뒤 추이를 해석하세요.'
         return '이상·주의 없음','#1f497d','최근 24시간 측정에서 Auto Report 기준 이상·주의 신호가 없습니다.'
     if (entry.get('recent_out_pct') or 0)>0:return '신규 Spec 이탈','#b4232d','신규·변경 측정의 이탈 lot과 측정 재현성을 확인하세요.'
@@ -2609,7 +2793,9 @@ def _daily_trend_chart(entry, settings):
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
     plt.rcParams['axes.unicode_minus']=False
-    fig,ax=plt.subplots(figsize=(7.2,3.2 if settings.get('service')=='mlmode' else 2.65))
+    # Daily Trend 본문은 html_columns(기본 3)열 격자 — 열이 많으면 작은 그림으로 그려 한 메일에 더 많은 항목을 싣는다.
+    compact=settings.get('service')!='mlmode' and not settings.get('_ppt_chart') and int(settings.get('html_columns',3) or 3)>=3
+    fig,ax=plt.subplots(figsize=(7.2,3.2) if settings.get('service')=='mlmode' else ((5.0,2.55) if compact else (7.2,2.65)))
     try:
         points=entry['points']
         if points.empty:
@@ -2630,7 +2816,13 @@ def _daily_trend_chart(entry, settings):
                 ax.scatter(highlight['_time'],highlight['_value'],s=float(settings.get('trend_recent_marker_size',32)),alpha=1,color=color,
                            edgecolors='black',linewidths=.7,antialiaseds=False,zorder=4)
             if valid.empty:ax.text(.5,.5,'No matched process timestamps',ha='center',transform=ax.transAxes)
-            locator=mdates.AutoDateLocator(minticks=3,maxticks=6)
+            # 최근 24시간(하이라이트 구간)을 옅은 노란 띠로 — 검정 테두리 점과 함께 '오늘 무엇이 새로 찍혔나'를 한눈에.
+            since,until=settings.get('highlight_since'),settings.get('report_now')
+            if settings.get('service')!='mlmode' and since is not None and until is not None and not valid.empty:
+                ax.axvspan(pd.Timestamp(since),pd.Timestamp(until),color='#ffe89c',alpha=.45,lw=0,zorder=0)
+                ax.text(pd.Timestamp(since),1,' last 24h',transform=ax.get_xaxis_transform(),fontsize=8 if compact else 10,
+                        va='top',ha='left',color='#8a5a00')
+            locator=mdates.AutoDateLocator(minticks=3,maxticks=5 if compact else 6)
             ax.xaxis.set_major_locator(locator);ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
             if not valid.empty:
                 daily=valid.groupby(valid['_time'].dt.floor('D'))['_value'].median().sort_index()
@@ -2638,11 +2830,11 @@ def _daily_trend_chart(entry, settings):
                 ax.plot(median.index,median.values,color='black',lw=1.5,zorder=6)
                 if not settings.get('_ppt_chart') and settings.get('service')!='mlmode':
                     from matplotlib.lines import Line2D
-                    selected=legend_rows[:max(2,int(settings.get('html_legend_limit',10)))]
+                    selected=legend_rows[:max(2,min(4 if compact else 99,int(settings.get('html_legend_limit',10))))]
                     handles=[Line2D([],[],marker='o',ls='',color=r['color'],markeredgecolor='black' if r['highlight'] else r['color'],markersize=5) for r in selected]
                     labels=[r['label'] if len(r['label'])<=32 else r['label'][:29]+'...' for r in selected]
                     handles.append(Line2D([],[],color='black',lw=1.5));labels.append('Daily median: 3D mean')
-                    ax.legend(handles,labels,fontsize=9,loc='upper left',ncol=4,framealpha=.95,borderpad=.2,labelspacing=.15,columnspacing=.55,handletextpad=.25,handlelength=1.1,borderaxespad=.25,markerscale=.85)
+                    ax.legend(handles,labels,fontsize=8 if compact else 9,loc='upper left',ncol=3 if compact else 4,framealpha=.95,borderpad=.2,labelspacing=.15,columnspacing=.55,handletextpad=.25,handlelength=1.1,borderaxespad=.25,markerscale=.85)
             if entry['log_scale'] and points['_value'].gt(0).all():
                 ax.set_yscale('log')
             for bound in (entry['low'],entry['high']):
@@ -2662,8 +2854,8 @@ def _daily_trend_chart(entry, settings):
                     lo,hi=min(values),max(values);pad=(hi-lo)*.08 if hi>lo else abs(hi)*.08 or 1
                     ax.set_ylim(lo-pad,hi+pad)
                     entry['_focus_ylim']=(lo-pad,hi+pad)
-        ax.set_xlabel(entry['x_label'],fontsize=14,labelpad=2);ax.set_ylabel(entry['unit'],fontsize=14,labelpad=2)
-        for axis in (ax,):axis.tick_params(labelsize=12,pad=2);axis.grid(alpha=.15)
+        ax.set_xlabel(entry['x_label'],fontsize=11 if compact else 14,labelpad=2);ax.set_ylabel(entry['unit'],fontsize=11 if compact else 14,labelpad=2)
+        for axis in (ax,):axis.tick_params(labelsize=10 if compact else 12,pad=2);axis.grid(alpha=.15)
         fig.tight_layout(pad=.35)
         stream=io.BytesIO();fig.savefig(stream,format='png',dpi=int(settings.get('chart_dpi',150)))
         from PIL import Image
@@ -2824,266 +3016,744 @@ def _ml_reading_note(entry):
             '. Y축: '+str(entry.get('unit','단위 정보 없음'))+' / '+str(entry['aggregation'])+'. 항목별 Y축 범위는 다를 수 있습니다.')
 
 
+ML_MODULE_LABELS={'isolation_forest':'Isolation Forest 이상 증가','local_outlier_factor':'주변 패턴 대비 이상 증가',
+                  'spatial_pattern':'웨이퍼 공간 패턴 변화','time_trend':'시간 추이 변화','split_difference':'Split 간 차이',
+                  'equipment_difference':'장비 간 차이','spike_rate':'극단값 비율 증가',
+                  'distribution_shift':'분포 변화','spread_change':'웨이퍼 산포 변화'}
+# 기법별 '무엇을·왜 보는가' — 리포트 표에 그대로 나간다. My_config.mlmode['module_notes'] 로 문구를 바꿀 수 있다.
+ML_MODULE_NOTES={
+    'split_difference':'Split(knob) 그룹 간 Lot 요약값 순위 검정 — 공정 조건 차이로 값이 갈렸는지 확인',
+    'time_trend':'Lot 순서에 따른 단조 증가·감소(순위 상관) — 서서히 움직이는 drift 확인',
+    'distribution_shift':'과거 대비 신규 측정 분포 이동 — 수준(평균·중앙값) 변화 확인',
+    'spread_change':'웨이퍼 내 산포 변화 — 균일도 악화 확인',
+    'spike_rate':'robust σ 를 넘는 극단값 비율 증가 — 간헐적 불량 확인',
+    'isolation_forest':'과거 wafer 로 학습한 Isolation Forest 가 신규 wafer 를 이상으로 보는 비율 — 여러 지표가 함께 틀어진 경우',
+    'local_outlier_factor':'주변 밀도 대비 떨어진 신규 wafer 비율(LOF) — 국소적으로 튀는 wafer',
+    'equipment_difference':'장비(eqp) 간 차이 — 특정 장비 영향 확인(진단용)',
+    'spatial_pattern':'웨이퍼 위치별(센터·엣지) 패턴 변화 — 공간 불균일 확인(진단용)',
+}
+
+
+def _ml_candidate_source(settings):
+    value=str(settings.get('candidate_source','either') or 'either').strip().lower()
+    return value if value in ('daily','ml','either') else 'either'
+
+
+def _ml_module_label(module):
+    return ML_MODULE_LABELS.get(module,module)
+
+
+def _ml_module_note(module, settings=None):
+    custom=((settings or {}).get('module_notes') or {}) if isinstance(settings,dict) else {}
+    return str(custom.get(module) or ML_MODULE_NOTES.get(module,''))
+
+
 def _ml_finding_summary(entry):
-    names={'isolation_forest':'Isolation Forest 이상 증가','local_outlier_factor':'주변 패턴 대비 이상 증가',
-           'spatial_pattern':'웨이퍼 공간 패턴 변화','time_trend':'시간 추이 변화','split_difference':'Split 간 차이',
-           'equipment_difference':'장비 간 차이','spike_rate':'극단값 비율 증가',
-           'distribution_shift':'분포 변화','spread_change':'웨이퍼 산포 변화'}
     findings=entry.get('ml_findings',[])
-    summary=' · '.join(dict.fromkeys(names.get(f['module'],f['module']) for f in findings)) or entry['reason']
+    fallback=('ML 기법에서는 추가 신호 없음 — Daily Trend 판정(이상·주의)으로 포함된 항목' if entry.get('auto_findings')
+              else entry.get('reason') or 'ML 신호 없음')
+    summary=' · '.join(dict.fromkeys(_ml_module_label(f['module']) for f in findings)) or fallback
     if findings:summary+=' / 보정 q 최소 '+format(min(f['q'] for f in findings),'.3g')
     return summary
 
 
-def _ml_candidate_chart(entry, candidate, spatial=False):
-    """One candidate/cohort, shared split colors; each dot is an independent root summary."""
-    import io
-    import matplotlib.pyplot as plt
-    colors=['#0072B2','#D55E00','#009E73','#CC79A7']
-    frame=pd.DataFrame(candidate['plot']);labels=sorted(frame.x.astype(str).unique()) if candidate['kind']=='categorical' else []
-    palette={label:colors[i%len(colors)] for i,label in enumerate(labels)}
-    fig,ax=plt.subplots(figsize=(6.2,2.7));plt.rcParams['axes.unicode_minus']=False
-    if candidate['kind']=='categorical':
-        for i,label in enumerate(labels):
-            group=frame.loc[frame.x.astype(str).eq(label)]
-            box=ax.boxplot([group.y],positions=[i],widths=.45,patch_artist=True,showfliers=False)
-            box['boxes'][0].set_facecolor(palette[label]);box['boxes'][0].set_alpha(.3)
-            jitter=np.linspace(-.13,.13,len(group))
-            ax.scatter(i+jitter,group.y,s=13,c=palette[label],edgecolors=np.where(group.recent,'black',palette[label]),linewidths=.6,alpha=.8)
-        ax.set_xticks(range(len(labels)),[str(v) if len(str(v))<30 else str(v)[:27]+'…' for v in labels])
-        if len(labels)>4:
-            ax.set_xticks(range(len(labels)),[str(v)[:18] for v in labels],rotation=30,ha='right')
-        ax.set_xlabel('Root-lot medians / black edge = new',fontsize=10)
+# ==================== ML mode 리포트 (실험 기능 · flow 디자인) ====================
+# 한 항목 = auto report PPT 항목 페이지와 같은 구조(왼쪽 Box·WF MAP / 오른쪽 Trend·Radius·Cumulative)
+# + ML_TABLE 인자 스크리닝 페이지(KNOB·MASK·EQP 범주 / INLINE·VM 수치 — R²·밑둥 들림).
+# 메일 본문은 항목당 합성 이미지(시트 1장 + 인자 차트 1장)만 싣고, 메일 1통의 <img> 수를
+# mail_inline_image_limit 이하로 나눠 보낸다(사내 메일 API 'Attach file count is over 10' 방지).
+# 차트 안 글자는 ASCII 만 쓴다(사내 서버에 한글 글꼴이 없으면 두부 글자로 깨진다).
+ML_UI=dict(ink='#171717',muted='#737373',line='#e5e5e5',subtle='#f5f5f5',page='#fafafa',panel='#ffffff',
+           accent='#e25822',accent_bg='#fdf2eb',accent_line='#f5c2a8',info='#2563eb',info_bg='#eff6ff',
+           ok='#16803c',ok_bg='#ecfdf3',warn='#b45309',warn_bg='#fffbeb',danger='#c81e1e',history='#7d93ab',new='#0f62fe')
+ML_GROUP_COLORS=['#0f62fe','#e25822','#198038','#8a3ffc','#b28600','#007d79','#fa4d56','#6929c4','#1192e8','#9f1853','#005d5d','#570408']
+_ML_FONT="'Segoe UI','Malgun Gothic',Arial,sans-serif"
+# auto report 항목 페이지(My_Function.insert_plots)와 같은 좌/우 열 기하(inch)
+_ML_LX,_ML_LW,_ML_RX,_ML_RW=0.12,8.30,8.50,4.70
+
+
+def _ml_factor_text(row):
+    """인자 한 줄 요약(한국어, 표·메일용)."""
+    tq=int(round(100*row.get('tail_quantile',.1)))
+    if row['kind']=='numeric':
+        metric=f"R² {row.get('r2',0):.2f} · ρ {row.get('spearman',0):+.2f}"
     else:
-        ax.scatter(frame.x,frame.y,s=14,c='#0072B2',edgecolors=np.where(frame.recent,'black','#0072B2'),linewidths=.6,alpha=.75)
-        ax.set_xlabel(candidate['column'],fontsize=10)
-    ax.set_ylabel(entry['item']+' ('+str(entry.get('unit',''))+')',fontsize=10)
-    ax.set_title((f"#{candidate['rank']} {candidate['column']} | effect {candidate['effect']:.2f} · q {candidate['q']:.3g}" if candidate['rank'] else 'Split · root medians'),fontsize=11,loc='left')
-    ax.grid(axis='y',alpha=.2);ax.spines[['top','right']].set_visible(False);ax.tick_params(labelsize=9)
-    fig.tight_layout(pad=.8);stream=io.BytesIO();fig.savefig(stream,format='png',dpi=140);plt.close(fig)
-    return stream.getvalue()
+        metric=f"ε² {row.get('epsilon2',0):.2f} · 수준 {row.get('levels',0)}"
+    notes=[]
+    for side in ('low_tail','high_tail'):
+        if side in row['signals']:
+            d=row[side]
+            notes.append(('하단' if side=='low_tail' else '상단')+f" {tq}% wafer 비율: x 낮은 구간 {d['share_low_x']:.0%} → 높은 구간 {d['share_high_x']:.0%}")
+    if 'level_tail' in row['signals']:
+        d=row['level_tail'];notes.append(f"하단 {tq}% wafer 가 '{d['worst']}' 에 {d['worst_share']:.0%} 몰림")
+    if 'level' in row['signals']:
+        best=max(row.get('per_level',[]),key=lambda r:r['median'],default=None)
+        worst=min(row.get('per_level',[]),key=lambda r:r['median'],default=None)
+        if best and worst:notes.append(f"중앙값 '{best['x']}' {best['median']:.4g} vs '{worst['x']}' {worst['median']:.4g}")
+    if 'r2' in row['signals']:notes.append(f"기울기 {row.get('slope',0):+.3g} / 단위 x")
+    tests=row.get('tests',{})
+    q=min([tests[s]['q'] for s in row['signals']] or [t['q'] for t in tests.values()] or [1.])
+    verdict=' · '.join(_ml_signal_label(s) for s in row['signals']) or '신호 없음'
+    return dict(metric=metric,note=' / '.join(notes),q=q,verdict=verdict)
 
 
-def _ml_split_spatial(entry,candidate):
-    """Descriptive maps/profile for the tested root cohort; raw spatial values are labeled separately."""
+def _ml_signal_label(signal):
+    from My_Function import ML_FACTOR_SIGNALS
+    return ML_FACTOR_SIGNALS.get(signal,signal)
+
+
+def _mlv_axes(ax,title=None,xlabel=None,ylabel=None):
+    ax.spines[['top','right']].set_visible(False)
+    for side in ('left','bottom'):
+        ax.spines[side].set_color('#525252');ax.spines[side].set_linewidth(.8)
+    ax.tick_params(labelsize=7.5,color='#525252',width=.7,length=3,pad=2)
+    ax.grid(alpha=.18,lw=.6)
+    if title:ax.set_title(title,fontsize=9,loc='left',color=ML_UI['ink'],fontweight='bold',pad=4)
+    if xlabel is not None:ax.set_xlabel(xlabel,fontsize=7.5,color='#404040',labelpad=2)
+    if ylabel is not None:ax.set_ylabel(ylabel,fontsize=7.5,color='#404040',labelpad=2)
+
+
+def _mlv_ascii(value, limit=40):
+    text=re.sub(r'[^\x20-\x7E]','?',str(value))
+    return text if len(text)<=limit else text[:limit-2]+'..'
+
+
+def _mlv_save(fig, dpi):
     import io
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import Normalize
-    raw=entry.get('spatial',pd.DataFrame());col='__ml_'+candidate['column']
-    if candidate['kind']!='categorical' or not {col,'chip_x_pos','chip_y_pos','root_lot_id'}.issubset(raw):return None
-    labels=sorted(pd.DataFrame(candidate['plot']).x.astype(str).unique());colors=['#0072B2','#D55E00']
-    raw=raw.loc[raw[col].astype(str).isin(labels)].copy()
-    if '_vehicle' in raw:raw=raw.loc[raw._vehicle.astype(str).eq(candidate['vehicle'])]
-    cohort={(str(p['fab_lot_id']),str(p['x'])) for p in candidate['plot']}
-    raw=raw.loc[[(str(r),str(x)) in cohort for r,x in zip(raw.root_lot_id,raw[col])]]
-    clock='_dc_time' if '_dc_time' in raw else '_time'
-    raw=raw.loc[raw[clock].eq(raw.groupby(['root_lot_id','wafer_id'])[clock].transform('max'))]
-    for c in ['chip_x_pos','chip_y_pos','_value']:raw[c]=pd.to_numeric(raw[c],errors='coerce')
-    raw=raw.dropna(subset=['chip_x_pos','chip_y_pos','_value'])
-    if raw.empty:return None
-    if 'flat_zone' in raw and raw.flat_zone.nunique()>1:
-        entry['warnings'].append('Split map unavailable: multiple flat zones need separate geometry');return None
-    # Reduce repeated shots -> wafer/site -> root/site -> split/site, equal root weight.
-    wafer=raw.groupby([col,'root_lot_id','wafer_id','chip_x_pos','chip_y_pos'],dropna=False)._value.median().reset_index()
-    roots=wafer.groupby([col,'root_lot_id','chip_x_pos','chip_y_pos'])._value.median().reset_index()
-    sites=roots.groupby([col,'chip_x_pos','chip_y_pos'])._value.median().reset_index()
-    norm=Normalize(float(sites._value.min()),float(sites._value.max()))
-    fig,axes=plt.subplots(1,3,figsize=(12.4,3.0),layout='constrained')
-    bound=max(float(np.abs(sites[['chip_x_pos','chip_y_pos']]).max().max()),1)*1.12
-    for i,label in enumerate(labels[:2]):
-        s=sites.loc[sites[col].astype(str).eq(label)]
-        sc=axes[i].scatter(s.chip_x_pos,s.chip_y_pos,c=s._value,cmap='viridis',norm=norm,marker='s',s=85)
-        axes[i].set(xlim=(-bound,bound),ylim=(-bound,bound),aspect='equal',xlabel='Shot X',ylabel='Shot Y')
-        axes[i].set_title(str(label)[:38],color=colors[i],fontsize=11)
-        r=roots.loc[roots[col].astype(str).eq(label)].copy()
-        r['radius']=np.hypot(r.chip_x_pos,r.chip_y_pos)
-        r['bin']=np.round(r.radius/max(bound/10,1e-9)).astype(int)
-        profile=r.groupby(['root_lot_id','bin']).agg(radius=('radius','median'),value=('_value','median')).reset_index()
-        profile=profile.groupby('bin').agg(radius=('radius','median'),value=('value','median'))
-        axes[2].plot(profile.radius,profile.value,'o-',ms=3,color=colors[i],label=str(label)[:30])
-    fig.colorbar(sc,ax=list(axes[:2]),shrink=.78,pad=.02,label='Raw spatial value · shared scale')
-    axes[2].set_title('Radius profile · same Split colors',fontsize=11)
-    axes[2].set_xlabel('Radius from shot origin (grid units)',fontsize=10);axes[2].set_ylabel('Root-balanced raw median',fontsize=10)
-    axes[2].legend(fontsize=8,frameon=False,loc='best');axes[2].grid(alpha=.2)
-    for ax in axes:ax.tick_params(labelsize=9)
-    stream=io.BytesIO();fig.savefig(stream,format='png',dpi=140);plt.close(fig)
-    return stream.getvalue()
+    stream=io.BytesIO();fig.savefig(stream,format='png',dpi=dpi,facecolor='white');return stream.getvalue()
 
 
-def _ml_compact_html(entry, panels, maps, settings):
-    """One item = one mail-width evidence sheet; no hidden interaction required."""
-    import html
-    esc=lambda v:html.escape(str(v))
-    candidates=entry.get('_influence',{}).get('candidates',[])
-    def picture(png,caption):
-        return '<div style="font-size:12px;color:#003366;padding:2px 6px">'+esc(caption)+'</div><img alt="'+esc(caption)+'" style="display:block;width:100%;height:auto" src="'+_img_datauri(png)+'">'
-    def empty(caption):
-        return '<div style="height:160px;padding:20px;color:#777;font-size:12px">'+esc(caption)+'</div>'
-    label=' / '.join(str(entry.get(k,'')) for k in ('vehicle','category','item','step','program','temperature'))
-    content='<section class="ml-item" style="max-width:1320px;margin:14px auto 24px;border:1px solid #cbd5df;background:white">'
-    content+='<h2 style="font-size:16px;color:#003366;background:#e8edf3;padding:6px 10px;margin:0">'+esc(label)+'</h2>'
-    content+='<div style="font-size:12px;padding:5px 10px">'+esc(_ml_finding_summary(entry))+'</div>'
-    legend=entry.get('_legend_rows',[])
-    if legend:
-        content+='<div style="font-size:10px;padding:2px 10px">'+''.join('<span style="display:inline-block;margin-right:10px"><span style="color:'+r['color']+'">●</span> '+esc(r['label'])+'</span>' for r in legend)+'</div>'
-    if candidates:
-        content+='<table width="100%" cellspacing="0" cellpadding="3" style="font-size:11px;border-collapse:collapse"><tr style="color:#555;background:#f4f7fa"><th>Rank</th><th>Product</th><th>Factor</th><th>Comparison</th><th>Effect</th><th>q</th><th>Roots</th></tr>'
-        for c in candidates:
-            content+='<tr>'+''.join('<td style="text-align:center;border-bottom:1px solid #eee">'+esc(v)+'</td>' for v in [c['rank'],c.get('vehicle',''),c['column'],c['comparison'],f"{c['effect']:.2f}",f"{c['q']:.2g}",c['n']])+'</tr>'
-        content+='</table>'
-    cat=next((i for i,c in enumerate(candidates) if c['kind']=='categorical'),None)
-    num=next((i for i,c in enumerate(candidates) if c['kind']=='numeric'),None)
-    content+=picture(entry['png'],'Trend · 과거 대비 신규 측정')
-    cells=[picture(panels[cat],'Box · #'+str(candidates[cat]['rank'])) if cat is not None else _ml_context_box(entry),
-           picture(panels[num],'Correlation scatter · #'+str(candidates[num]['rank'])) if num is not None else empty('Correlation scatter · 유의한 수치 인자 없음')]
-    content+='<table role="presentation" width="100%" cellspacing="0" cellpadding="3" style="table-layout:fixed"><tr>'+''.join('<td width="50%" style="vertical-align:top">'+v+'</td>' for v in cells)+'</tr></table>'
-    chosen=next((sp for sp in maps if sp is not None),None)
-    if chosen is None:chosen=_ml_context_spatial(entry)
-    content+='<div style="max-width:1080px;margin:0 auto">'+(picture(chosen,'Wafer map / Radius') if chosen is not None else empty('Wafer map / Radius · 공간 좌표 없음'))+'</div>'
-    rest=[i for i in range(len(candidates)) if i not in (cat,num)]
-    if rest:
-        content+='<table role="presentation" width="100%" cellspacing="0" cellpadding="3" style="table-layout:fixed"><tr>'
-        content+=''.join('<td style="vertical-align:top" width="'+str(100/len(rest))+'%">'+picture(panels[i],'#'+str(candidates[i]['rank'])+' '+candidates[i]['column'])+'</td>' for i in rest)+'</tr></table>'
-    content+=_service_heading('탐지 근거 · 기법별 결과')+_service_table(['기법','비교 / 근거','보정 q','효과 / 해당 기준'],
-        [[f['module'],f['message'],f"{f['q']:.3g}",f"{f['effect']:.3g} / {f.get('minimum_effect','-')}"] for f in entry.get('ml_findings',[])])
-    content+='<p style="font-size:12px;padding:0 10px">실행 기법: '+esc(', '.join(entry.get('ml_tested_modules',[])))+' · 유효 검정 '+str(entry.get('ml_test_count',0))+'회</p>'
-    restrictions=list(dict.fromkeys(entry.get('warnings',[])+[str(v) for v in entry.get('_influence',{}).get('skipped',[])]))
-    if restrictions:content+='<p style="font-size:12px;color:#8a3800;padding:0 10px">자료·연산 제한: '+esc(' / '.join(restrictions))+'</p>'
-    return content+'</section>'
-
-
-def _ml_context_box(entry):
-    """Descriptive root-level split box when no significant categorical factor exists."""
-    import html
-    p=entry['points']
-    if p.empty:return '<p>Box · 자료 없음</p>'
-    keys=[c for c in ('_vehicle','root_lot_id','_knob') if c in p]
-    if 'root_lot_id' not in keys:return '<p>Box · root lot 정보 없음</p>'
-    data=p.groupby(keys).agg(y=('_value','median'),recent=('_recent','max')).reset_index()
-    data['x']=data['_vehicle'].astype(str)+' / '+data['_knob'].astype(str) if '_vehicle' in data else data['_knob'].astype(str)
-    c=dict(kind='categorical',plot=data.to_dict('records'),rank=0,column='Split (descriptive)',effect=0,q=1)
-    png=_ml_candidate_chart(entry,c)
-    return '<div style="font-size:12px;color:#003366;padding:2px 6px">Box · Split</div><img alt="Split box" style="width:100%;height:auto;display:block" src="'+_img_datauri(png)+'">'
-
-
-def _ml_context_spatial(entry):
-    """New/history maps and radius with equal root weighting, never guessed geometry."""
-    import io
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import Normalize
+def _mlv_wafers(entry):
+    """wafer 마다 최신 측정의 shot 중앙값 — Box·Cumulative 가 인자 스크리닝과 같은 단위를 쓴다."""
     raw=entry.get('spatial',pd.DataFrame())
-    needed={'root_lot_id','wafer_id','chip_x_pos','chip_y_pos','_value','_recent'}
-    if raw.empty or not needed.issubset(raw):return None
-    if 'flat_zone' in raw and raw.flat_zone.nunique()>1:return None
-    if '_vehicle' in raw:raw=raw.loc[raw['_vehicle'].eq(entry['vehicle'])]
-    raw=raw.dropna(subset=list(needed)).copy()
-    raw['chip_x_pos']=pd.to_numeric(raw['chip_x_pos'],errors='coerce')
-    raw['chip_y_pos']=pd.to_numeric(raw['chip_y_pos'],errors='coerce')
-    raw=raw.dropna(subset=['chip_x_pos','chip_y_pos']).copy()
-    wafer=raw.groupby(['root_lot_id','wafer_id','_recent','chip_x_pos','chip_y_pos'])._value.median().reset_index()
-    roots=wafer.groupby(['root_lot_id','_recent','chip_x_pos','chip_y_pos'])._value.median().reset_index()
-    sites=roots.groupby(['_recent','chip_x_pos','chip_y_pos'])._value.median().reset_index()
-    if sites.empty:return None
-    fig,axes=plt.subplots(1,3,figsize=(12.4,2.6),layout='constrained')
+    if raw is None or raw.empty:raw=entry.get('points',pd.DataFrame())
+    if raw is None or raw.empty or '_value' not in raw:return pd.DataFrame()
+    raw=raw.copy()
+    if '_vehicle' in raw:raw=raw.loc[raw['_vehicle'].astype(str).eq(str(entry['vehicle']))]
+    lot='root_lot_id' if 'root_lot_id' in raw else 'fab_lot_id'
+    keys=[lot,'wafer_id']
+    if any(k not in raw for k in keys) or raw.empty:return pd.DataFrame()
+    if '_recent' not in raw:raw['_recent']=False
+    clock='_dc_time' if '_dc_time' in raw else ('_time' if '_time' in raw else None)
+    if clock:raw=raw.loc[raw[clock].eq(raw.groupby(keys)[clock].transform('max'))]
+    extra=[c for c in raw if c.startswith('__ml_')]+(['_knob'] if '_knob' in raw else [])
+    out=raw.groupby(keys,dropna=False).agg(y=('_value','median'),recent=('_recent','max'))
+    if extra:out=out.join(raw.groupby(keys,dropna=False)[extra].first())
+    return out.reset_index().rename(columns={lot:'lot'})
+
+
+def _mlv_trend(entry, settings, size, dpi):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    plt.rcParams['axes.unicode_minus']=False
+    fig,ax=plt.subplots(figsize=size)
     try:
-        norm=Normalize(sites._value.min(),sites._value.max());sc=None
-        for ax,recent in zip(axes[:2],[False,True]):
-            s=sites.loc[sites['_recent'].eq(recent)]
-            ax.set_title('New' if recent else 'History',fontsize=11)
-            if s.empty:ax.text(.5,.5,'No data',ha='center',transform=ax.transAxes);continue
-            sc=ax.scatter(s.chip_x_pos,s.chip_y_pos,c=s._value,cmap='viridis',norm=norm,marker='s',s=65)
-            ax.set_aspect('equal');ax.set_xlabel('Shot X');ax.set_ylabel('Shot Y')
-        if sc is not None:fig.colorbar(sc,ax=list(axes[:2]),shrink=.8,pad=.02)
-        roots['radius']=np.hypot(roots.chip_x_pos,roots.chip_y_pos)
-        for recent,g in roots.groupby('_recent'):
-            profile=g.groupby(['root_lot_id','radius'])._value.median().groupby('radius').median()
-            axes[2].plot(profile.index,profile.values,'o-',ms=3,label='New' if recent else 'History')
-        axes[2].set_title('Radius · root median',fontsize=11);axes[2].set_xlabel('Shot-origin radius (grid)');axes[2].legend(fontsize=9)
-        for ax in axes:ax.tick_params(labelsize=9)
-        stream=io.BytesIO();fig.savefig(stream,format='png',dpi=130);return stream.getvalue()
+        points=entry.get('points',pd.DataFrame())
+        valid=points.dropna(subset=['_time']) if not points.empty and '_time' in points else pd.DataFrame()
+        if valid.empty:
+            ax.text(.5,.5,'No timed measurements',ha='center',va='center',transform=ax.transAxes,color=ML_UI['muted'])
+        else:
+            rows=entry.get('_legend_rows') or _trend_legend_info(entry,settings)
+            entry['_legend_rows']=rows
+            colors={r['key']:r['color'] for r in rows}
+            keys=['_vehicle','_knob'] if '_vehicle' in valid else '_knob'
+            for key,group in valid.groupby(keys,sort=True):
+                color=colors.get(key,ML_UI['new'])
+                recent=group['_recent'].astype(bool) if '_recent' in group else pd.Series(False,index=group.index)
+                ax.scatter(group.loc[~recent,'_time'],group.loc[~recent,'_value'],s=5,alpha=.35,color=color,edgecolors='none',rasterized=True)
+                ax.scatter(group.loc[recent,'_time'],group.loc[recent,'_value'],s=11,color=color,edgecolors='black',linewidths=.45,zorder=4,rasterized=True)
+            daily=valid.groupby(valid['_time'].dt.floor('D'))['_value'].median().sort_index().rolling('3D',min_periods=1).mean()
+            ax.plot(daily.index,daily.values,color=ML_UI['ink'],lw=1.2,zorder=5)
+            low,high=np.nanpercentile(valid['_value'],[.5,99.5])
+            if np.isfinite(low) and np.isfinite(high) and high>low:
+                pad=(high-low)*.08;ax.set_ylim(low-pad,high+pad)
+            ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=3,maxticks=5))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
+        _mlv_axes(ax,'Trend  (black edge = new)',None,_mlv_ascii(entry.get('unit','')))
+        fig.tight_layout(pad=.35)
+        return _mlv_save(fig,dpi)
     finally:plt.close(fig)
 
 
-def _ml_influence_pack(entries,settings,title):
-    import io,html
+def _mlv_group_column(entry, wafers):
+    """Box 묶음 기준: 신호가 난 범주 인자 → Split(knob) → 과거/신규 순."""
+    for row in entry.get('_factors',{}).get('flagged',[]):
+        if row['kind']=='categorical' and '__ml_'+row['column'] in wafers:return '__ml_'+row['column'],row['column']
+    if '_knob' in wafers and wafers['_knob'].nunique()>1:return '_knob','Split'
+    return None,'History vs New'
+
+
+def _mlv_box(entry, wafers, size, dpi):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    plt.rcParams['axes.unicode_minus']=False
+    fig,ax=plt.subplots(figsize=size)
+    try:
+        if wafers.empty:
+            ax.text(.5,.5,'No wafer data',ha='center',va='center',transform=ax.transAxes,color=ML_UI['muted'])
+            _mlv_axes(ax,'Box');fig.tight_layout(pad=.35);return _mlv_save(fig,dpi)
+        column,label=_mlv_group_column(entry,wafers)
+        data=wafers.dropna(subset=['y']).copy()
+        data['g']=data[column].astype(str) if column else np.where(data['recent'].astype(bool),'New','History')
+        groups=sorted(data['g'].unique())[:12] if column else [g for g in ('History','New') if g in set(data['g'])]
+        for i,name in enumerate(groups):
+            color=(ML_UI['history'] if name=='History' else ML_UI['new']) if not column else ML_GROUP_COLORS[i%len(ML_GROUP_COLORS)]
+            values=data.loc[data['g'].eq(name)]
+            box=ax.boxplot([values['y']],positions=[i],widths=.5,patch_artist=True,showfliers=False,
+                           medianprops=dict(color=ML_UI['ink'],lw=1.2),whiskerprops=dict(color='#737373',lw=.8),capprops=dict(color='#737373',lw=.8))
+            box['boxes'][0].set_facecolor(color);box['boxes'][0].set_alpha(.22);box['boxes'][0].set_edgecolor(color)
+            jitter=((np.arange(len(values))*.6180339887)%1-.5)*.36
+            recent=values['recent'].astype(bool).to_numpy()
+            ax.scatter(i+jitter,values['y'],s=9,color=color,edgecolors=np.where(recent,'black','none'),linewidths=.5,zorder=3,alpha=.85)
+            ax.hlines(values['y'].quantile(.1),i-.3,i+.3,colors=ML_UI['accent'],lw=1,linestyles=':',zorder=4)
+        ax.set_xticks(range(len(groups)),[_mlv_ascii(g,22) for g in groups],rotation=0 if len(groups)<=6 else 25,ha='center' if len(groups)<=6 else 'right')
+        _mlv_axes(ax,f'Box by {_mlv_ascii(label)}  (wafer median, dotted = P10)',None,_mlv_ascii(entry.get('unit','')))
+        fig.tight_layout(pad=.35)
+        return _mlv_save(fig,dpi)
+    finally:plt.close(fig)
+
+
+def _mlv_geometry(entry):
+    """제품 좌표 파일이 있으면 보정 좌표(ADJ)로, 없으면 측정 격자로 — _ml_spatial_details 와 같은 규칙."""
+    import My_Function as wf
+    raw=entry.get('spatial',pd.DataFrame())
+    need={'chip_x_pos','chip_y_pos','_value','_recent'}
+    if raw is None or raw.empty or not need.issubset(raw):return None
+    group=raw.copy()
+    if '_vehicle' in group:group=group.loc[group['_vehicle'].astype(str).eq(str(entry['vehicle']))]
+    if 'flat_zone' in group and group['flat_zone'].nunique()>1:
+        group=group.loc[group['flat_zone'].eq(group['flat_zone'].mode().iloc[0])]
+    for c in ('chip_x_pos','chip_y_pos'):group[c]=pd.to_numeric(group[c],errors='coerce')
+    group=group.dropna(subset=['chip_x_pos','chip_y_pos','_value'])
+    if group.empty:return None
+    vehicle=entry['vehicle'];calibrated=False
+    layout=getattr(wf,'_CHIP_LAYOUT',None)
+    if layout is not None and {'MASK','CHIP_X_POS','CHIP_Y_POS','CHIP_X_ADJ','CHIP_Y_ADJ'}.issubset(layout):
+        chosen=layout.loc[layout.MASK.astype(str).eq(str(vehicle))].copy()
+        join={'CHIP_X_POS':'chip_x_pos','CHIP_Y_POS':'chip_y_pos'}
+        if 'flat_zone' in group and 'FLAT_ZONE_POS' in chosen:join['FLAT_ZONE_POS']='flat_zone'
+        cols=list(join)+['CHIP_X_ADJ','CHIP_Y_ADJ']+(['Chip_Radius'] if 'Chip_Radius' in chosen and 'Chip_Radius' not in group else [])
+        chosen=chosen[cols].rename(columns=join).drop_duplicates()
+        keys=list(join.values())
+        for key in keys:   # 좌표 파일은 숫자, DB 는 문자열일 수 있다 — 같은 형으로 맞춘 뒤 붙인다.
+            left=pd.to_numeric(group[key],errors='coerce');right=pd.to_numeric(chosen[key],errors='coerce')
+            if left.notna().all() and right.notna().all():group[key]=left;chosen[key]=right
+            else:group[key]=group[key].astype(str);chosen[key]=chosen[key].astype(str)
+        if len(chosen) and not chosen.duplicated(keys).any():
+            merged=group.merge(chosen,on=keys,how='left',validate='many_to_one')
+            merged=merged.dropna(subset=['CHIP_X_ADJ','CHIP_Y_ADJ'])
+            if not merged.empty:group=merged;calibrated=True
+    cx,cy=('CHIP_X_ADJ','CHIP_Y_ADJ') if calibrated else ('chip_x_pos','chip_y_pos')
+    circ=wf._wafer_circle_params(group,cx,cy,'Chip_Radius' if 'Chip_Radius' in group else None,main_vehicle=vehicle)
+    pitch=wf._wfmap_shot_pitch_xy(group,cx,cy,main_vehicle=vehicle)
+    limits=wf._wfmap_axis_limits(*wf._wfmap_grid_limits(group,cx,cy,main_vehicle=vehicle),circ)
+    lot='root_lot_id' if 'root_lot_id' in group else 'fab_lot_id'
+    return dict(frame=group,cx=cx,cy=cy,circ=circ,pitch=pitch,limits=limits,lot=lot,calibrated=calibrated)
+
+
+def _mlv_maps(entry, geometry, size, dpi):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize
+    import My_Function as wf
+    plt.rcParams['axes.unicode_minus']=False
+    fig,axes=plt.subplots(1,2,figsize=size)
+    try:
+        if geometry is None:
+            for ax,title in zip(axes,('New - site median','New minus History')):
+                ax.text(.5,.5,'No shot X/Y',ha='center',va='center',transform=ax.transAxes,color=ML_UI['muted']);ax.set_axis_off()
+                ax.set_title(title,fontsize=9,loc='left',fontweight='bold')
+            fig.tight_layout(pad=.35);return _mlv_save(fig,dpi)
+        g=geometry['frame'];cx,cy,lot=geometry['cx'],geometry['cy'],geometry['lot']
+        wafer=g.groupby([lot,'wafer_id','_recent',cx,cy])['_value'].median().reset_index()
+        roots=wafer.groupby([lot,'_recent',cx,cy])['_value'].median().reset_index()
+        site=roots.groupby(['_recent',cx,cy])['_value'].median().unstack('_recent')
+        new=site[True].dropna() if True in site else pd.Series(dtype=float)
+        delta=(site[True]-site[False]).dropna() if True in site and False in site else pd.Series(dtype=float)
+        panels=[(axes[0],new,'viridis','New - site median'),(axes[1],delta,'coolwarm','New minus History')]
+        for ax,series,cmap,title in panels:
+            ax.set_title(title,fontsize=9,loc='left',fontweight='bold',color=ML_UI['ink'],pad=3)
+            if series.empty:
+                ax.text(.5,.5,'No matched sites',ha='center',va='center',transform=ax.transAxes,color=ML_UI['muted'])
+            else:
+                xs=series.index.get_level_values(0);ys=series.index.get_level_values(1)
+                if cmap=='coolwarm':
+                    span=max(float(series.abs().max()),1e-12);norm=Normalize(-span,span)
+                else:norm=Normalize(float(series.min()),float(series.max()) if series.max()>series.min() else float(series.min())+1e-12)
+                shots=wf._draw_wfmap_shots(ax,xs,ys,*geometry['pitch'],values=series.values,cmap=cmap,norm=norm)
+                bar=fig.colorbar(shots,ax=ax,pad=.02,fraction=.05);bar.ax.tick_params(labelsize=7)
+            wf._add_wafer_circle(ax,geometry['circ'],color='#262626',lw=1.1,zorder=4)
+            limits=geometry['limits']
+            ax.set_xlim(limits[0],limits[1]);ax.set_ylim(limits[3],limits[2])
+            ax.set_aspect(wf._wfmap_aspect(geometry['circ']),adjustable='box')
+            ax.set_xticks([]);ax.set_yticks([])
+            for spine in ax.spines.values():spine.set_visible(False)
+        fig.tight_layout(pad=.35)
+        return _mlv_save(fig,dpi)
+    finally:plt.close(fig)
+
+
+def _mlv_radius(entry, geometry, size, dpi):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    plt.rcParams['axes.unicode_minus']=False
+    fig,ax=plt.subplots(figsize=size)
+    try:
+        if geometry is None:
+            ax.text(.5,.5,'No shot X/Y',ha='center',va='center',transform=ax.transAxes,color=ML_UI['muted'])
+        else:
+            g=geometry['frame'].copy();circ=geometry['circ'];lot=geometry['lot']
+            if 'Chip_Radius' in g and g['Chip_Radius'].notna().any():
+                g['radius']=pd.to_numeric(g['Chip_Radius'],errors='coerce');xlabel='Radius (mm)'
+            else:
+                g['radius']=np.hypot(g[geometry['cx']]-(circ[0] if circ else 0),g[geometry['cy']]-(circ[1] if circ else 0));xlabel='Radius (grid)'
+            g=g.dropna(subset=['radius'])
+            g['bin']=pd.cut(g['radius'],bins=min(10,max(2,g['radius'].nunique())),labels=False)
+            for recent,label,color in ((False,'History',ML_UI['history']),(True,'New',ML_UI['new'])):
+                part=g.loc[g['_recent'].astype(bool).eq(recent)]
+                if part.empty:continue
+                per=part.groupby([lot,'bin']).agg(r=('radius','median'),v=('_value','median')).reset_index()
+                profile=per.groupby('bin').agg(r=('r','median'),v=('v','median')).sort_values('r')
+                ax.plot(profile['r'],profile['v'],'o-',ms=3,lw=1.3,color=color,label=label)
+            ax.legend(fontsize=7,frameon=False,loc='best')
+            ax.set_xlabel(xlabel,fontsize=7.5)
+        _mlv_axes(ax,'Radius  (root-lot balanced median)',None,_mlv_ascii(entry.get('unit','')))
+        fig.tight_layout(pad=.35)
+        return _mlv_save(fig,dpi)
+    finally:plt.close(fig)
+
+
+def _mlv_cdf(entry, wafers, size, dpi):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    plt.rcParams['axes.unicode_minus']=False
+    fig,ax=plt.subplots(figsize=size)
+    try:
+        if wafers.empty:
+            ax.text(.5,.5,'No wafer data',ha='center',va='center',transform=ax.transAxes,color=ML_UI['muted'])
+        else:
+            for recent,label,color in ((False,'History',ML_UI['history']),(True,'New',ML_UI['new'])):
+                values=np.sort(wafers.loc[wafers['recent'].astype(bool).eq(recent),'y'].dropna().to_numpy(float))
+                if not len(values):continue
+                ax.step(values,np.arange(1,len(values)+1)/len(values)*100,where='post',color=color,lw=1.4,label=f'{label} (n={len(values)})')
+            ax.axhline(10,color=ML_UI['accent'],lw=.8,ls=':')
+            ax.legend(fontsize=7,frameon=False,loc='lower right')
+            ax.set_ylim(0,100)
+        _mlv_axes(ax,'Cumulative  (wafer median, dotted = 10%)',_mlv_ascii(entry.get('unit','')),'%')
+        fig.tight_layout(pad=.35)
+        return _mlv_save(fig,dpi)
+    finally:plt.close(fig)
+
+
+def _mlv_factor(entry, row, size, dpi):
+    """인자 1개 차트 — 수치: 산점 + x 구간별 P10/P50/P90(밑둥), 범주: 수준별 Box + P10."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    plt.rcParams['axes.unicode_minus']=False
+    fig,ax=plt.subplots(figsize=size)
+    try:
+        plot=row.get('plot',{})
+        x=plot.get('x',[]);y=np.asarray(plot.get('y',[]),dtype=float);recent=np.asarray(plot.get('recent',[]),dtype=bool)
+        tq=int(round(100*row.get('tail_quantile',.1)))
+        if row['kind']=='numeric':
+            x=np.asarray(x,dtype=float)
+            ax.scatter(x[~recent],y[~recent],s=10,color=ML_UI['history'],alpha=.6,edgecolors='none',label='History')
+            ax.scatter(x[recent],y[recent],s=14,color=ML_UI['new'],edgecolors='black',linewidths=.4,label='New',zorder=3)
+            profile=pd.DataFrame(row.get('profile',[]))
+            if not profile.empty:
+                for key,side in (('p10','low_tail'),('p50',None),('p90','high_tail')):
+                    hot=side in row['signals'] if side else False
+                    ax.plot(profile['x'],profile[key],'-o' if hot else '--',ms=3,lw=1.8 if hot else .9,
+                            color=ML_UI['accent'] if hot else ('#404040' if key=='p50' else '#a3a3a3'),zorder=4,
+                            label=(f'P{tq}' if key=='p10' else ('P50' if key=='p50' else f'P{100-tq}'))+(' (tail shift)' if hot else ''))
+            if 'r2' in row['signals'] and len(x)>2:
+                fit=np.polyfit(x,y,1);grid=np.linspace(np.nanmin(x),np.nanmax(x),50)
+                ax.plot(grid,np.polyval(fit,grid),color=ML_UI['ink'],lw=1.4,zorder=5,label='Linear fit')
+            head=f"R2={row.get('r2',0):.2f}  rho={row.get('spearman',0):+.2f}  n={row.get('wafers',0)} wafers / {row.get('lots',0)} lots"
+            _mlv_axes(ax,f"{row['family']} | {_mlv_ascii(row['column'],44)}",_mlv_ascii(row['column'],44),_mlv_ascii(entry.get('item',''),30))
+        else:
+            levels=sorted(set(map(str,x)))
+            for i,level in enumerate(levels):
+                mask=np.asarray([str(v)==level for v in x])
+                color=ML_GROUP_COLORS[i%len(ML_GROUP_COLORS)]
+                box=ax.boxplot([y[mask]],positions=[i],widths=.5,patch_artist=True,showfliers=False,
+                               medianprops=dict(color=ML_UI['ink'],lw=1.2),whiskerprops=dict(color='#737373'),capprops=dict(color='#737373'))
+                box['boxes'][0].set_facecolor(color);box['boxes'][0].set_alpha(.22);box['boxes'][0].set_edgecolor(color)
+                jitter=((np.arange(mask.sum())*.6180339887)%1-.5)*.36
+                ax.scatter(i+jitter,y[mask],s=10,color=color,edgecolors=np.where(recent[mask],'black','none'),linewidths=.45,alpha=.85,zorder=3)
+                hot='level_tail' in row['signals']
+                ax.hlines(np.quantile(y[mask],row.get('tail_quantile',.1)),i-.32,i+.32,colors=ML_UI['accent'] if hot else '#a3a3a3',
+                          lw=1.6 if hot else .9,linestyles='-' if hot else ':',zorder=4)
+            ax.set_xticks(range(len(levels)),[_mlv_ascii(v,18) for v in levels],rotation=0 if len(levels)<=5 else 25,ha='center' if len(levels)<=5 else 'right')
+            head=f"eps2={row.get('epsilon2',0):.2f}  {row.get('levels',0)} levels  n={row.get('wafers',0)} wafers / {row.get('lots',0)} lots"
+            _mlv_axes(ax,f"{row['family']} | {_mlv_ascii(row['column'],44)}",None,_mlv_ascii(entry.get('item',''),30))
+        ax.text(.01,.98,head,transform=ax.transAxes,fontsize=7,va='top',color='#404040',
+                bbox=dict(boxstyle='square,pad=.25',fc='white',ec='none',alpha=.85),zorder=6)
+        if row['kind']=='numeric':ax.legend(fontsize=6.5,frameon=False,loc='lower right',ncol=3)
+        fig.tight_layout(pad=.35)
+        return _mlv_save(fig,dpi)
+    finally:plt.close(fig)
+
+
+def _ml_item_render(entry, settings):
+    """한 항목의 차트 묶음(PPT 용 개별 그림 + 메일 용 합성 그림)."""
+    dpi=int(settings.get('chart_dpi',150))
+    wafers=_mlv_wafers(entry);geometry=_mlv_geometry(entry)
+    panels=dict(trend=_mlv_trend(entry,settings,(_ML_RW,1.95),dpi),
+                box=_mlv_box(entry,wafers,(_ML_LW,1.95),dpi),
+                map=_mlv_maps(entry,geometry,(_ML_LW-.2,2.3),dpi),
+                radius=_mlv_radius(entry,geometry,(_ML_RW,1.95),dpi),
+                cdf=_mlv_cdf(entry,wafers,(_ML_RW,2.2),dpi))
+    factors=[_mlv_factor(entry,row,(6.3,2.55),dpi) for row in entry.get('_factors',{}).get('flagged',[])]
+    return dict(panels=panels,factors=factors,sheet=_ml_compose_sheet(panels,dpi),
+                factor_sheet=_ml_compose_factors(factors) if factors else None,factor_columns=2 if len(factors)>1 else 1)
+
+
+def _ml_png_palette(image, colors=256):
+    """합성 그림을 팔레트 PNG 로 — 차트는 색 수가 적어 무손실에 가깝게 작아진다.
+    octree 는 적은 면적의 색(컬러바 끝·강조선)도 살린다(median-cut 은 viridis 노랑을 주황으로 뭉갰다)."""
+    import io
+    from PIL import Image
+    packed=image.convert('RGB').quantize(colors=colors,method=Image.Quantize.FASTOCTREE,dither=Image.Dither.NONE)
+    stream=io.BytesIO();packed.save(stream,format='PNG',optimize=True);return stream.getvalue()
+
+
+def _ml_compose_sheet(panels, dpi, width=1320):
+    """auto report 항목 페이지와 같은 배치로 5개 차트를 한 장에(메일 이미지 수 절약)."""
+    import io
+    from PIL import Image
+    load=lambda key:Image.open(io.BytesIO(panels[key])).convert('RGB')
+    px=lambda inch:int(round(inch*dpi))
+    gap=px(.08)
+    left=[load('box'),load('map')];right=[load('trend'),load('radius'),load('cdf')]
+    lw=max(im.width for im in left);rw=max(im.width for im in right)
+    height=max(sum(im.height for im in left)+gap,sum(im.height for im in right)+2*gap)
+    canvas=Image.new('RGB',(lw+gap+rw,height),'white')
+    y=0
+    for im in left:canvas.paste(im,(0,y));y+=im.height+gap
+    y=0
+    for im in right:canvas.paste(im,(lw+gap,y));y+=im.height+gap
+    if canvas.width>width:canvas=canvas.resize((width,int(canvas.height*width/canvas.width)),Image.Resampling.LANCZOS)
+    return _ml_png_palette(canvas)
+
+
+def _ml_compose_factors(images, width=1320):
+    import io
+    from PIL import Image
+    tiles=[Image.open(io.BytesIO(b)).convert('RGB') for b in images]
+    cols=2 if len(tiles)>1 else 1
+    tw=max(t.width for t in tiles);th=max(t.height for t in tiles)
+    rows=(len(tiles)+cols-1)//cols
+    canvas=Image.new('RGB',(tw*cols,th*rows),'white')
+    for i,tile in enumerate(tiles):canvas.paste(tile,((i%cols)*tw,(i//cols)*th))
+    target=width if cols==2 else width//2
+    if canvas.width>target:canvas=canvas.resize((target,int(canvas.height*target/canvas.width)),Image.Resampling.LANCZOS)
+    return _ml_png_palette(canvas)
+
+
+def _ml_item_state(entry):
+    """배지 문구·색 — ML 검정 신호 > 인자 신호 > Daily 판정 순."""
+    if entry.get('ml_findings'):return 'ML 신호',ML_UI['accent'],ML_UI['accent_bg']
+    if entry.get('_factors',{}).get('flagged'):return '인자 연관',ML_UI['info'],ML_UI['info_bg']
+    if entry.get('auto_findings'):return 'Daily 판정',ML_UI['warn'],ML_UI['warn_bg']
+    return '참고',ML_UI['muted'],ML_UI['subtle']
+
+
+def _ml_item_priority(entry):
+    findings=entry.get('ml_findings',[])
+    flagged=entry.get('_factors',{}).get('flagged',[])
+    return (0 if findings else 1,0 if flagged else 1,min([f['q'] for f in findings] or [1.]),-len(flagged),
+            entry['vehicle'],entry['category'],entry['item'],entry['step'])
+
+
+def _ml_chip(text, color, background):
+    import html
+    return ('<span style="display:inline-block;margin:0 6px 4px 0;padding:2px 8px;border:1px solid '+color+';color:'+color+
+            ';background:'+background+';font-size:12px;line-height:18px;border-radius:4px;white-space:nowrap">'+html.escape(str(text))+'</span>')
+
+
+def _ml_table_html(headers, rows, highlight=None, widths=None):
+    """flow 톤 표 — 헤더 옅은 회색, 줄 구분선만. highlight(i) 가 참이면 왼쪽 주황 막대."""
+    import html
+    esc=lambda v:html.escape(str(v))
+    out=('<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-size:12px;'
+         'line-height:1.5;font-family:'+_ML_FONT+';color:'+ML_UI['ink']+'"><tr>')
+    for i,h in enumerate(headers):
+        w=(' width="'+str(widths[i])+'"') if widths else ''
+        out+='<th'+w+' align="left" style="padding:6px 8px;background:'+ML_UI['subtle']+';color:'+ML_UI['muted']+';font-weight:600;border-bottom:1px solid '+ML_UI['line']+'">'+esc(h)+'</th>'
+    out+='</tr>'
+    for i,row in enumerate(rows):
+        hot=bool(highlight and highlight(i))
+        out+='<tr>'
+        for j,cell in enumerate(row):
+            edge='border-left:3px solid '+ML_UI['accent']+';' if hot and j==0 else ('border-left:3px solid transparent;' if j==0 else '')
+            raw=isinstance(cell,tuple)
+            out+=('<td style="'+edge+'padding:6px 8px;vertical-align:top;border-bottom:1px solid '+ML_UI['line']+';overflow-wrap:anywhere">'
+                  +(cell[0] if raw else esc(cell))+'</td>')
+        out+='</tr>'
+    if not rows:out+='<tr><td colspan="'+str(len(headers))+'" style="padding:10px 8px;color:'+ML_UI['muted']+'">해당 없음</td></tr>'
+    return out+'</table>'
+
+
+def _ml_factor_rows(entry, limit=12):
+    rows=[]
+    for row in entry.get('_factors',{}).get('rows',[])[:limit]:
+        text=_ml_factor_text(row)
+        rows.append([row['family'],row['column'],'수치' if row['kind']=='numeric' else '범주',text['metric'],
+                     format(text['q'],'.2g'),text['verdict']+((' — '+text['note']) if text['note'] else '')])
+    return rows
+
+
+def _ml_item_card(entry, render, settings, index, total):
+    import html
+    esc=lambda v:html.escape(str(v))
+    state,color,background=_ml_item_state(entry)
+    anchor=_trend_anchor(entry)
+    meta=' · '.join(str(v) for v in (entry['vehicle'],entry['category'],entry['step'],entry['program'],entry['temperature'],entry.get('unit','')) if str(v))
+    card=('<table role="presentation" id="'+anchor+'" width="100%" cellspacing="0" cellpadding="0" style="margin:0 0 20px;background:'+ML_UI['panel']+
+          ';border:1px solid '+ML_UI['line']+';border-radius:8px;border-collapse:separate"><tr><td style="padding:14px 16px 10px">'
+          '<a name="'+anchor+'"></a>'
+          '<div style="font-size:11px;color:'+ML_UI['muted']+';letter-spacing:.02em">ITEM '+str(index)+' / '+str(total)+'</div>'
+          '<div style="margin:2px 0 4px"><span style="font-size:18px;font-weight:700;color:'+ML_UI['ink']+'">'+esc(entry['item'])+'</span>'
+          '&nbsp;&nbsp;'+_ml_chip(state,color,background)+'</div>'
+          '<div style="font-size:12px;color:'+ML_UI['muted']+'">'+esc(meta)+' &nbsp;|&nbsp; N='+f"{entry.get('n',0):,}"+' · lot '+str(entry.get('lots',0))+' · 신규 lot '+str(entry.get('recent_lots',0))+'</div>')
+    chips=''
+    for f in entry.get('auto_findings',[])[:3]:chips+=_ml_chip('Daily · '+str(f['title'])[:40],ML_UI['warn'],ML_UI['warn_bg'])
+    for module in dict.fromkeys(f['module'] for f in entry.get('ml_findings',[])):chips+=_ml_chip('ML · '+_ml_module_label(module),ML_UI['accent'],ML_UI['accent_bg'])
+    for row in entry.get('_factors',{}).get('flagged',[]):
+        chips+=_ml_chip(row['column']+' · '+' / '.join(_ml_signal_label(s) for s in row['signals']),ML_UI['info'],ML_UI['info_bg'])
+    if chips:card+='<div style="margin-top:8px">'+chips+'</div>'
+    card+='</td></tr>'
+    card+=('<tr><td style="padding:0 8px"><img alt="'+esc(entry['item'])+' 차트" width="1000" style="display:block;width:100%;max-width:1320px;height:auto;margin:0 auto" src="'
+           +_img_datauri(render['sheet'])+'"></td></tr>')
+    card+=('<tr><td style="padding:4px 16px 0;font-size:11px;color:'+ML_UI['muted']+'">왼쪽: Box(인자·Split별 wafer 중앙값) · WF MAP(신규 / 신규−과거) &nbsp;|&nbsp; '
+           '오른쪽: Trend · Radius · Cumulative — auto report 항목 페이지와 같은 배치</td></tr>')
+    factors=entry.get('_factors',{})
+    card+='<tr><td style="padding:14px 16px 4px"><div style="font-size:14px;font-weight:700;margin-bottom:6px">ML_TABLE 인자 스크리닝</div>'
+    fam=factors.get('families',{})
+    if fam:
+        card+='<div style="margin-bottom:6px">'+''.join(_ml_chip(f"{k} {v['flagged']}/{v['tested']}",ML_UI['info'] if v['flagged'] else ML_UI['muted'],ML_UI['info_bg'] if v['flagged'] else ML_UI['subtle']) for k,v in sorted(fam.items()))+'</div>'
+    rows=_ml_factor_rows(entry)
+    card+=_ml_table_html(['계열','인자','종류','지표','q','판정 / 근거'],rows,highlight=lambda i:bool(entry['_factors']['rows'][i]['signals']),
+                         widths=[60,170,44,150,50,None])
+    if factors.get('skipped'):
+        card+='<div style="font-size:11px;color:'+ML_UI['muted']+';margin-top:4px">검사 제외: '+esc(' / '.join(factors['skipped'][:6]))+'</div>'
+    card+='</td></tr>'
+    if render.get('factor_sheet'):
+        wide=render.get('factor_columns',2)>1   # 인자 1개면 반폭으로(원본 해상도 이상으로 키우지 않는다)
+        card+=('<tr><td style="padding:6px 8px 0"><img alt="'+esc(entry['item'])+' 인자 차트" width="'+('1000' if wide else '500')+'" style="display:block;width:'+('100%' if wide else '50%')+';max-width:'+('1320' if wide else '660')+'px;height:auto;margin:0" src="'
+               +_img_datauri(render['factor_sheet'])+'"></td></tr>')
+        card+=('<tr><td style="padding:2px 16px 0;font-size:11px;color:'+ML_UI['muted']+'">수치 인자: 점 = wafer, 선 = x 구간별 P10 / P50 / P90 — 주황 선이 한쪽 꼬리만 움직이면 “밑둥 들림”. '
+               '범주 인자: 수준별 Box, 주황 가로선 = 수준별 P10.</td></tr>')
+    findings=entry.get('ml_findings',[])
+    card+='<tr><td style="padding:14px 16px 4px"><div style="font-size:14px;font-weight:700;margin-bottom:6px">탐지 근거</div>'
+    card+=_ml_table_html(['기법','무엇을 보는가','비교 / 근거','보정 q','효과 / 기준'],
+        [[_ml_module_label(f['module']),_ml_module_note(f['module'],settings),f['message'],f"{f['q']:.3g}",f"{f['effect']:.3g} / {f.get('minimum_effect','-')}"] for f in findings[:8]]
+        +[['Daily 판정',str(f.get('lot','')),str(f['title']),'-','-'] for f in entry.get('auto_findings',[])[:4]],widths=[130,220,None,60,90])
+    restrictions=list(dict.fromkeys(entry.get('warnings',[])))
+    if restrictions:card+='<div style="font-size:11px;color:'+ML_UI['warn']+';margin-top:6px">자료 제한: '+esc(' / '.join(restrictions[:6]))+'</div>'
+    card+='</td></tr><tr><td style="padding:8px 16px 12px;text-align:right;font-size:12px"><a href="#top" style="color:'+ML_UI['accent']+';text-decoration:none">목록으로 ↑</a></td></tr></table>'
+    return card
+
+
+def _ml_html(parts_entries, renders, settings, title, part_no, part_count, all_entries):
+    import html
+    esc=lambda v:html.escape(str(v))
+    analysis=settings.get('_analysis',{})
+    stamp=re.sub(r'(\d{2}:\d{2}):\d{2}(?:\.\d+)?',r'\1',str(settings.get('report_now','')))
+    body=('<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(title)+'</title></head>'
+          '<body style="margin:0;background:'+ML_UI['page']+'"><div id="top" style="font-family:'+_ML_FONT+';font-size:13px;color:'+ML_UI['ink']+
+          ';line-height:1.5;padding:20px 24px;background:'+ML_UI['page']+';max-width:1400px;margin:0 auto">')
+    body+=('<div style="font-size:11px;font-weight:700;color:'+ML_UI['accent']+';letter-spacing:.06em">AUTO REPORT · ML MODE <span style="font-weight:400;color:'+ML_UI['muted']+'">· 실험 기능</span></div>'
+           '<h1 style="margin:4px 0 2px;font-size:22px;font-weight:700;color:'+ML_UI['ink']+'">'+esc(title)+'</h1>'
+           '<div style="color:'+ML_UI['muted']+';font-size:12px">분석 시각 '+esc(stamp)+(' · 메일 '+str(part_no)+' / '+str(part_count) if part_count>1 else '')+'</div>'
+           '<div style="height:3px;background:'+ML_UI['accent']+';margin:12px 0 16px;width:64px"></div>')
+    flagged=sum(bool(e.get('ml_findings')) for e in all_entries)
+    related=sum(bool(e.get('_factors',{}).get('flagged')) for e in all_entries)
+    families={}
+    for e in all_entries:
+        for k,v in e.get('_factors',{}).get('families',{}).items():
+            f=families.setdefault(k,dict(tested=0,flagged=0));f['tested']+=v['tested'];f['flagged']+=v['flagged']
+    tiles=[('검토 항목',len(all_entries),ML_UI['ink']),('ML 신호',flagged,ML_UI['accent']),('인자 연관',related,ML_UI['info']),
+           ('통계 검정',analysis.get('statistical_tests',0),ML_UI['muted'])]
+    body+='<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:8px 0;margin:0 -8px 14px"><tr>'
+    body+=''.join('<td style="background:'+ML_UI['panel']+';border:1px solid '+ML_UI['line']+';border-radius:8px;padding:10px 14px"><div style="font-size:12px;color:'+ML_UI['muted']+'">'+esc(k)+
+                  '</div><div style="font-size:24px;font-weight:700;color:'+c+'">'+esc(v)+'</div></td>' for k,v,c in tiles)+'</tr></table>'
+    if families:
+        body+=('<div style="margin:0 0 12px"><span style="font-size:12px;color:'+ML_UI['muted']+';margin-right:8px">인자 계열 (신호 / 검사)</span>'
+               +''.join(_ml_chip(f"{k} {v['flagged']}/{v['tested']}",ML_UI['info'] if v['flagged'] else ML_UI['muted'],ML_UI['info_bg'] if v['flagged'] else ML_UI['panel']) for k,v in sorted(families.items()))+'</div>')
+    rows=[]
+    for i,e in enumerate(parts_entries,1):
+        state,color,background=_ml_item_state(e)
+        factor=' / '.join(r['column']+' · '+' '.join(_ml_signal_label(s) for s in r['signals']) for r in e.get('_factors',{}).get('flagged',[])[:2])
+        rows.append([(_ml_chip(state,color,background),),('<a href="#'+_trend_anchor(e)+'" style="color:'+ML_UI['ink']+';font-weight:700;text-decoration:none">'+esc(e['item'])+'</a>'
+                     '<div style="font-size:11px;color:'+ML_UI['muted']+'">'+esc(' · '.join(str(v) for v in (e['vehicle'],e['category'],e['step'],e['program'],e['temperature'])))+'</div>',),
+                     e.get('selection_reason') or _ml_finding_summary(e),factor or '-',f"{e.get('recent_lots',0)} / {e.get('lots',0)}"])
+    body+='<div style="background:'+ML_UI['panel']+';border:1px solid '+ML_UI['line']+';border-radius:8px;padding:12px 14px;margin-bottom:20px">'
+    body+='<div style="font-size:14px;font-weight:700;margin-bottom:6px">이 메일의 항목 '+str(len(parts_entries))+'개'+(f' <span style="font-weight:400;color:{ML_UI["muted"]};font-size:12px">(전체 {len(all_entries)}개 중)</span>' if len(all_entries)>len(parts_entries) else '')+'</div>'
+    body+=_ml_table_html(['상태','항목','선정 이유','인자 신호','신규 / 전체 lot'],rows,widths=[90,220,None,220,90])+'</div>'
+    for i,e in enumerate(parts_entries,1):body+=_ml_item_card(e,renders[id(e)],settings,i,len(parts_entries))
+    notes=['q 는 BH 보정 p 값이며 불량률이 아닙니다. 연관 신호는 원인 확정이 아닌 탐색 결과입니다.',
+           '인자 스크리닝 단위는 wafer(최신 측정 shot 중앙값)입니다. 같은 lot wafer 는 독립이 아니므로 유효 표본을 줄여 검정합니다.',
+           '“밑둥 들림” = x 가 변할 때 분포의 한쪽 꼬리(P'+str(int(round(100*float(settings.get('factor_tail_quantile',.1)))))+')만 움직이고 반대쪽은 그대로인 경우입니다.']
+    if settings.get('_influence_unavailable'):notes.append('ML join 행 상한 초과로 인자 연관 분석을 하지 못했습니다.')
+    if analysis.get('budget_limited'):notes.append('연산 상한에 도달해 일부 검정을 생략했습니다. 탐지 없음은 전체 정상 판정이 아닙니다.')
+    body+='<div style="font-size:11px;color:'+ML_UI['muted']+';border-top:1px solid '+ML_UI['line']+';padding-top:8px">'+'<br>'.join(esc(n) for n in notes)+'</div>'
+    return body+'</div></body></html>'
+
+
+def _ml_ppt(parts_entries, renders, settings, title):
+    import io
     from pptx import Presentation
     from pptx.util import Inches,Pt
     from pptx.dml.color import RGBColor
-    esc=lambda x:html.escape(str(x))
-    cache=[]
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.enum.text import PP_ALIGN,MSO_ANCHOR
+    from My_Function import _add_internal_slide_link
+    rgb=lambda h:RGBColor.from_string(h.lstrip('#'))
+    font=getattr(GLOBAL_CONFIG,'theme_font_family','Malgun Gothic')
+    prs=Presentation();prs.slide_width=Inches(13.333);prs.slide_height=Inches(7.5)
+
+    def text(slide,value,x,y,w,h,size=11,bold=False,color=ML_UI['ink'],align=None):
+        frame=slide.shapes.add_textbox(Inches(x),Inches(y),Inches(w),Inches(h)).text_frame
+        frame.word_wrap=True;frame.margin_left=frame.margin_right=frame.margin_top=frame.margin_bottom=0
+        for i,line in enumerate(str(value).split('\n')):
+            p=frame.paragraphs[0] if i==0 else frame.add_paragraph()
+            p.text=line;p.font.size=Pt(size);p.font.bold=bold;p.font.name=font;p.font.color.rgb=rgb(color)
+            if align:p.alignment=align
+        return frame
+
+    def header(slide,main,sub,badge=None):
+        text(slide,main,.3,.14,10.4,.45,20,True)
+        text(slide,sub,.3,.56,10.4,.28,10,False,ML_UI['muted'])
+        bar=slide.shapes.add_shape(MSO_SHAPE.RECTANGLE,Inches(.3),Inches(.86),Inches(.9),Inches(.04))
+        bar.fill.solid();bar.fill.fore_color.rgb=rgb(ML_UI['accent']);bar.line.fill.background()
+        if badge:
+            label,color,background=badge
+            shape=slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,Inches(11.35),Inches(.2),Inches(1.65),Inches(.36))
+            shape.fill.solid();shape.fill.fore_color.rgb=rgb(background);shape.line.color.rgb=rgb(color)
+            tf=shape.text_frame;tf.text=label;tf.vertical_anchor=MSO_ANCHOR.MIDDLE
+            p=tf.paragraphs[0];p.alignment=PP_ALIGN.CENTER;p.font.size=Pt(11);p.font.bold=True;p.font.color.rgb=rgb(color);p.font.name=font
+        text(slide,'AUTO REPORT · ML MODE (실험)',9.6,7.2,3.4,.2,8,False,ML_UI['muted'],PP_ALIGN.RIGHT)
+
+    def table(slide,rows,x,y,w,widths,size=9,row_h=.26,hot=None):
+        shape=slide.shapes.add_table(len(rows),len(rows[0]),Inches(x),Inches(y),Inches(w),Inches(row_h*len(rows)))
+        grid=shape.table
+        for j,width in enumerate(widths):grid.columns[j].width=Inches(width)
+        for i,row in enumerate(rows):
+            grid.rows[i].height=Inches(row_h)
+            for j,value in enumerate(row):
+                cell=grid.cell(i,j);cell.text=str(value)
+                cell.margin_left=cell.margin_right=Inches(.05);cell.margin_top=cell.margin_bottom=Inches(.02)
+                cell.fill.solid()
+                cell.fill.fore_color.rgb=rgb(ML_UI['subtle'] if i==0 else (ML_UI['accent_bg'] if hot and hot(i-1) else '#ffffff'))
+                for p in cell.text_frame.paragraphs:
+                    p.font.size=Pt(size);p.font.name=font;p.font.bold=i==0
+                    p.font.color.rgb=rgb(ML_UI['muted'] if i==0 else ML_UI['ink'])
+        return shape
+
+    def pic(slide,png,x,y,w,h=None):
+        if h is None:slide.shapes.add_picture(io.BytesIO(png),Inches(x),Inches(y),width=Inches(w))
+        else:slide.shapes.add_picture(io.BytesIO(png),Inches(x),Inches(y),Inches(w),Inches(h))
+
+    overview=prs.slides.add_slide(prs.slide_layouts[6])
+    header(overview,'ML Insight 요약',title)
+    links=[];item_slides={}
+    rows=[['#','항목','상태','선정 이유','인자 신호']]
+    for i,e in enumerate(parts_entries[:18],1):
+        factor=' / '.join(r['column'] for r in e.get('_factors',{}).get('flagged',[])[:3]) or '-'
+        rows.append([i,e['item']+' · '+e['step'],_ml_item_state(e)[0],(e.get('selection_reason') or _ml_finding_summary(e))[:90],factor[:60]])
+    summary=table(overview,rows,.3,1.05,12.7,[.4,3.3,1.1,5.3,2.6],9,.28)
+    if len(parts_entries)>18:text(overview,f'외 {len(parts_entries)-18}개 항목은 이어지는 페이지에서 확인하세요.',.3,1.1+.28*len(rows),12,.3,10,False,ML_UI['muted'])
+    for e in parts_entries:
+        state=_ml_item_state(e);render=renders[id(e)];p=render['panels']
+        slide=prs.slides.add_slide(prs.slide_layouts[6]);item_slides[id(e)]=slide
+        header(slide,e['item'],' · '.join(str(v) for v in (e['vehicle'],e['category'],e['step'],e['program'],e['temperature'],e.get('unit','')) if str(v)),state)
+        findings=e.get('ml_findings',[]);factors=e.get('_factors',{})
+        facts=[['구분','내용'],
+               ['선정 이유',(e.get('selection_reason') or '-')[:150]],
+               ['ML 근거',(' / '.join(dict.fromkeys(_ml_module_label(f['module'])+f" (q {f['q']:.2g})" for f in findings)) or 'ML 검정 추가 신호 없음')[:150]],
+               ['인자 신호',(' / '.join(r['column']+' · '+' '.join(_ml_signal_label(s) for s in r['signals']) for r in factors.get('flagged',[])) or '연관 신호 없음')[:150]],
+               ['자료',f"N={e.get('n',0):,} · lot {e.get('lots',0)} · 신규 lot {e.get('recent_lots',0)} · 검정 {e.get('ml_test_count',0)}회"]]
+        table(slide,facts,_ML_LX,.98,_ML_LW,[1.1,_ML_LW-1.1],9,.36)
+        pic(slide,p['box'],_ML_LX,2.9,_ML_LW,1.95)
+        pic(slide,p['map'],_ML_LX+.1,4.92,_ML_LW-.2,2.3)
+        pic(slide,p['trend'],_ML_RX,.98,_ML_RW,1.95)
+        pic(slide,p['radius'],_ML_RX,3.0,_ML_RW,1.95)
+        pic(slide,p['cdf'],_ML_RX,5.02,_ML_RW,2.2)
+        slide.notes_slide.notes_text_frame.text='\n'.join([e.get('selection_reason',''),_ml_finding_summary(e)]+[f['message'] for f in findings]+list(dict.fromkeys(e.get('warnings',[]))))
+        # 인자 스크리닝 페이지 — 표(계열별) + 신호 난 인자 차트 2개씩
+        charts=render['factors']
+        pages=max(1,(max(0,len(charts)-2)+3)//4+1)
+        for page in range(pages):
+            detail=prs.slides.add_slide(prs.slide_layouts[6])
+            header(detail,e['item']+' · ML_TABLE 인자 스크리닝',('KNOB·MASK·EQP = 범주(수준별 비교) / INLINE·VM = 수치(R²·밑둥 들림) · wafer 단위, BH 보정'
+                   +(f' · {page+1}/{pages}' if pages>1 else '')),state)
+            if page==0:
+                frows=_ml_factor_rows(e,8)
+                fr=[['계열','인자','종류','지표','q','판정 / 근거']]+[[r[0],r[1],r[2],r[3],r[4],r[5][:95]] for r in frows]
+                if len(fr)==1:fr.append(['-','-','-','-','-',('; '.join(factors.get('skipped',[])) or 'ML_TABLE 인자 없음')[:95]])
+                table(detail,fr,.3,1.02,12.7,[.8,2.3,.6,2.1,.6,6.3],9,.28,
+                      hot=lambda i:i<len(factors.get('rows',[])) and bool(factors['rows'][i]['signals']))
+                chunk=charts[:2];top=1.1+.28*len(fr)+.15
+                for j,png in enumerate(chunk):pic(detail,png,.3+6.4*j,top,6.3,min(2.55,7.1-top))
+                if not charts:text(detail,'신호가 난 인자가 없습니다 — 표의 지표는 참고값입니다.',.3,top+.2,12,.4,12,False,ML_UI['muted'])
+            else:
+                chunk=charts[2+(page-1)*4:2+page*4]
+                for j,png in enumerate(chunk):pic(detail,png,.3+6.4*(j%2),1.05+2.95*(j//2),6.3,2.55)
+    for i,e in enumerate(parts_entries[:18]):
+        cell=summary.table.cell(i+1,1).text_frame.paragraphs[0]
+        if cell.runs:_add_internal_slide_link(cell.runs[0],overview,item_slides[id(e)])
+    stream=io.BytesIO();prs.save(stream);return stream.getvalue()
+
+
+def _ml_report_pack(entries, settings, title):
+    """ML mode 발행물 — 항목당 이미지 ≤2장, 메일 1통 이미지·HTML·PPT 한도 안에서 나눈다."""
+    entries=sorted(entries,key=_ml_item_priority)
+    renders={};vehicle=None
+    for i,entry in enumerate(entries,1):
+        if entry.get('vehicle')!=vehicle:
+            vehicle=entry.get('vehicle')
+            try:GLOBAL_CONFIG.load_from_yaml(vehicle)   # 제품별 좌표·설정으로 그린다
+            except Exception:pass
+        renders[id(entry)]=_ml_item_render(entry,settings)
+        if i%10==0:print(f'[INFO] ML mode 항목 차트 {i}/{len(entries)}',flush=True)
+    limit=_mail_image_limit(settings)
+    html_cap=min(2_000_000,int(settings.get('html_max_bytes',2_000_000)))
+    ppt_cap=min(10_000_000,int(settings.get('ppt_max_bytes',10_000_000)))
+    cost=lambda e:1+(1 if renders[id(e)]['factor_sheet'] else 0)
+    groups=[];current=[]
     for entry in entries:
-        candidates=entry['_influence']['candidates']
-        panels=[_ml_candidate_chart(entry,c) for c in candidates]
-        spatial=[_ml_split_spatial(entry,c) for c in candidates]
-        cache.append((entry,panels,spatial))
-    def build(batch):
-        prs=Presentation();prs.slide_width=Inches(13.333);prs.slide_height=Inches(7.5);sections=[]
-        def text(slide,value,x,y,w,h,size=12):
-            tf=slide.shapes.add_textbox(Inches(x),Inches(y),Inches(w),Inches(h)).text_frame
-            # Long identifiers remain complete in slide notes and HTML.
-            value=str(value)
-            if h<=.6 and len(value)>int(w*9):
-                slide.notes_slide.notes_text_frame.text+='\n'+value
-                value=value[:max(1,int(w*9)-3)]+'...'
-            tf.word_wrap=True;tf.margin_left=tf.margin_right=tf.margin_top=tf.margin_bottom=0;tf.text=value
-            for p in tf.paragraphs:p.font.size=Pt(size)
-        def pic(slide,png,x,y,w):slide.shapes.add_picture(io.BytesIO(png),Inches(x),Inches(y),width=Inches(w))
-        def img(png):return '<img style="width:100%;height:auto;display:block" src="'+_img_datauri(png)+'">'
-        for entry,panels,maps in batch:
-            report=entry['_influence'];candidates=report['candidates']
-            label=' / '.join(str(entry.get(k,'')) for k in ['vehicle','item','step','program','temperature'])
-            slide=prs.slides.add_slide(prs.slide_layouts[6]);text(slide,label,.35,.15,12.6,.4,18)
-            summary=_ml_finding_summary(entry)
-            text(slide,summary[:230],.35,.6,12.6,.5,11)
-            pic(slide,entry['png'],.35,1.12,6.1)
-            headers=['# / factor','Evidence','effect / q / roots'];row_count=max(2,min(7,len(candidates)+1))
-            table=slide.shapes.add_table(row_count,3,Inches(6.65),Inches(1.15),Inches(6.25),Inches(.4*row_count)).table
-            table.columns[0].width=Inches(2.55);table.columns[1].width=Inches(1.8);table.columns[2].width=Inches(1.9)
-            rows=[headers]+[[f"{c['rank']} {c['column']}",c.get('match_label','time-adjusted corr'),f"{c['effect']:.2f} / {c['q']:.2g} / {c['n']}"] for c in candidates]
-            if not candidates:rows.append(['연관 후보 없음','탐지 변화는 유지','원인 미확정'])
-            for i in range(row_count):
-                for j in range(3):
-                    cell=table.cell(i,j);cell.text=rows[i][j] if i<len(rows) else ''
-                    cell.margin_top=cell.margin_bottom=Inches(.02)
-                    cell.fill.solid();cell.fill.fore_color.rgb=RGBColor.from_string('E8EDF3' if i==0 else ('FAFBFC' if i%2 else 'FFFFFF'))
-                    for p in cell.text_frame.paragraphs:p.font.size=Pt(10);p.font.color.rgb=RGBColor.from_string('172B43')
-            if row_count<=4:
-                text(slide,f"전체 {entry['lots']} lots / 신규 {entry.get('recent_lots',0)} lots / N={entry['n']}\n검정 실행 {entry.get('ml_test_count',0)}회 · 제외 사유는 HTML 자료 제한 확인",6.7,1.3+.4*row_count,6.1,.9,12)
-            for j,png in enumerate(panels[:2]):pic(slide,png,.35+6.4*j,4.05,6.15)
-            if not panels:text(slide,'유의한 연관 후보 없음 — 이상 탐지 결과는 유지됩니다. 제외 사유는 HTML/분석 JSON에서 확인하세요.',.5,4.4,12,1,16)
-            text(slide,'탐색적 연관성 · 인과 아님 | effect: 범주=순위 효과크기, 수치=시간 보정 상관 | 점/표본 수=root lot',.4,6.9,12.5,.3,10)
-            # Every candidate gets a readable detail page, including ranks 5+.
-            for c,png,sp in zip(candidates,panels,maps):
-                detail=prs.slides.add_slide(prs.slide_layouts[6])
-                text(detail,label+' · 연관 후보 #'+str(c['rank']),.35,.15,12.6,.4,18)
-                text(detail,c['column']+' / '+str(c['comparison']),.4,.65,12.4,.6,14)
-                pic(detail,png,.4,1.35,6.1)
-                evidence=(f"{c.get('match_label','시간 보정 상관')}\nroot lots={c['n']} / coverage={c['coverage']:.0%}\n"
-                          f"effect={c['effect']:.3g} / q={c['q']:.3g}\nclean roots={c.get('clean_roots',0)} / similar roots={c.get('similar_roots',0)}\n"
-                          '비교 조건과 lot 구성 확인 후 공정 이력을 대조하세요.')
-                text(detail,evidence,6.8,1.4,5.9,2.4,14)
-                if sp is not None:pic(detail,sp,.4,4.0,12.4)
-                else:text(detail,'공간 상세 없음: 공간 좌표 또는 비교 가능한 범주형 조건이 없습니다.',.4,4.3,12.3,.8,14)
-                detail.notes_slide.notes_text_frame.text+='\nMatched controls: '+', '.join(c.get('control_columns',[]))
-                text(detail,'탐색적 연관성 · 원인 확정 아님. 공간값은 raw 값, 검정은 root lot 요약값 기준.',.4,7.08,12.4,.25,10)
-            sections.append(_ml_compact_html(entry,panels,maps,settings))
-        body=_service_html_start(title,'', '')
-        body+=''.join(sections)+'</div></body></html>'
-        _assert_inline_images(body)
-        _service_deck_style(prs)
-        stream=io.BytesIO();prs.save(stream);return body,stream.getvalue()
-    result=[];batch=[]
-    for cached in cache:
-        proposed=batch+[cached];body,ppt=build(proposed)
-        if len(body.encode())>=min(2000000,int(settings.get('html_max_bytes',2000000))) or len(ppt)>=min(10000000,int(settings.get('ppt_max_bytes',10000000))):
-            if not batch:raise _DailyTrendLimit('ML 항목 상세가 용량 제한을 초과했습니다. influence_top_k를 줄이세요.')
-            b,p=build(batch);result.append((b,p,len(batch)));batch=[cached]
-        else:batch=proposed
-    if batch:
-        b,p=build(batch)
-        if len(b.encode())>=min(2000000,int(settings.get('html_max_bytes',2000000))) or len(p)>=min(10000000,int(settings.get('ppt_max_bytes',10000000))):raise _DailyTrendLimit('ML 단일 항목 용량 초과')
-        result.append((b,p,len(batch)))
-    if len(result)>min(10,int(settings.get('max_mail_parts',10))):raise _DailyTrendLimit('ML 메일 최대 분할 수 초과')
+        if cost(entry)>limit:raise _DailyTrendLimit('ML 항목 1개의 이미지 수가 메일 이미지 한도를 넘습니다. mail_inline_image_limit 을 확인하세요.')
+        if current and sum(map(cost,current))+cost(entry)>limit:groups.append(current);current=[]
+        current.append(entry)
+    if current:groups.append(current)
+    parts=[]
+    while groups:
+        group=groups.pop(0)
+        body=_ml_html(group,renders,settings,title,len(parts)+1,len(parts)+1+len(groups),entries)
+        ppt=_ml_ppt(group,renders,settings,title)
+        if len(body.encode('utf-8'))>=html_cap or len(ppt)>=ppt_cap:
+            if len(group)==1:raise _DailyTrendLimit('ML 단일 항목이 메일 용량 한도를 넘습니다.')
+            half=len(group)//2;groups[:0]=[group[:half],group[half:]];continue
+        parts.append([group,body,ppt])
+    if len(parts)>min(10,int(settings.get('max_mail_parts',10))):
+        raise _DailyTrendLimit(f'ML 메일이 {len(parts)}통으로 최대 분할 수를 넘습니다. 제품·candidate_source 범위를 줄이세요.')
+    result=[]
+    for i,(group,body,ppt) in enumerate(parts,1):
+        # 번호(메일 i/N)는 최종 분할 수로 다시 그린다.
+        body=_ml_html(group,renders,settings,title,i,len(parts),entries)
+        images=_assert_inline_images(body)
+        if images>limit:raise ValueError(f'ML 메일 본문 이미지 {images}장 > 한도 {limit}장')
+        result.append((body,ppt,len(group)))
+    print(f'[INFO] ML mode: {len(entries)} items / {len(result)} mail parts / 본문 이미지 ≤ {limit}장/통')
     return result
 
 
@@ -3095,24 +3765,80 @@ def _trend_anchor(entry):
 def _daily_summary(entries, settings):
     import html
     esc=lambda v:html.escape(str(v))
+    def when(value):
+        try:return pd.Timestamp(value).strftime('%m-%d %H:%M')
+        except Exception:return str(value)
     flagged=[e for e in entries if e.get('auto_findings')]
-    body=_service_metrics([('24시간 측정 항목·조건',len(entries),'#003366'),('이상·주의 항목',len(flagged),'#b4232d')])
-    body+='<p>측정 구간: '+esc(settings.get('highlight_since',''))+' ~ '+esc(settings.get('report_now',''))+'. 검정 테두리는 이 구간의 측정입니다. 과거 측정은 비교 배경이며, 아래 판정은 Auto Report와 같은 분석 함수와 제품 설정을 사용합니다.</p>'
-    body+=_service_heading('Auto Report 기준 이상·주의 · 항목 클릭 시 차트로 이동','daily-findings')
-    if not flagged:body+='<p>최근 24시간 측정에서 이상·주의 신호가 없습니다.</p>'
-    for e in flagged:
-        body+='<p style="margin:8px 0"><a style="color:#0055aa;font-weight:bold" href="#'+_trend_anchor(e)+'">'+esc(e['vehicle']+' / '+e['category']+' / '+e['item']+' / '+e['step']+' / '+e['program']+' / '+str(e['temperature']))+'</a> · '+esc(_trend_review(e)[0])+'<br>'+esc(' / '.join(dict.fromkeys(f['lot']+': '+f['title'] for f in e['auto_findings'])))+'</p>'
+    critical=[e for e in flagged if _trend_review(e)[0]=='이상']
+    body=_service_metrics([('24시간 측정 항목·조건',len(entries),'#003366'),('이상',len(critical),'#b4232d'),
+                           ('주의',len(flagged)-len(critical),'#b45309'),('이상·주의 없음',len(entries)-len(flagged),'#178A43')])
+    body+=('<p style="font-size:13px">하이라이트 구간: <b>'+esc(when(settings.get('highlight_since','')))+' ~ '+esc(when(settings.get('report_now','')))
+           +'</b> — 차트의 노란 띠·검정 테두리 점이 이 구간 측정입니다. 판정은 Auto Report 와 같은 분석 함수·제품 설정을 씁니다.</p>')
+    body+=_service_heading('이상·주의 항목 · 항목명을 누르면 차트로 이동','daily-findings')
+    if not flagged:
+        body+='<p style="padding:8px 12px;background:#ecf8ef;color:#178A43;font-weight:700">최근 24시간 측정에서 이상·주의 신호가 없습니다.</p>'
+    else:
+        # 한 줄 = 한 항목: 판정 배지 · 카테고리 · 항목(링크) · Lot · 근거. 이상을 위로.
+        rows=''
+        for e in sorted(flagged,key=lambda e:(_trend_review(e)[0]!='이상',e['category'],e['item'])):
+            state,color,_=_trend_review(e)
+            lots=', '.join(dict.fromkeys(f['lot'] for f in e['auto_findings']))
+            basis=' / '.join(dict.fromkeys(f['title'] for f in e['auto_findings']))
+            rows+=('<tr><td style="padding:4px 8px;border-bottom:1px solid #e5e5e5"><span style="color:#fff;background:'+color+';padding:1px 7px;font-weight:700;font-size:12px">'+esc(state)+'</span></td>'
+                   '<td style="padding:4px 8px;border-bottom:1px solid #e5e5e5;color:#444">'+esc(e['category'])+'</td>'
+                   '<td style="padding:4px 8px;border-bottom:1px solid #e5e5e5"><a style="color:#0055aa;font-weight:700" href="#'+_trend_anchor(e)+'">'+esc(e['item'])+'</a>'
+                   '<div style="color:#555;font-size:11px">'+esc(' · '.join(str(v) for v in (e['vehicle'],e['step'],e['program'],e['temperature'])))+'</div></td>'
+                   '<td style="padding:4px 8px;border-bottom:1px solid #e5e5e5">'+esc(lots)+'</td>'
+                   '<td style="padding:4px 8px;border-bottom:1px solid #e5e5e5;color:#333">'+esc(basis[:220])+'</td></tr>')
+        body+=('<table cellspacing="0" style="border-collapse:collapse;font-size:13px;width:100%"><tr style="background:#e8edf3;color:#003366;text-align:left">'
+               +''.join('<th style="padding:5px 8px">'+h+'</th>' for h in ('판정','카테고리','항목','Lot','근거'))+'</tr>'+rows+'</table>')
     skipped=[r for r in settings.get('_coverage',[]) if r['status']!='ok']
     if skipped:body+='<p style="color:#8a3800">발행 생략: '+esc(' / '.join(r['vehicle']+': '+r.get('reason',r['status']) for r in skipped))+'</p>'
     return body
+
+
+def _mail_image_limit(settings=None):
+    """메일 1통 본문 <img> 상한. 사내 메일 API 는 본문 인라인 이미지를 첨부로 떼어 세는 경우가 있어
+    '첨부 + 이미지'가 mail_attach_limit(기본 10)을 넘으면 'Attach file count is over 10' 으로 발송을 거부한다.
+    기본 = 한도 − PPT 1개 − 여유 1개 = 8장."""
+    settings=settings or {}
+    attach=int(settings.get('mail_attach_limit') or GLOBAL_CONFIG.get('mail_attach_limit',10) or 10)
+    value=settings.get('mail_image_limit') or GLOBAL_CONFIG.get('mail_inline_image_limit') or attach-2
+    return max(1,min(int(value),attach-1))
+
+
+def _daily_strip_uri(entries, columns, settings, width=1320):
+    """한 줄의 Daily 차트들을 가로 띠 이미지 1장으로(칸 폭 = width/columns). 띠 단위로 캐시한다."""
+    import io
+    from PIL import Image
+    cache=settings.setdefault('_strip_cache',{})
+    key=tuple(id(e) for e in entries)+(columns,)
+    if key in cache:return cache[key]
+    cap=int(getattr(GLOBAL_CONFIG,'html_inline_img_max_kb',100) or 100)*1024
+    charts=[Image.open(io.BytesIO(e['png'])).convert('RGB') for e in entries]
+    spatial=len(entries)==1 and ' / spatial / ' in str(entries[0].get('item',''))
+    cell=width if spatial else width//columns
+    for attempt in range(6):
+        scaled=[c.resize((cell,max(1,round(c.height*cell/c.width))),Image.Resampling.LANCZOS) if c.width>cell else c for c in charts]
+        canvas=Image.new('RGB',(sum(max(cell,c.width) for c in scaled),max(c.height for c in scaled)),'white')
+        x=0
+        for c in scaled:canvas.paste(c,(x,0));x+=max(cell,c.width)
+        packed=io.BytesIO()
+        canvas.quantize(colors=256,method=Image.Quantize.FASTOCTREE,dither=Image.Dither.NONE).save(packed,format='PNG',optimize=True)
+        if packed.tell()<=cap:break
+        cell=int(cell*.88)
+    else:
+        raise _DailyTrendLimit('차트 한 줄 이미지가 인라인 이미지 한도를 초과했습니다. html_columns 또는 항목 범위를 조정해 주세요.')
+    uri=_img_datauri(packed.getvalue());cache[key]=uri
+    return uri
 
 
 def _daily_trend_pack(entries, settings, title):
     """Try one PPT/mail first; split by measured PPT/HTML bytes, never by dropping items."""
     if settings.get('service')=='mlmode' and entries:
         owners=[e for e in entries if not e.get('parent_item')]
-        for e in owners:e.setdefault('_influence',dict(candidates=[],skipped=[]))
-        return _ml_influence_pack(owners,settings,title)
+        for e in owners:e.setdefault('_factors',dict(rows=[],flagged=[],skipped=[],families={}))
+        return _ml_report_pack(owners,settings,title)
     import io,html
     from pptx import Presentation
     from pptx.util import Inches,Pt
@@ -3209,34 +3935,23 @@ def _daily_trend_pack(entries, settings, title):
                    entry['n'],entry['lots'],entry.get('recent_lots',0),entry['reason'],' / '.join(entry['warnings']),i+1 if ml_mode else i//2+1]
             if settings.get('service')!='mlmode':cells.insert(9,pct)
             rows.append('<tr>'+''.join('<td>'+html.escape(str(c))+'</td>' for c in cells)+'</tr>')
-            uri=entry.get('_inline_uri')
-            if uri is None:
-                if settings.get('service')=='daily_trend' and len(entry['png'])>int(getattr(GLOBAL_CONFIG,'html_inline_img_max_kb',100) or 100)*1024:
-                    raise _DailyTrendLimit('차트 한 장이 인라인 이미지 한도를 초과했습니다. 항목/범위를 조정해 주세요. 화질은 자동으로 낮추지 않습니다.')
-                uri=_img_datauri(entry['png']);entry['_inline_uri']=uri
-            card_layout='max-width:1080px;margin:0 auto;' if settings.get('service')=='mlmode' else 'margin:0;'
-            reading=''
-            if ml_mode:
-                legend_html=' '.join('<span style="display:inline-block;margin:2px 12px 2px 0;color:#161616">'
-                                     '<span style="color:'+r['color']+'">●</span> '+html.escape(r['label'])+'</span>'
-                                     for r in entry.get('_legend_rows',[]))
-                reading='<div style="padding:8px 12px;font-size:13px;line-height:1.6">'+legend_html+'<p style="margin:6px 0">'+html.escape(_ml_reading_note(entry))+'</p>'
-                reading+=f"<p style='margin:4px 0'>N={entry['n']:,} / lots={entry['lots']} / 신규 lots={entry.get('recent_lots',0)}</p>"
-                if entry['warnings']:reading+='<p style="margin:4px 0;color:#8a3800">확인 사항: '+html.escape(' / '.join(dict.fromkeys(entry['warnings'])))+'</p>'
-                reading+='</div>'
-            else:
-                state,color,_=_trend_review(entry)
-                reading='<div style="padding:8px 10px;font-size:12px;line-height:1.6"><b style="color:'+color+'">'+html.escape(state)+'</b> · 최근 24시간 '+str(entry.get('recent_lots',0))+' lots / '+str(entry.get('recent_n',0))+'점'
-                if entry.get('auto_findings'):
-                    reading+='<ul style="margin:4px 0;padding-left:18px">'+''.join('<li>'+html.escape(f['lot']+' · '+f['title']+' — '+str(f.get('detail','')))+'</li>' for f in entry['auto_findings'])+'</ul>'
-                if entry['warnings']:reading+='<p style="color:#8a3800;margin:4px 0">'+html.escape(' / '.join(dict.fromkeys(entry['warnings'])))+'</p>'
-                reading+='</div>'
+            # 메일 본문 그림은 '한 줄(html_columns 칸) = 이미지 1장' 띠로 합친다(아래 _daily_strip_uri).
+            # 사내 메일 API 는 본문 인라인 이미지를 첨부로 떼어 첨부 10개 한도에 셀 수 있다(Attach file count is over 10).
+            if settings.get('service')=='daily_trend' and len(entry['png'])>int(getattr(GLOBAL_CONFIG,'html_inline_img_max_kb',100) or 100)*1024:
+                raise _DailyTrendLimit('차트 한 장이 인라인 이미지 한도를 초과했습니다. 항목/범위를 조정해 주세요. 화질은 자동으로 낮추지 않습니다.')
+            state,color,_=_trend_review(entry)
+            reading='<div style="padding:8px 10px;font-size:12px;line-height:1.6"><b style="color:'+color+'">'+html.escape(state)+'</b> · 최근 24시간 '+str(entry.get('recent_lots',0))+' lots / '+str(entry.get('recent_n',0))+'점'
+            if entry.get('auto_findings'):
+                reading+='<ul style="margin:4px 0;padding-left:18px">'+''.join('<li>'+html.escape(f['lot']+' · '+f['title']+' — '+str(f.get('detail','')))+'</li>' for f in entry['auto_findings'])+'</ul>'
+            if entry['warnings']:reading+='<p style="color:#8a3800;margin:4px 0">'+html.escape(' / '.join(dict.fromkeys(entry['warnings'])))+'</p>'
+            reading+='</div>'
             anchor=_trend_anchor(entry)
-            cards.append('<section id="'+anchor+'" style="'+card_layout+'border:1px solid #cbd5df;border-radius:0;overflow:hidden;background:white"><a name="'+anchor+'"></a>'
-                         '<h3 style="margin:0;padding:4px 6px;background:#e8edf3;color:#003366;font-size:14px;font-weight:600;line-height:18px">'+html.escape(entry['category']+' · '+entry['item']+' / '+entry['step']+' / '+entry['program']+' / '+str(entry['temperature']))+'</h3>'
-                         '<img alt="'+html.escape(label,quote=True)+'" width="700" style="display:block;width:100%;max-width:100%;height:auto" src="'+uri+'">'
-                         +reading+'</section>')
-            categories.setdefault((entry['vehicle'],entry['category']),[]).append((cards[-1],spatial,entry))
+            # 항목명을 크게, 조건(카테고리·Step·프로그램·온도·단위)은 작게, 판정은 색 배지로 — 격자에서도 무슨 차트인지 바로 읽힌다.
+            header=('<div id="'+anchor+'" style="padding:5px 8px;background:#e8edf3;border:1px solid #cbd5df"><a name="'+anchor+'"></a>'
+                    '<span style="float:right;font-size:11px;font-weight:700;color:#fff;background:'+color+';padding:1px 6px">'+html.escape(state.split(' ')[0])+'</span>'
+                    '<div style="color:#003366;font-size:15px;font-weight:700;line-height:19px">'+html.escape(entry['item'])+'</div>'
+                    '<div style="color:#444;font-size:11px;line-height:15px">'+html.escape(' · '.join(str(v) for v in (entry['category'],entry['step'],entry['program'],entry['temperature'],entry.get('unit','')) if str(v)))+'</div></div>')
+            categories.setdefault((entry['vehicle'],entry['category']),[]).append(dict(header=header,reading=reading,spatial=spatial,entry=entry,label=label))
         for entry,rest in overflow:
             for start in range(0,len(rest),18):
                 slide=prs.slides.add_slide(prs.slide_layouts[6])
@@ -3248,46 +3963,44 @@ def _daily_trend_pack(entries, settings, title):
         body=_service_html_start(title,'이상 후보의 탐지 근거와 후속 검토' if ml_mode else '',str(settings.get('report_now','')))
         body+=_daily_summary(batch,settings)
         body+='<nav style="padding:8px 0;border-bottom:1px solid #e0e0e0">'+ ' &nbsp; '.join('<a style="color:#0f62fe;font-size:14px;display:inline-block;padding:4px 8px" href="#cat'+str(i)+'">'+html.escape('/'.join(key))+' ('+str(len(group))+')</a>' for i,(key,group) in enumerate(categories.items()))+'</nav>'
+        columns=max(1,min(3,int(settings.get('html_columns',3))))
+        images=0
         for i,(key,group) in enumerate(categories.items()):
-            body+='<div class="trend-category"><h2 id="cat'+str(i)+'" style="position:sticky;top:0;z-index:5;font-size:16px;font-weight:600;background:'+category_fill[key]+';border-left:3px solid #0f62fe;padding:8px;margin:16px 0 4px">'+html.escape(' / '.join(key))+' · '+str(len(group))+' <a href="#top" style="float:right;color:#0f62fe;font-size:12px;font-weight:400">목록 ↑</a></h2><table role="presentation" width="100%" style="table-layout:fixed;border-spacing:4px">'
-            columns=max(1,min(2,int(settings.get('html_columns',2))))
-            used=0;body+='<tr>'
-            for card,spatial,card_entry in group:
-                # ML gives each item a large trend row, followed by its spatial panels.
-                span=columns if settings.get('service')=='mlmode' else (min(3,columns) if spatial else 1)
-                if used+span>columns:
-                    if used<columns:body+='<td colspan="'+str(columns-used)+'"></td>'
-                    body+='</tr><tr>';used=0
-                body+='<td colspan="'+str(span)+'" width="'+str(100*span/columns)+'%" style="vertical-align:top">'+card+'</td>'
-                used+=span
-                if used==columns:body+='</tr><tr>';used=0
-                if settings.get('service')=='mlmode':
-                    current=card_entry.get('parent_item',card_entry['item'])
-                    index=next(j for j,v in enumerate(group) if v[2] is card_entry)
-                    next_item=group[index+1][2].get('parent_item',group[index+1][2]['item']) if index+1<len(group) else None
-                    if next_item!=current:
-                        if used:body+='<td colspan="'+str(columns-used)+'"></td></tr><tr>';used=0
-                        owner=next((v[2] for v in group if v[2]['item']==current),card_entry)
-                        findings=owner.get('ml_findings',[])
-                        names={'isolation_forest':'Isolation Forest 이상 증가','local_outlier_factor':'주변 패턴 대비 이상 증가','spatial_pattern':'웨이퍼 공간 패턴 변화','time_trend':'시간 추이 변화','split_difference':'Split 간 차이','equipment_difference':'장비 간 차이','spike_rate':'극단값 비율 증가'}
-                        summary=' · '.join(dict.fromkeys(names.get(f['module'],f['module']) for f in findings)) or owner['reason']
-                        body+='<td colspan="'+str(columns)+'" style="padding:8px 12px;background:#f4f4f4;font-size:13px"><b>'+html.escape(current)+' 탐지 근거</b> — '+html.escape(summary)
-                        if findings:body+=' (보정 q 최소 '+format(min(f['q'] for f in findings),'.3g')+')'
-                        body+='</td></tr><tr>'
-            if used:body+='<td colspan="'+str(columns-used)+'"></td>'
-            body+='</tr>'
+            body+='<div class="trend-category"><h2 id="cat'+str(i)+'" style="position:sticky;top:0;z-index:5;font-size:16px;font-weight:600;background:'+category_fill[key]+';border-left:3px solid #0f62fe;padding:8px;margin:16px 0 4px">'+html.escape(' / '.join(key))+' · '+str(len(group))+' <a href="#top" style="float:right;color:#0f62fe;font-size:12px;font-weight:400">목록 ↑</a></h2><table role="presentation" width="100%" style="table-layout:fixed;border-spacing:4px 0">'
+            # 한 줄 = 머리글 칸들 / 차트 띠(이미지 1장) / 판정 칸들. 공간 상세는 한 줄을 혼자 쓴다.
+            lines=[];line=[]
+            for card in group:
+                if card['spatial'] or len(line)==columns:
+                    if line:lines.append(line)
+                    line=[]
+                line.append(card)
+                if card['spatial']:lines.append(line);line=[]
+            if line:lines.append(line)
+            for line in lines:
+                spans=[columns if c['spatial'] else 1 for c in line]
+                used=sum(spans);pad='<td colspan="'+str(columns-used)+'"></td>' if used<columns else ''
+                body+='<tr>'+''.join('<td colspan="'+str(n)+'" width="'+str(100*n/columns)+'%" style="vertical-align:top;padding-top:8px">'+c['header']+'</td>' for c,n in zip(line,spans))+pad+'</tr>'
+                uri=_daily_strip_uri([c['entry'] for c in line],columns,settings)
+                label=' | '.join(c['label'] for c in line)
+                body+=('<tr><td colspan="'+str(columns)+'" style="padding:0"><img alt="'+html.escape(label,quote=True)+'" width="'+str(int(1000*used/columns))+
+                       '" style="display:block;width:'+str(round(100*used/columns,3))+'%;height:auto" src="'+uri+'"></td></tr>')
+                images+=1
+                body+='<tr>'+''.join('<td colspan="'+str(n)+'" style="vertical-align:top;border:1px solid #cbd5df;border-top:0;background:white">'+c['reading']+'</td>' for c,n in zip(line,spans))+pad+'</tr>'
             body+='</table></div>'
         body+='</div></body></html>'
-        _assert_inline_images(body, len(batch))
+        _assert_inline_images(body, images)
         _service_deck_style(prs)
         from My_Function import _add_internal_slide_link
         for run,source,anchor in summary_links:_add_internal_slide_link(run,source,item_slides[anchor])
         stream=io.BytesIO();prs.save(stream);ppt=stream.getvalue()
         return body,ppt
+    image_limit=_mail_image_limit(settings)
     def fits(body,ppt):
         # Independent artifact limits: inline base64 is already included in HTML bytes.
+        # 본문 이미지 수도 한도 — 넘으면 다음 메일로 나눈다(메일 API 첨부 개수 제한).
         return (len(ppt)<min(10_000_000,int(settings.get('ppt_max_bytes',10_000_000))) and
-                len(body.encode('utf-8'))<min(2_000_000,int(settings.get('html_max_bytes',2_000_000))))
+                len(body.encode('utf-8'))<min(2_000_000,int(settings.get('html_max_bytes',2_000_000))) and
+                len(re.findall(r'<img\s',body))<=image_limit)
     if not entries:raise ValueError('Daily Trend: 선택 제품에 CAT2 항목이 없습니다')
     parts=[];remaining=sorted(entries,key=lambda e:_trend_category_key(e,settings))
     while remaining:
@@ -3385,6 +4098,9 @@ def _daily_trend_report(request):
             if service=='daily_trend':
                 product_entries=[e for e in product_entries if e.get('recent_n',0)>0]
                 product_entries=daily_auto_findings(product_entries,formatter)
+            elif vehicle in products and _ml_candidate_source(settings)!='ml':
+                # ML 은 Daily Trend 가 이상·주의로 본 항목을 자세히 파고든다 → 같은 판정 함수로 후보 표시.
+                product_entries=daily_auto_findings(product_entries,formatter)
             source_entries[vehicle]=product_entries
             coverage.append(dict(vehicle=vehicle,status='ok' if product_entries else 'no_recent_data',items=len(product_entries),
                                  viewing_period=GLOBAL_CONFIG.get('viewing_period',30)))
@@ -3413,12 +4129,33 @@ def _daily_trend_report(request):
         analysis={}
         catalog_entries=entries
         if service=='mlmode':
-            entries,analysis=ml_trend_select(entries,settings)
+            # candidate_source: daily=Daily Trend 이상·주의 항목만 ML 상세 분석(가장 가볍다) /
+            #                   ml=모든 항목을 ML 로 선별(예전 방식) / either=둘 중 하나라도 해당(기본)
+            source=_ml_candidate_source(settings)
+            pool=[e for e in entries if e.get('auto_findings')] if source=='daily' else entries
+            entries,analysis=ml_trend_select(pool,settings)
+            chosen={id(e) for e in entries}
+            if source in ('daily','either'):
+                for e in pool:
+                    if e.get('auto_findings') and id(e) not in chosen:
+                        e.setdefault('warnings',[]).append('ML 검정에서는 추가 근거 없음 — Daily Trend 판정으로 포함')
+                        entries.append(e)
+            for e in entries:
+                reasons=[]
+                if e.get('auto_findings'):
+                    reasons.append('Daily 판정: '+', '.join(dict.fromkeys(f['title'] for f in e['auto_findings']))[:160])
+                if e.get('ml_findings'):
+                    reasons.append('ML: '+', '.join(dict.fromkeys(_ml_module_label(f['module']) for f in e['ml_findings'])))
+                e['selection_reason']=' · '.join(reasons)
+            analysis['candidate_source']=source
             if settings.get('influence_enabled',True):analysis['influence']=ml_influence_analyze(entries,settings)
             else:
                 for entry in entries:entry['_influence']=dict(candidates=[],skipped=[])
+            # ML_TABLE 인자 스크리닝(KNOB·MASK·EQP 범주 / INLINE·VM 수치 R²·밑둥 들림) — 리포트 본문의 인자 차트 근거.
+            if settings.get('factor_screen_enabled',True):analysis['factors']=ml_factor_screen(entries,settings)
         settings['_coverage']=coverage;settings['_analysis']=analysis
-        entries.sort(key=lambda e:(e['vehicle'],e['category'],e['item'],e['step'],e['program'],e['temperature']))
+        # ML: 같은 카테고리 안에서 ML 기법이 잡은 항목을 먼저(가장 볼 가치가 큰 것부터).
+        entries.sort(key=lambda e:(e['vehicle'],e['category'],service=='mlmode' and not e.get('ml_findings'),e['item'],e['step'],e['program'],e['temperature']))
         plot_entries=[]
         _chart_vehicle=None
         for i,entry in enumerate(entries,1):
@@ -3427,7 +4164,8 @@ def _daily_trend_report(request):
                 _chart_vehicle=entry.get('vehicle')
                 try:GLOBAL_CONFIG.load_from_yaml(_chart_vehicle)
                 except Exception:pass
-            entry['png']=_daily_trend_chart(entry,settings)
+            # ML mode 는 _ml_report_pack 이 항목 페이지 차트를 직접 그린다(여기서 그리면 버려지는 그림).
+            if service!='mlmode':entry['png']=_daily_trend_chart(entry,settings)
             plot_entries.append(entry)
             if service=='mlmode' and '_influence' not in entry:plot_entries.extend(_ml_spatial_details(entry,settings))
             if i%25==0:print(f'[INFO] Daily Trend charts {i}/{len(entries)}',flush=True)
@@ -3459,12 +4197,15 @@ def _daily_trend_report(request):
         # A local, lossless index also records full knob values and diagnostics.
         catalog=[]
         for entry in catalog_entries:
-            row={k:v for k,v in entry.items() if k not in ('points','png','spatial','_inline_uri','_ppt_png','_legend_rows','_influence')}
+            row={k:v for k,v in entry.items() if k not in ('points','png','spatial','_inline_uri','_ppt_png','_legend_rows','_influence','_factors')}
             row['knob_values']='; '.join(sorted(entry['points']['_knob'].unique())) if not entry['points'].empty else ''
             catalog.append(row)
         atomic_bytes(os.path.join(dest,'catalog.csv'),pd.DataFrame(catalog).to_csv(index=False).encode('utf-8-sig'))
         if service=='mlmode':
-            audit=[dict(vehicle=e['vehicle'],item=e['item'],step=e['step'],program=e['program'],temperature=e['temperature'],analysis=e.get('_influence',{})) for e in entries]
+            audit=[dict(vehicle=e['vehicle'],item=e['item'],step=e['step'],program=e['program'],temperature=e['temperature'],analysis=e.get('_influence',{}),
+                        # 인자 스크리닝 결과(차트용 점 목록은 빼고 수치만) — 리포트 표와 같은 값을 파일로 대조할 수 있게.
+                        factors=[{k:v for k,v in r.items() if k!='plot'} for r in e.get('_factors',{}).get('rows',[])],
+                        factor_skipped=e.get('_factors',{}).get('skipped',[])) for e in entries]
             atomic_bytes(os.path.join(dest,'influence.json'),json.dumps(audit,ensure_ascii=False,indent=2,default=str).encode('utf-8'))
         manifest=dict(id=identity,parts=parts,notice=notice,summary_artifact=summary_artifact,coverage=coverage,items=len(entries),detail_panels=len(plot_entries)-len(entries),created=request['now'],analysis=analysis,
                       checkpoint_key=checkpoint_key,observations=sorted(settings['_candidate_observations']),source_fingerprint=_current_fp)
@@ -3533,6 +4274,77 @@ def _watchdog_publication(measurement, report, now, settings):
     return report,'발행 이력 미확인','최신 측정의 발행 대상 여부와 실행 로그 확인',True
 
 
+def _watchdog_overview(health, action_rows, relevant, publication, reports, scheduler_runs, start, now, settings):
+    """Watchdog 메일 맨 위 '한눈에': 판정 · 서버 상태 · 제품별 24시간 · 발행 내역(시간순)."""
+    import html, json, shutil
+    esc=lambda v:html.escape(str(v))
+    ok=health.get('state')=='healthy' and not action_rows
+    color='#178A43' if ok else '#b4232d'
+    verdict=('정상 — Scheduler 동작, 측정 확인, 리포트 발행에 확인할 일이 없습니다.' if ok else
+             f'확인 필요 {len(action_rows)}건 — 아래 "우선 확인" 표부터 보세요.')
+    out=['<div style="margin:10px 0 6px;padding:10px 14px;border-left:6px solid '+color+';background:'+('#ecf8ef' if ok else '#fdeeee')+'">'
+         '<div style="font-size:18px;font-weight:700;color:'+color+'">'+('정상' if ok else '확인 필요')+'</div>'
+         '<div style="font-size:13px;color:#222">'+esc(verdict)+' · '+esc(health.get('message',''))+'</div></div>']
+    # 서버 상태 — 같은 서버에서 도는 다른 작업(S3 전송 등)까지 반영된 실측값
+    server=[]
+    try:
+        import resource_governor as governor
+        cores=governor.usable_cores();busy=governor.busy_cores(cores,sample_sec=.2);avail=governor.available_memory_gb()
+        server+=[('CPU',f'{cores}코어 · 사용 {busy:.1f}'),('가용 메모리','측정 불가' if avail is None else f'{avail:.1f} GB')]
+    except Exception:
+        pass
+    try:
+        disk=shutil.disk_usage(operations_root());server.append(('디스크 여유',f'{disk.free/1e9:.0f} GB ({disk.free/disk.total*100:.0f}%)'))
+    except OSError:
+        pass
+    beat_age=None
+    try:
+        with open(os.path.join(operations_root(),'scheduler_heartbeat.json'),encoding='utf-8') as stream:
+            beat=json.load(stream)
+        beat_age=now-float(beat.get('updated',now))
+        server.append(('Scheduler 마지막 응답',datetime.fromtimestamp(float(beat.get('updated',now))).strftime('%m-%d %H:%M')+f' ({beat_age/60:.0f}분 전)'))
+    except (OSError,ValueError):
+        server.append(('Scheduler 마지막 응답','기록 없음'))
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),'RUN','QUEUE','scheduler_state.json'),encoding='utf-8') as stream:
+            state=json.load(stream)
+        server.append(('대기 중 수동 요청',f"{len(state.get('pending',[]))}건 · 누적 순회 {state.get('cycle',0)}회"))
+    except (OSError,ValueError):
+        pass
+    failed_runs=sum(r.get('rc')!=0 for r in scheduler_runs)
+    server.append(('24시간 실행',f'{len(scheduler_runs)}회 · 실패 {failed_runs}회'))
+    out.append(_service_heading('서버 상태','server')+'<table cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-size:13px"><tr>'
+               +''.join('<td style="border:1px solid #d0d7de;background:#f6f8fa;vertical-align:top"><div style="color:#555;font-size:11px">'+esc(k)+'</div><b>'+esc(v)+'</b></td>' for k,v in server)+'</tr></table>')
+    # 제품별 24시간 — 측정 확인 → 발행 → 소요 시간을 한 줄로
+    rows=[]
+    window=[r for r in reports if start<=r.get('started',0)<=now]
+    products=sorted(set(settings.get('products',[]))|{m.get('vehicle','') for m in relevant.values()}|{r.get('vehicle','') for r in window})
+    for product in filter(None,products):
+        mine=[r for r in window if r.get('vehicle')==product]
+        checked=[pk for pk,m in relevant.items() if m.get('vehicle')==product]
+        attention=sum(publication[pk][3] for pk in checked)
+        runs=[r for r in scheduler_runs if str(r.get('vehicle','')).split()[0:1]==[product] or str(r.get('vehicle',''))==product]
+        elapsed=[float(r.get('elapsed',0)) for r in runs if r.get('elapsed')]
+        last=max((r.get('updated',r.get('started',0)) for r in mine),default=0)
+        state='확인 필요' if attention or any(r.get('rc')!=0 for r in runs) else ('정상' if checked or mine or runs else '기록 없음')
+        rows.append([product,state,len(checked),sum(r.get('email')=='sent' for r in mine),
+                     sum(r.get('status')=='success' and r.get('email')!='sent' for r in mine),
+                     sum(r.get('status') in ('failed','unknown') for r in mine),
+                     f'{len(runs)}회 / 평균 {sum(elapsed)/len(elapsed)/60:.1f}분' if elapsed else f'{len(runs)}회',
+                     datetime.fromtimestamp(last).strftime('%m-%d %H:%M') if last else '-'])
+    body=''.join('<tr>'+''.join('<td style="border-bottom:1px solid #e5e5e5;padding:5px 8px;'+('font-weight:700;color:'+('#178A43' if v=='정상' else '#b4232d' if v=='확인 필요' else '#555')+';' if j==1 else '')+'">'+esc(v)+'</td>' for j,v in enumerate(row))+'</tr>' for row in rows)
+    out.append(_service_heading('제품별 24시간 현황','overview')+'<table cellspacing="0" style="border-collapse:collapse;font-size:13px"><tr style="background:#e8edf3;color:#003366">'
+               +''.join('<th style="padding:5px 8px;text-align:left">'+h+'</th>' for h in ['제품','판정','측정 확인','메일 발행','생성만','실패·확인','순회 실행 / 평균 소요','마지막 처리'])+'</tr>'+(body or '<tr><td colspan="8" style="padding:6px">기록 없음</td></tr>')+'</table>')
+    # 발행 내역 — 최근 순서로 20건
+    timeline=sorted(window,key=lambda r:-(r.get('updated') or r.get('started') or 0))[:20]
+    out.append(_service_heading('리포트 발행 내역 (최근 20건)','timeline')+_service_table(['시각','제품','Lot / Step','구분','결과','메일','소요'],
+        [[datetime.fromtimestamp(r.get('updated') or r.get('started')).strftime('%m-%d %H:%M'),r.get('vehicle',''),
+          f"{r.get('lot','')} / {r.get('step','')}",'자동' if r.get('mode','AUTO')=='AUTO' else '수동('+str(r.get('mode'))+')',
+          r.get('status',''),r.get('email','') or '-',f"{float(r.get('elapsed',0))/60:.1f}분" if r.get('elapsed') else '-'] for r in timeline]))
+    out.append('<p style="color:#555;font-size:12px;margin-top:14px;border-top:1px solid #d0d7de;padding-top:8px">아래는 상세 기록입니다. 평소에는 위 요약만 보면 됩니다.</p>')
+    return ''.join(out)
+
+
 def _watchdog_report(request):
     import html
     settings=request['settings']
@@ -3559,7 +4371,7 @@ def _watchdog_report(request):
     def table(headers,rows):return _service_table(headers,rows)
     summary=f"{health['message']} / 확인 {len(relevant)} prime keys / 신규·갱신 측정 {len(new)} prime keys"
     body=[_service_html_start('Auto Report · Watchdog','운영 담당자용 · Scheduler 실행, 최신 측정의 생성·저장·메일 결과 확인',
-          '집계: '+str(datetime.fromtimestamp(start))+' ~ '+str(datetime.fromtimestamp(now))+' (운영 서버 시각)'),
+          '집계: '+datetime.fromtimestamp(start).strftime('%Y-%m-%d %H:%M')+' ~ '+datetime.fromtimestamp(now).strftime('%Y-%m-%d %H:%M')+' (운영 서버 시각)'),
           '<p><strong>'+esc(health['message'])+'</strong> · '+esc(health.get('detail',''))+'</p>']
     import json,glob
     scheduler_runs=[]
@@ -3584,6 +4396,7 @@ def _watchdog_report(request):
             service_rows.append([label,datetime.fromtimestamp(record['created']).isoformat(timespec='minutes'),state,record.get('items',0),record.get('manifest','')])
             if state in ('failed','unknown','insufficient_data') or record.get('notification_only'):
                 action_rows.append([label,state,'분석·발행 결과 '+record.get('id',''),'자료 범위와 발행 manifest 확인'])
+    body.append(_watchdog_overview(health,action_rows,relevant,publication,reports,scheduler_runs,start,now,settings))
     body.append(_service_metrics([('확인 Prime key',len(relevant),'#003366'),('신규·갱신 측정',len(new),'#003366'),
                  ('최신 측정 저장 완료',sum(bool(r.get('generated') and r.get('saved')) for r,_,_,_ in publication.values()),'#003366'),
                  ('확인 필요 항목',len(action_rows),'#b4232d' if action_rows else '#003366')]))
@@ -3699,10 +4512,15 @@ def main():
     try:
         _,vehicle,_,_,_=_parse_trigger(argument)
         lock_name=re.sub(r'[^A-Za-z0-9_.-]','_',vehicle)
-        with process_lock(os.path.join(operations_root(),'locks',lock_name+'.lock')):
+        # 같은 제품을 다른 bash·Scheduler 가 돌리는 중이면 실패하지 않고 끝날 때까지 기다린다.
+        wait=float(getattr(GLOBAL_CONFIG,'product_lock_wait_sec',3600) or 0)
+        with process_lock(os.path.join(operations_root(),'locks',lock_name+'.lock'),wait_sec=wait):
             _main_impl(command)
+            _drain_uploads(block=True)
             return _RUN.finish()
     except BaseException as exc:
+        try:_drain_uploads(block=True)
+        except Exception:pass
         _RUN.finish(exc)
         raise
     finally:

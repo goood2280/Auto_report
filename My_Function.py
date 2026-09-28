@@ -93,6 +93,14 @@ def normalize_email(address, default_domain=None):
     return address
 
 
+def samsung_email(user):
+    """Samsung 메일의 사용자 ID만 받아 고정 도메인 주소로 변환한다."""
+    user = str(user).strip()
+    if not re.fullmatch(r'[A-Za-z0-9._-]+', user):
+        raise ValueError('Samsung 메일의 user 부분만 입력하세요 (예: user.id)')
+    return normalize_email(f'{user}@samsung.com')
+
+
 def email_receivers(addresses):
     """주소를 검증·중복 제거하고 메일 API 수신자 목록으로 변환한다."""
     addresses = list(dict.fromkeys(normalize_email(address) for address in addresses))
@@ -2006,8 +2014,13 @@ def _copy_slide_into(dest_prs, src_slide, src_w=None, src_h=None):
                 try:
                     _orig = rel.target_part.blob
                     _small = _shrink_image_blob(_orig)
-                    if _small is not None and len(_small) < len(_orig):
-                        _img_part, new_rId = dest_slide.part.get_or_add_image_part(_io.BytesIO(_small))
+                    _use = _small if _small is not None and len(_small) < len(_orig) else _orig
+                    # 항상 이 PPT 소유의 새 이미지 파트로 넣는다(원본 설명 PPT 파트를 공유하면 뒤에서 용량 조절 시 원본까지 바뀜).
+                    _img_part, new_rId = dest_slide.part.get_or_add_image_part(_io.BytesIO(_use))
+                    # 차트까지 다 만든 뒤 남은 용량으로 화질을 다시 정하도록 원본을 기억해 둔다(fit_ppt_budget).
+                    if not hasattr(dest_prs, '_auto_desc_images'):
+                        dest_prs._auto_desc_images = []
+                    dest_prs._auto_desc_images.append({'slide': dest_slide, 'rId': new_rId, 'orig': _orig})
                 except Exception:
                     new_rId = None
                 if new_rId is None:
@@ -2062,6 +2075,178 @@ def _copy_slide_into(dest_prs, src_slide, src_w=None, src_h=None):
     except Exception as _se:
         print(f"[WARN] description 슬라이드 크기 스케일 실패: {_se}")
     return dest_slide
+
+
+def _jpeg_from_blob(blob, cap_px, quality):
+    """설명/차트 이미지 blob → 최대 변 cap_px 이하 JPEG(투명은 흰 배경)."""
+    from PIL import Image
+    import io as _io
+    im = Image.open(_io.BytesIO(blob))
+    if im.mode in ('RGBA', 'LA', 'P'):
+        rgba = im.convert('RGBA')
+        bg = Image.new('RGB', rgba.size, (255, 255, 255))
+        bg.paste(rgba, mask=rgba.split()[-1])
+        im = bg
+    else:
+        im = im.convert('RGB')
+    if cap_px and max(im.size) > cap_px:
+        s = cap_px / float(max(im.size))
+        im = im.resize((max(1, int(im.size[0] * s)), max(1, int(im.size[1] * s))), Image.LANCZOS)
+    buf = _io.BytesIO()
+    im.save(buf, 'JPEG', quality=int(quality), optimize=True)
+    return buf.getvalue()
+
+
+def _swap_image(slide, old_rId, data):
+    """슬라이드의 그림 하나를 새 이미지 bytes 로 교체(형식이 바뀌어도 새 파트라 확장자·content-type 일치)."""
+    import io as _io
+    _R = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
+    _part, new_rId = slide.part.get_or_add_image_part(_io.BytesIO(data))
+    if new_rId == old_rId:
+        return old_rId
+    for el in slide.shapes._spTree.iter():
+        for attr in list(el.attrib):
+            if attr.startswith(_R) and el.attrib[attr] == old_rId:
+                el.attrib[attr] = new_rId
+    try:
+        slide.part.drop_rel(old_rId)
+    except Exception:
+        pass
+    return new_rId
+
+
+def _ppt_bytes(prs):
+    import io as _io
+    buf = _io.BytesIO()
+    prs.save(buf)
+    return buf.tell()
+
+
+def fit_ppt_budget(prs, config=None):
+    """메일 첨부 한도 안으로 PPT 용량을 맞춘다. 반환: 결과 요약 dict(로그용).
+
+    1) 차트 슬라이드를 다 만든 뒤의 용량을 재고, 남은 용량으로 Description 이미지 화질을 정한다
+       — 여유가 크면 선명하게(최대 description_image_max_px), 빠듯하면 해상도·품질 사다리를 내려가며,
+       최소 해상도(description_min_px)로도 안 들어가면 이미지만 빼고 글자는 남긴다.
+    2) 그래도 한도를 넘으면 큰 차트 이미지부터 해상도를 85%씩 줄여 맞춘다(최대 4회).
+    """
+    cfg = config if config is not None else GLOBAL_CONFIG
+    get = cfg.get if hasattr(cfg, 'get') else (lambda k, d=None: getattr(cfg, k, d))
+    limit = int(float(get('ppt_mail_max_mb', 10.0) or 10.0) * 1_000_000 * float(get('ppt_budget_ratio', 0.92) or 0.92))
+    max_px = int(get('description_image_max_px', 2400) or 2400)
+    min_px = int(get('description_min_px', 480) or 480)
+    per_image_cap = int(float(get('description_image_target_mb', 2.0) or 0) * 1024 * 1024)
+    entries = list(getattr(prs, '_auto_desc_images', []) or [])
+    total = _ppt_bytes(prs)
+    result = dict(limit=limit, before=total, desc_images=len(entries), desc_level='-', desc_dropped=0, charts_shrunk=0)
+    if entries:
+        import hashlib
+        # 같은 설명 이미지가 여러 카테고리 간지에 반복돼도 PPT 안에서는 파트 1개를 공유한다 → 원본 기준으로 묶어 1번만 센다.
+        groups = {}
+        for entry in entries:
+            groups.setdefault(hashlib.sha1(entry['orig']).hexdigest(), []).append(entry)
+        current_parts = {}
+        for entry in entries:
+            try:
+                part = entry['slide'].part.related_part(entry['rId'])
+                current_parts[id(part)] = len(part.blob)
+            except Exception:
+                pass
+        room = limit - (total - sum(current_parts.values()))
+        originals = [members[0]['orig'] for members in groups.values()]
+
+        def encode_all(px, quality):
+            out = []
+            for orig in originals:
+                data = _jpeg_from_blob(orig, px, quality)
+                if per_image_cap and len(data) > per_image_cap:   # 이미지 1장 상한(description_image_target_mb)
+                    scale = (per_image_cap / float(len(data))) ** .5 * .95
+                    data = _jpeg_from_blob(orig, max(min_px, int(px * scale)), quality)
+                out.append(data)
+            return out
+
+        # 여유가 있으면 최고 화질, 모자라면 용량∝면적 가정으로 해상도를 바로 계산(최대 3회 보정).
+        px, quality = max_px, 85
+        encoded = encode_all(px, quality)
+        for _attempt in range(3):
+            used = sum(len(d) for d in encoded)
+            if used <= room or px <= min_px:
+                break
+            quality = 75
+            px = max(min_px, int(px * (max(room, 1) / float(used)) ** .5 * .92)) if room > 0 else min_px
+            encoded = encode_all(px, quality)
+        if room > 0 and sum(len(d) for d in encoded) <= room:
+            for members, data in zip(groups.values(), encoded):
+                for entry in members:
+                    entry['rId'] = _swap_image(entry['slide'], entry['rId'], data)
+            result['desc_level'] = f'{px}px/q{quality}'
+        else:
+            # 남은 용량이 없으면 이미지를 빼고 같은 자리에 안내 글자를 둔다(설명 글자는 그대로).
+            from pptx.util import Pt
+            for entry in entries:
+                slide = entry['slide']
+                for shape in list(slide.shapes):
+                    blip = shape._element.xpath('.//a:blip')
+                    if blip and blip[0].get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed') == entry['rId']:
+                        left, top, width, height = shape.left, shape.top, shape.width, shape.height
+                        shape._element.getparent().remove(shape._element)
+                        box = slide.shapes.add_textbox(left, top, width, min(height, Pt(40)))
+                        box.text_frame.text = '설명 이미지는 메일 용량 한도로 생략했습니다(원본: Description PPT).'
+                        box.text_frame.paragraphs[0].runs[0].font.size = Pt(10)
+                        result['desc_dropped'] += 1
+                try:
+                    slide.part.drop_rel(entry['rId'])
+                except Exception:
+                    pass
+            result['desc_level'] = '생략'
+        result['desc_images'] = len(groups)
+        total = _ppt_bytes(prs)
+    desc_parts = set()
+    for entry in entries:
+        try:
+            desc_parts.add(id(entry['slide'].part.related_part(entry['rId'])))
+        except Exception:
+            pass
+    for _round in range(4):
+        if total <= limit:
+            break
+        pictures = []
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                blip = shape._element.xpath('.//a:blip')
+                if not blip:
+                    continue
+                rId = blip[0].get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                try:
+                    part = slide.part.related_part(rId)
+                except Exception:
+                    continue
+                if id(part) not in desc_parts:
+                    pictures.append((len(part.blob), slide, rId, part))
+        pictures.sort(key=lambda p: -p[0])
+        excess = total - limit
+        for size, slide, rId, part in pictures:
+            if excess <= 0:
+                break
+            from PIL import Image
+            import io as _io
+            im = Image.open(_io.BytesIO(part.blob))
+            w, h = im.size
+            if max(w, h) < 300:
+                continue
+            small = im.convert('RGB').resize((int(w * .85), int(h * .85)), Image.LANCZOS)
+            buf = _io.BytesIO()
+            if 'png' in part.content_type:
+                small.quantize(colors=128, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE).save(buf, 'PNG', optimize=True)
+            else:
+                small.save(buf, 'JPEG', quality=50, optimize=True)
+            if buf.tell() < size:
+                _swap_image(slide, rId, buf.getvalue())
+                excess -= size - buf.tell()
+                result['charts_shrunk'] += 1
+        total = _ppt_bytes(prs)
+    result['after'] = total
+    return result
 
 
 def _fmt_stat_value(v):
@@ -2158,51 +2343,65 @@ def _get_available_mem_gb():
 
 
 def get_parallel_workers(config=None):
-    """실행 환경(CPU 코어/가용 메모리)을 보고 렌더링 워커 프로세스 수를 결정.
+    """이번에 쓸 렌더링 워커 수. 1이면 프로세스 풀 없이 직렬 렌더링.
 
-    - My_config.parallel_workers > 0 이면 그 값을 그대로 사용(강제 지정).
-    - 자동: min(코어수, parallel_max_workers,
-              (가용GB - parallel_reserve_gb) // parallel_mem_per_worker_gb)
-    - 가용 메모리 측정 불가 시 보수적으로 min(코어수, 2).
-    - 결과 1이면 프로세스 풀 없이 직렬 렌더링(저사양 환경 안전 동작).
+    서버 전체 한도는 resource_governor 가 정한다 — 같은 서버에서 여러 Main(Scheduler·수동 bash)이
+    동시에 돌아도 워커 합계가 (코어 − parallel_reserve_cores)를 넘지 않고, S3 전송 등 다른 작업이 쓰는
+    CPU·메모리만큼 덜 쓴다. 결정은 parallel_replan_sec(기본 20초)마다 다시 한다(랏 사이에 늘거나 줄어듦).
+    My_config.parallel_workers > 0 이면 그 값을 그대로 쓴다(강제 지정).
     """
     cfg = config if config is not None else GLOBAL_CONFIG
     try:
-        forced = int(getattr(cfg, 'parallel_workers', 0) or 0)
-    except (TypeError, ValueError):
-        forced = 0
-    if forced > 0:
-        return forced
-    cores = os.cpu_count() or 2
-    cap = int(getattr(cfg, 'parallel_max_workers', 8) or 8)
-    per_gb = float(getattr(cfg, 'parallel_mem_per_worker_gb', 1.2) or 1.2)
-    reserve = float(getattr(cfg, 'parallel_reserve_gb', 3.0) or 3.0)
-    avail = _get_available_mem_gb()
-    if avail is None:
-        mem_cap = min(cores, 2)
-    else:
-        mem_cap = int(max(0.0, avail - reserve) // per_gb)
-    return max(1, min(cores, cap, mem_cap))
+        import resource_governor
+        plan = resource_governor.plan_workers(cfg)
+    except Exception as exc:
+        print(f"[WARN] 병렬도 조정기 실패 → 워커 2개로 제한: {exc}")
+        return max(1, min(2, os.cpu_count() or 1))
+    _LAST_PLAN.clear(); _LAST_PLAN.update(plan)
+    n = plan['workers']
+    if n <= 1:
+        shutdown_chart_pool()          # 자원이 모자라면 대기 중인 워커 메모리도 돌려준다
+        return 1
+    if _CHART_POOL is not None and not plan.get('forced') and 0 < n - _CHART_POOL_N < 2:
+        # 워커 1개 늘리려고 풀을 다시 띄우면 그 비용이 더 크다 → 지금 풀 크기로 유지하고 남는 슬롯은 반납.
+        resource_governor.trim_lease(_CHART_POOL_N)
+        n = _CHART_POOL_N
+    return n
 
 
+_LAST_PLAN = {}
 _CHART_POOL = None
 _CHART_POOL_N = 0
+
+
+def parallel_plan_text():
+    plan = _LAST_PLAN or {}
+    return (f"워커 {plan.get('workers', '?')}개 · {plan.get('reason', '')}" if plan else '병렬 계획 없음')
 
 
 def _get_chart_pool(n):
     """렌더링용 프로세스 풀(모듈 전역 1개)을 생성/재사용. n<=1이면 None(직렬).
 
-    풀은 한 번 만들면 리포트/랏이 바뀌어도 재사용한다(워커 spawn 비용 1회만).
+    같은 크기면 랏이 바뀌어도 재사용한다(워커 spawn 비용 1회만). 조정기가 크기를 바꾸면 다시 만든다 —
+    줄일 때는 남는 워커의 메모리를 즉시 돌려주기 위해서다.
     """
     global _CHART_POOL, _CHART_POOL_N
     if n is None or n <= 1:
         return None
-    if _CHART_POOL is not None and _CHART_POOL_N >= n:
+    if _CHART_POOL is not None and _CHART_POOL_N == n:
         return _CHART_POOL
-    shutdown_chart_pool()
+    _shutdown_pool_only()
     try:
+        import multiprocessing, sys as _sys
         from concurrent.futures import ProcessPoolExecutor
-        _CHART_POOL = ProcessPoolExecutor(max_workers=n)
+        # spawn: 부모의 큰 DataFrame·DuckDB/S3 스레드를 물려받지 않는다(fork 는 스레드가 있으면 교착 위험,
+        # 참조 카운트 갱신으로 부모 메모리 페이지가 복사돼 워커마다 RSS 가 커진다). Windows 는 원래 spawn.
+        method = str(getattr(GLOBAL_CONFIG, 'parallel_start_method', 'spawn') or 'spawn')
+        options = dict(max_workers=n, mp_context=multiprocessing.get_context(method))
+        recycle = int(getattr(GLOBAL_CONFIG, 'parallel_max_tasks_per_child', 40) or 0)
+        if recycle > 0 and _sys.version_info >= (3, 11) and method != 'fork':
+            options['max_tasks_per_child'] = recycle   # matplotlib 누적 메모리를 주기적으로 비운다
+        _CHART_POOL = ProcessPoolExecutor(**options)
         _CHART_POOL_N = n
     except Exception as e:
         print(f"[WARN] 렌더링 워커 풀 생성 실패(직렬로 진행): {e}")
@@ -2211,8 +2410,7 @@ def _get_chart_pool(n):
     return _CHART_POOL
 
 
-def shutdown_chart_pool():
-    """렌더링 워커 풀 종료(atexit에도 등록됨 — Main 종료 시 명시 호출 권장)."""
+def _shutdown_pool_only():
     global _CHART_POOL, _CHART_POOL_N
     if _CHART_POOL is not None:
         try:
@@ -2223,6 +2421,16 @@ def shutdown_chart_pool():
             pass
         _CHART_POOL = None
         _CHART_POOL_N = 0
+
+
+def shutdown_chart_pool():
+    """렌더링 워커 풀 종료 + 서버 공용 워커 슬롯 반납(atexit에도 등록됨)."""
+    _shutdown_pool_only()
+    try:
+        import resource_governor
+        resource_governor.release_all()
+    except Exception:
+        pass
 
 
 import atexit as _atexit
@@ -2344,7 +2552,7 @@ def _render_item_charts_uncached(task):
             ax.spines[spine].set_linewidth(0.9)
         ax.tick_params(axis='both', which='major', color='#000000', width=0.8)
 
-    def _label_axes(ax, xlabel=None, ylabel=None, ylabel_size=7, xlabel_size=7):
+    def _label_axes(ax, xlabel=None, ylabel=None, ylabel_size=7.5, xlabel_size=7.5):
         if xlabel is not None:
             ax.set_xlabel(xlabel, fontsize=xlabel_size, color=C_NAVY, fontname=FONT)
         if ylabel is not None:
@@ -2580,7 +2788,7 @@ def _render_item_charts_uncached(task):
                 ax_box.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
                 ax_box.grid(True, which='major', axis='both', color=C_GRID, linestyle='-', linewidth=0.5)
             # 용량 다이어트를 위한 JPG 포맷 저장 및 quality 옵션 적용
-            fig_box.savefig(tmp_box, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
+            _savefig_chart(fig_box, tmp_box, cfg, dpi=dpi, bbox_inches="tight", facecolor='white')
             plt.close(fig_box)
             out['imgs']['box'] = tmp_box.getvalue()
 
@@ -2757,8 +2965,7 @@ def _render_item_charts_uncached(task):
                     _yc = r * (CELL + _gy) + (CELL - _ti.size[1]) // 2
                     _canvas.paste(_ti, (0, max(0, _yc)), _ti)
 
-            _obio = _io.BytesIO()
-            _canvas.save(_obio, format='PNG', optimize=True)
+            _obio = _encode_map_canvas(_canvas, cfg)
             out['imgs']['map'] = _obio.getvalue()
             # 배치 비율(h/w) — 합성 캔버스 실제 픽셀비. 슬라이드에서 폭에 맞춰 배치된다.
             out['map_ratio'] = (_ch / _cw) if _cw else 0.1
@@ -2974,9 +3181,9 @@ def _render_item_charts_uncached(task):
             ax.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
 
         fig_trend, ax_trend = plt.subplots(figsize=(4.55, 1.75))
-        fig_trend.subplots_adjust(left=0.18, right=0.98, bottom=0.27, top=0.97)
+        fig_trend.subplots_adjust(left=0.18, right=0.955, bottom=0.27, top=0.97)   # 마지막 날짜 눈금이 잘리지 않게
         _draw_trend(ax_trend)
-        fig_trend.savefig(tmp_trend, format='jpg', dpi=dpi, facecolor='white', pil_kwargs={'quality': jpg_q})
+        _savefig_chart(fig_trend, tmp_trend, cfg, dpi=dpi, facecolor='white')
         plt.close(fig_trend)
         out['imgs']['trend'] = tmp_trend.getvalue()
         if cfg.get('trend_only'):
@@ -3128,12 +3335,13 @@ def _render_item_charts_uncached(task):
         if spec_high is not None:
             ax_rad.axhline(y=float(spec_high), color=C_ACCENT, ls="--", lw=1.2, alpha=0.7)
         ax_rad.set_title("")
-        _label_axes(ax_rad, xlabel="Chip Radius", ylabel=y_label, ylabel_size=5.5)  # y축명 잘림 방지 위해 축소
+        # y축명: 짧으면 7pt(가독성), 길면 6pt(1.95in 높이에서 잘림 방지). 예전 5.5pt 는 슬라이드에서 읽기 어려웠다.
+        _label_axes(ax_rad, xlabel="Chip Radius", ylabel=y_label, ylabel_size=7 if len(str(y_label)) <= 22 else 6)
         if log_scale: ax_rad.set_yscale('log')
         _remove_spines(ax_rad)
         ax_rad.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
         ax_rad.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
-        fig_rad.savefig(tmp_rad, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
+        _savefig_chart(fig_rad, tmp_rad, cfg, dpi=dpi, bbox_inches="tight", facecolor='white')
         plt.close(fig_rad)
         out['imgs']['rad'] = tmp_rad.getvalue()
 
@@ -3173,7 +3381,7 @@ def _render_item_charts_uncached(task):
         _remove_spines(ax_cum)
         ax_cum.minorticks_off()  # minor tick(세부선) 제거 — major만 표시
         ax_cum.grid(True, which='major', color=C_GRID, linestyle='-', linewidth=0.5)
-        fig_cum.savefig(tmp_cum, format='jpg', dpi=dpi, bbox_inches="tight", facecolor='white', pil_kwargs={'quality': jpg_q})
+        _savefig_chart(fig_cum, tmp_cum, cfg, dpi=dpi, bbox_inches="tight", facecolor='white')
         plt.close(fig_cum)
         out['imgs']['cum'] = tmp_cum.getvalue()
 
@@ -3188,6 +3396,56 @@ def _render_item_charts_uncached(task):
         out['status'] = 'error'
         out['reason'] = f"{e}\n{_tb.format_exc()}"
     return out
+
+
+def _encode_chart_image(png_bytes, jpg_q=55, codec='auto', colors=128):
+    """차트 이미지 → PPT 용 최소 용량 인코딩.
+
+    auto: 팔레트 PNG(colors색, 디더링 없음)와 JPEG(jpg_q) 중 작은 쪽. 선·글자가 많은 차트(box/radius/CDF)는
+    팔레트 PNG 가 JPEG 보다 3배 가깝게 작고 글자가 번지지 않는다. 점이 빽빽한 trend 는 JPEG 와 비슷해 작은 쪽을 쓴다.
+    """
+    from PIL import Image
+    import io as _io
+    image = Image.open(_io.BytesIO(png_bytes)).convert('RGB')
+    candidates = []
+    if codec in ('auto', 'png'):
+        buf = _io.BytesIO()
+        image.quantize(colors=int(colors), method=Image.Quantize.MEDIANCUT,
+                       dither=Image.Dither.NONE).save(buf, 'PNG', optimize=True)
+        candidates.append(buf.getvalue())
+    if codec in ('auto', 'jpeg') or not candidates:
+        buf = _io.BytesIO()
+        image.save(buf, 'JPEG', quality=int(jpg_q), optimize=True)
+        candidates.append(buf.getvalue())
+    return min(candidates, key=len)
+
+
+def _savefig_chart(fig, buffer, cfg, **kwargs):
+    """fig 를 무손실 PNG 로 그린 뒤 _encode_chart_image 로 가장 가벼운 형식으로 바꿔 buffer 에 담는다."""
+    import io as _io
+    raw = _io.BytesIO()
+    fig.savefig(raw, format='png', **kwargs)
+    data = _encode_chart_image(raw.getvalue(), cfg.get('jpg_q', 55), cfg.get('img_codec', 'auto'),
+                               cfg.get('png_colors', 128))
+    buffer.seek(0); buffer.truncate(); buffer.write(data)
+
+
+def _encode_map_canvas(canvas, cfg):
+    """WF MAP 합성 캔버스 → 표시 폭 기준 해상도 상한(map_max_px) + 팔레트 PNG.
+    25 wafer × 여러 PGM 행이면 3000px 이상(슬라이드에서 ~430dpi)으로 그려져 용량의 대부분을 차지했다."""
+    from PIL import Image
+    import io as _io
+    limit = int(cfg.get('map_max_px') or 0)
+    if limit and canvas.size[0] > limit:
+        scale = limit / float(canvas.size[0])
+        canvas = canvas.resize((limit, max(1, int(round(canvas.size[1] * scale)))), Image.LANCZOS)
+    buf = _io.BytesIO()
+    if cfg.get('img_codec', 'auto') == 'jpeg':
+        canvas.convert('RGB').save(buf, 'JPEG', quality=int(cfg.get('map_q', 60)), optimize=True)
+    else:
+        canvas.convert('RGB').quantize(colors=int(cfg.get('map_colors', 64)), method=Image.Quantize.MEDIANCUT,
+                                       dither=Image.Dither.NONE).save(buf, 'PNG', optimize=True)
+    return buf
 
 
 def _wfmap_batch_task(payload):
@@ -3461,16 +3719,19 @@ def insert_plots(merged_df, prs, description_image_info_dict,
     summary_rows = []   # 마지막 summary 페이지용 (index별 REPORT DIRECTION 기준 집계값)
 
     n_workers = get_parallel_workers()
-    _avail = _get_available_mem_gb()
     print("=" * 60)
     print(f"[insert_plots] 차트 생성 시작 - 총 {total_items}개 index(파생 포함) 처리 예정")
-    print(f"[insert_plots] 렌더링 워커 {n_workers}개 "
-          f"(cores={os.cpu_count()}, 가용메모리={f'{_avail:.1f}GB' if _avail is not None else '측정불가'})")
+    print(f"[insert_plots] 렌더링 {parallel_plan_text()}")
     print("=" * 60)
 
     # 워커에 넘길 경량 설정(dict) — 워커는 GLOBAL_CONFIG(yaml 미로드)를 참조하지 않는다
     cfg_task = {
         'dpi': dpi, 'jpg_q': jpg_q, 'map_q': map_q, 'trend_only': trend_only,
+        # 이미지 인코딩: auto=팔레트 PNG/JPEG 중 작은 쪽, WF MAP 은 표시 폭(≈7.9in) 기준 dpi 상한 + 팔레트 PNG
+        'img_codec': str(GLOBAL_CONFIG.get('ppt_image_codec', 'auto') or 'auto').lower(),
+        'png_colors': int(GLOBAL_CONFIG.get('ppt_png_colors', 128) or 128),
+        'map_colors': int(GLOBAL_CONFIG.get('ppt_map_png_colors', 64) or 64),
+        'map_max_px': int(float(GLOBAL_CONFIG.get('ppt_map_max_dpi', 0) or 0) * 7.9),
         'C_NAVY': C_NAVY, 'C_ACCENT': C_ACCENT, 'C_NEUTRAL': C_NEUTRAL,
         'C_GRID': C_GRID, 'C_SPINE': C_SPINE, 'C_VEHICLE': C_VEHICLE,
         'C_BAND': C_BAND, 'C_WV': C_WV, 'WV_PALETTE': WV_PALETTE, 'FONT': FONT,
@@ -4525,12 +4786,50 @@ def trim_runtime_cache(root, days=14, max_bytes=2_000_000_000):
             except OSError:pass
 
 
+TRIGGER_MAX_TARGETS = 100
+_TRIGGER_TOKEN = re.compile(r'^[A-Za-z0-9.-]{1,40}$')
+
+
+def trigger_pairs(lot, step, validate=True, limit=TRIGGER_MAX_TARGETS):
+    """수동 발행 대상 (Lot, Step) 목록. 쉼표로 여러 개를 줄 수 있다.
+
+      L1_S1            → [(L1,S1)]
+      L1,L2,L3_S1      → Step 1개를 모든 Lot 에 공통 적용
+      L1_S1,S2         → Lot 1개의 여러 Step
+      L1,L2_S1,S2      → 같은 개수면 순서대로 짝(L1-S1, L2-S2). 개수가 다르면 오류.
+    Scheduler.py 의 _pairs 와 같은 규칙이다(한쪽만 바꾸지 말 것).
+    """
+    lots = [v.strip() for v in str(lot).split(',') if v.strip()]
+    steps = [v.strip() for v in str(step).split(',') if v.strip()]
+    if not lots or not steps:
+        raise ValueError('Lot과 DC Step을 지정하세요')
+    if validate:
+        bad = [v for v in lots + steps if not _TRIGGER_TOKEN.fullmatch(v)]
+        if bad:
+            raise ValueError(f"Lot/Step은 영문·숫자·점·하이픈만 허용('_' 불가): {bad[:3]}")
+    if len(lots) == len(steps):
+        pairs = list(zip(lots, steps))
+    elif len(steps) == 1:
+        pairs = [(value, steps[0]) for value in lots]
+    elif len(lots) == 1:
+        pairs = [(lots[0], value) for value in steps]
+    else:
+        raise ValueError(f'Lot {len(lots)}개와 Step {len(steps)}개를 짝지을 수 없습니다 '
+                         '(같은 개수면 순서대로 짝, 한쪽이 1개면 공통 적용)')
+    pairs = list(dict.fromkeys(pairs))
+    if len(pairs) > limit:
+        raise ValueError(f'한 번에 최대 {limit}개 대상까지 처리합니다(요청 {len(pairs)}개)')
+    return pairs
+
+
 def load_daily_projected(conn, daily_path, days, reformatter, *, lot=None, step=None):
     """Read projected inputs; optional exact lot/step scope is applied before caching."""
     import hashlib, json
     from pathlib import Path
     if (lot is None) != (step is None):
         raise ValueError('lot과 step은 함께 지정해야 합니다')
+    # lot/step 에 쉼표 목록을 주면 여러 대상(SINGLE 멀티) — 짝짓는 규칙은 trigger_pairs 와 같다.
+    pairs = [] if lot is None else trigger_pairs(lot, step, validate=False)
     cutoff = (pd.Timestamp.now().normalize() - pd.Timedelta(days=int(days))).date().isoformat() if days is not None else '0000-00-00'
     real=reformatter.loc[reformatter['CATEGORY'].eq('REAL')]
     vramp_ids=set(real.loc[real['ALIAS'].astype(str).str.contains('vramp',case=False,na=False) |
@@ -4548,7 +4847,7 @@ def load_daily_projected(conn, daily_path, days, reformatter, *, lot=None, step=
     for source in files:
         source_ids=itemids if source.parent.name[5:]>=cutoff else sorted(vramp_ids)
         key=hashlib.sha256((file_fingerprint([source])+json.dumps(source_ids)+json.dumps(wanted)
-                           +json.dumps([lot, step])+'v3').encode()).hexdigest()
+                           +json.dumps([lot, step] if len(pairs) <= 1 else pairs)+'v3').encode()).hexdigest()
         dest=cache/(key+'.parquet')
         if dest.exists():
             try:
@@ -4561,8 +4860,16 @@ def load_daily_projected(conn, daily_path, days, reformatter, *, lot=None, step=
         if lot is not None and not {'fab_lot_id', 'step_id'}.issubset(selected):
             raise ValueError(f'SINGLE raw DB lot/step 열 누락: {source.name}')
         names=', '.join('"'+c+'"' for c in selected)
-        scope = '' if lot is None else ' AND CAST(fab_lot_id AS VARCHAR) = ? AND CAST(step_id AS VARCHAR) = ?'
-        parameters = [str(source), source_ids] + ([] if lot is None else [str(lot), str(step)])
+        if lot is None:
+            scope, scoped = '', []
+        elif len(pairs) == 1:
+            scope = ' AND CAST(fab_lot_id AS VARCHAR) = ? AND CAST(step_id AS VARCHAR) = ?'
+            scoped = list(pairs[0])
+        else:
+            # 여러 Lot/Step 을 한 번에 — 파일당 쿼리 1회로 대상 행만 읽는다(값은 바인딩, SQL 에 직접 넣지 않음).
+            scope = " AND (CAST(fab_lot_id AS VARCHAR) || '|' || CAST(step_id AS VARCHAR)) IN (SELECT unnest(?))"
+            scoped = [[f'{a}|{b}' for a, b in pairs]]
+        parameters = [str(source), source_ids] + scoped
         data=conn.execute(f'SELECT {names} FROM read_parquet(?) WHERE CAST(item_id AS VARCHAR) IN (SELECT unnest(?)){scope}',
                           parameters).df()
         atomic_output(dest, lambda temp: data.to_parquet(temp,index=False))
@@ -4645,20 +4952,33 @@ def ops_many(kind, records):
 
 
 @contextmanager
-def process_lock(path):
-    """OS-backed nonblocking lock; an exited process releases it even after a crash."""
+def process_lock(path, wait_sec=0, poll_sec=2.0):
+    """OS-backed lock; an exited process releases it even after a crash.
+
+    wait_sec>0 이면 다른 프로세스(다른 bash·Scheduler)가 끝날 때까지 기다렸다가 잡는다.
+    """
     os.makedirs(os.path.dirname(os.path.abspath(path)),exist_ok=True)
     stream=open(path,'a+b')
+    deadline=time.time()+max(0.0,float(wait_sec or 0)); announced=False
     try:
         stream.seek(0,2)
         if stream.tell()==0:stream.write(b'0');stream.flush()
-        stream.seek(0)
-        if os.name=='nt':
-            import msvcrt
-            msvcrt.locking(stream.fileno(),msvcrt.LK_NBLCK,1)
-        else:
-            import fcntl
-            fcntl.flock(stream.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+        while True:
+            stream.seek(0)
+            try:
+                if os.name=='nt':
+                    import msvcrt
+                    msvcrt.locking(stream.fileno(),msvcrt.LK_NBLCK,1)
+                else:
+                    import fcntl
+                    fcntl.flock(stream.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.time()>=deadline:raise
+                if not announced:
+                    print(f'[INFO] 같은 제품 작업이 실행 중이라 끝날 때까지 기다립니다(최대 {int(wait_sec)}초): {os.path.basename(path)}',flush=True)
+                    announced=True
+                time.sleep(poll_sec)
     except OSError:
         stream.close();raise RuntimeError(f'동일 작업이 이미 실행 중입니다: {os.path.basename(path)}')
     try:yield
@@ -4758,7 +5078,8 @@ def daily_trend_ml(frame, reformatter, vehicle, settings):
     if explicit:equipment=[lookup[c.casefold()] for c in explicit if c.casefold() in lookup]
     wanted.update(equipment)
     for m in mappings.values():m['equipment_columns']=equipment
-    if deep and settings.get('influence_enabled',True):
+    # 인자 스크리닝(factor_screen)·연관 분석(influence) 중 하나라도 켜져 있으면 ML_TABLE 인자 열을 읽는다.
+    if deep and (settings.get('influence_enabled',True) or settings.get('factor_screen_enabled',True)):
         import fnmatch
         excluded={str(c).casefold() for c in settings.get('ml_join_keys',['root_lot_id','wafer_id'])}
         excluded.update(str(c).casefold() for c in reformatter.get('ALIAS',[]))
@@ -5034,7 +5355,11 @@ def ml_trend_select(entries, settings):
         'influence_max_join_rows','influence_max_wafers_per_root','influence_min_matched_roots',
         'influence_similar_mismatch','influence_min_balance','with_vehicle','recipients','mail_vehicle',
         'report_now','highlight_since','html_legend_limit','trend_marker_size','trend_recent_marker_size',
-        'trend_background_alpha','trend_ylim_band_pct','daily_time','enabled','html_columns','report_timeout_sec','poll_sec'}
+        'trend_background_alpha','trend_ylim_band_pct','daily_time','enabled','html_columns','report_timeout_sec','poll_sec',
+        'candidate_source','module_notes','factor_screen_enabled','factor_families','factor_numeric_families',
+        'factor_min_wafers','factor_min_numeric_wafers','factor_min_lots','factor_max_levels','factor_tail_quantile',
+        'factor_tail_bins','factor_tail_min','factor_tail_ratio','factor_tail_share_min','factor_r2_min',
+        'factor_level_effect_min','factor_fdr_alpha','factor_top_k','factor_seconds','mail_image_limit'}
     _unknown=[k for k in settings if k not in _known_ml_keys and not k.startswith('_')]
     if _unknown:print(f"[ML WARN] 미사용 설정키 무시: {sorted(_unknown)}")
     modules=set(settings.get('modules') or ['split_difference','time_trend','distribution_shift','spread_change','spike_rate','isolation_forest','local_outlier_factor'])
@@ -5467,6 +5792,268 @@ def ml_influence_analyze(entries, settings):
         for i,row in enumerate(report['candidates'],1):row['rank']=i
         report['family_tests']=len(tests)
     return dict(items=len(entries),tests=len(tests),supported=sum(len(e['_influence']['candidates']) for e in entries),seconds=round(time.monotonic()-started,3),budget_seconds=budget)
+
+
+# ML_TABLE 열 이름 → 인자 계열. 범주형(KNOB/MASK/EQP)은 수준별 비교, 수치형(INLINE/VM)은 상관·꼬리 이동을 본다.
+# My_config.mlmode['factor_families'] 로 덮어쓸 수 있다(계열명: glob 패턴 목록).
+ML_FACTOR_FAMILIES = {'KNOB': ['KNOB_*', 'SPLIT_*'], 'MASK': ['MASK_*', 'RETICLE_*'],
+                      'EQP': ['EQP_*', 'CHAMBER_*', 'RECIPE_*', 'FAB_*'],
+                      'INLINE': ['INLINE_*'], 'VM': ['VM_*']}
+ML_FACTOR_NUMERIC = ('INLINE', 'VM')
+ML_FACTOR_SIGNALS = {'r2': '상관 높음 (R²)', 'low_tail': '하단 꼬리 이동 (밑둥 들림)', 'high_tail': '상단 꼬리 이동',
+                     'level': '수준 간 차이', 'level_tail': '수준별 하단 꼬리 (밑둥 들림)'}
+_ML_FACTOR_SKIP = re.compile(r'(^|_)(TKOUT|TIME|DATE|TIMESTAMP|TARGET|LABEL|SCORE|ANOMALY|PREDICTION|RESULT|SPEC)(_|$)')
+
+
+def ml_factor_family(column, settings=None):
+    import fnmatch
+    families = (settings or {}).get('factor_families') or ML_FACTOR_FAMILIES
+    name = str(column).casefold()
+    for family, patterns in families.items():
+        if any(fnmatch.fnmatchcase(name, str(p).casefold()) for p in patterns):
+            return str(family).upper()
+    return 'OTHER'
+
+
+def _icc(values, groups):
+    """One-way ANOVA ICC(1), 0..1 — how much of the variance is shared by wafers of one lot."""
+    frame = pd.DataFrame(dict(v=np.asarray(values, dtype=float), g=np.asarray(groups)))
+    frame = frame.dropna()
+    sizes = frame.groupby('g').size()
+    k, n = len(sizes), len(frame)
+    if k < 2 or n <= k:
+        return 0.
+    means = frame.groupby('g').v.transform('mean')
+    msb = float((sizes * (frame.groupby('g').v.mean() - frame.v.mean()) ** 2).sum() / (k - 1))
+    msw = float(((frame.v - means) ** 2).sum() / (n - k))
+    m0 = (n - float((sizes ** 2).sum()) / n) / (k - 1)
+    denominator = msb + (m0 - 1) * msw
+    return float(min(1., max(0., (msb - msw) / denominator))) if denominator > 0 else 0.
+
+
+def _design_effect(lots, *series):
+    """Kish design effect for wafers clustered in lots: 1+(m-1)·ICC_a·ICC_b (ICC_a 만 주면 그 값만)."""
+    sizes = pd.Series(np.asarray(lots)).value_counts()
+    mean_size = float((sizes ** 2).sum() / max(1, sizes.sum()))
+    shared = 1.
+    for values in series:
+        shared *= _icc(values, lots)
+    return max(1., 1 + (mean_size - 1) * shared)
+
+
+def ml_factor_screen(entries, settings):
+    """ML_TABLE 인자 스크리닝 — 선정 항목마다 KNOB/MASK/EQP(범주)·INLINE/VM(수치) 열을 wafer 단위로 대조한다.
+
+    반응값은 wafer 마다 최신 측정의 shot 중앙값(한 wafer = 1점).
+    - 범주: lot 안에서 갈리는 인자(KNOB split 등)는 lot 중앙값을 뺀 값으로, lot 단위 인자(MASK 등)는
+      root lot 중앙값끼리 Kruskal-Wallis → ε². 수준별 하단 꼬리(P10 아래 wafer 비율)도 따로 본다.
+    - 수치: wafer 단위 R²(Pearson)와 '밑둥 들림' — x 를 구간으로 나눴을 때 하단 꼬리(P10)가 중앙값보다
+      크게 움직이는지. 꼬리 wafer 와 나머지의 x 순위 비교(Mann-Whitney)로 검정한다.
+    같은 lot 의 wafer 는 독립이 아니므로 p 는 Kish design effect 로 유효 표본을 줄여 계산하고,
+    이번 리포트의 모든 인자 검정에 BH 보정을 한 번에 건다. 탐색용 연관성이며 원인 확정이 아니다.
+    """
+    from scipy import stats
+    import time
+    started = time.monotonic()
+    budget = max(1., float(settings.get('factor_seconds', 60)))
+    min_wafers = max(3, int(settings.get('factor_min_wafers', 6)))
+    min_numeric = max(8, int(settings.get('factor_min_numeric_wafers', 20)))
+    min_lots = max(2, int(settings.get('factor_min_lots', 3)))
+    max_levels = max(2, int(settings.get('factor_max_levels', 12)))
+    tail_q = min(.25, max(.02, float(settings.get('factor_tail_quantile', .1))))
+    numeric_families = {str(f).upper() for f in settings.get('factor_numeric_families', ML_FACTOR_NUMERIC)}
+    tests = []
+
+    def scale_of(values):
+        values = np.asarray(values, dtype=float)
+        iqr = float(np.subtract(*np.nanpercentile(values, [75, 25])))
+        return max(iqr / 1.349, float(np.nanstd(values)) * .1, abs(float(np.nanmedian(values))) * 1e-9, 1e-12)
+
+    def add(report, row, signal, p, effect, **extra):
+        if np.isfinite(p):
+            tests.append(dict(report=report, row=row, signal=signal, p=float(p), effect=float(effect), **extra))
+
+    for entry in entries:
+        report = dict(rows=[], flagged=[], skipped=[], families={})
+        entry['_factors'] = report
+        if time.monotonic() - started >= budget:
+            report['skipped'].append('인자 스크리닝 시간 예산 소진 — 이 항목은 검사하지 않음')
+            continue
+        raw = entry.get('spatial', pd.DataFrame())
+        if raw is None or raw.empty or '_value' not in raw:
+            report['skipped'].append('측정 자료 없음')
+            continue
+        raw = raw.copy()
+        if '_vehicle' in raw:
+            raw = raw.loc[raw['_vehicle'].astype(str).eq(str(entry['vehicle']))]
+        columns = [c for c in raw if c.startswith('__ml_') and not _ML_FACTOR_SKIP.search(c[5:].upper())]
+        if not columns:
+            report['skipped'].append('ML_TABLE 인자 열 없음 (조인 실패 또는 대상 열 없음)')
+            continue
+        lotcol = 'root_lot_id' if 'root_lot_id' in raw else 'fab_lot_id'
+        keys = [lotcol, 'wafer_id']
+        raw = raw.dropna(subset=keys + ['_value'])
+        clock = '_dc_time' if '_dc_time' in raw else '_time'
+        if clock in raw:
+            raw = raw.loc[raw[clock].eq(raw.groupby(keys)[clock].transform('max'))]
+        wafer = raw.groupby(keys, dropna=False).agg(y=('_value', 'median'), recent=('_recent', 'max')).reset_index()
+        factors = raw.groupby(keys, dropna=False)[columns].first().reset_index()
+        wafer = wafer.merge(factors, on=keys, how='left', validate='one_to_one')
+        for col in columns:
+            name = col[5:]
+            family = ml_factor_family(name, settings)
+            data = wafer[keys + ['y', 'recent', col]].copy()
+            text = data[col].astype('string').str.strip()
+            data = data.loc[data[col].notna() & ~text.str.upper().isin(['', 'NAN', 'NONE', 'NAT', 'UNMATCHED', '<NA>'])]
+            number = pd.to_numeric(data[col], errors='coerce')
+            if family in numeric_families:
+                kind = 'numeric'
+            elif family == 'OTHER':
+                kind = 'numeric' if number.notna().mean() >= .95 and data[col].nunique() > max_levels else 'categorical'
+            else:
+                kind = 'categorical'
+            if kind == 'numeric' and number.notna().mean() < .95:
+                if data[col].nunique() <= max_levels:
+                    kind = 'categorical'
+                else:
+                    report['skipped'].append(f'{name}: 숫자가 아닌 값이 많아 제외')
+                    continue
+            row = dict(column=name, family=family, kind=kind, signals=[], wafers=0, lots=0)
+            if kind == 'numeric':
+                data = data.assign(x=number).dropna(subset=['x'])
+                row.update(wafers=len(data), lots=int(data[lotcol].nunique()))
+                if len(data) < min_numeric or row['lots'] < min_lots:
+                    report['skipped'].append(f'{name}: wafer {len(data)} / lot {row["lots"]} — 표본 부족')
+                    continue
+                if data.x.nunique() < 3 or data.y.nunique() < 3:
+                    report['skipped'].append(f'{name}: 값이 거의 일정함')
+                    continue
+                x = data.x.to_numpy(float)
+                y = data.y.to_numpy(float)
+                lots = data[lotcol].astype(str).to_numpy()
+                r = float(np.corrcoef(x, y)[0, 1])
+                deff = _design_effect(lots, x, y)
+                n_eff = max(3., len(data) / deff)
+                t = r * np.sqrt(max(n_eff - 2, 1) / max(1e-12, 1 - r * r))
+                p_r = float(2 * stats.t.sf(abs(t), max(n_eff - 2, 1)))
+                slope = float(np.polyfit(x, y, 1)[0])
+                scale = scale_of(y)
+                count = max(3, min(int(settings.get('factor_tail_bins', 4)), len(data) // max(5, min_wafers)))
+                bins = pd.qcut(data.x.rank(method='first'), count, labels=False)
+                profile = data.assign(bin=bins).groupby('bin').agg(x=('x', 'median'), p10=('y', lambda v: v.quantile(tail_q)),
+                                                                   p50=('y', 'median'), p90=('y', lambda v: v.quantile(1 - tail_q)),
+                                                                   n=('y', 'size')).reset_index(drop=True)
+                moves = {k: float(profile[k].iloc[-1] - profile[k].iloc[0]) / scale for k in ('p10', 'p50', 'p90')}
+                row.update(r=r, r2=r * r, slope=slope, deff=round(deff, 2), n_eff=round(n_eff, 1),
+                           spearman=float(stats.spearmanr(x, y).statistic),
+                           profile=profile.to_dict('records'), moves=moves, tail_quantile=tail_q,
+                           plot=dict(x=x.tolist(), y=y.tolist(), recent=data.recent.astype(bool).tolist(), lot=lots.tolist()))
+                add(report, row, 'r2', p_r, r * r, minimum=float(settings.get('factor_r2_min', .3)))
+                for side, threshold, key in (('low_tail', np.quantile(y, tail_q), 'p10'), ('high_tail', np.quantile(y, 1 - tail_q), 'p90')):
+                    flag = (y <= threshold) if side == 'low_tail' else (y >= threshold)
+                    if flag.sum() < 3 or (~flag).sum() < 3:
+                        continue
+                    u = stats.mannwhitneyu(x[flag], x[~flag], alternative='two-sided')
+                    n1, n2 = flag.sum(), (~flag).sum()
+                    z = (u.statistic - n1 * n2 / 2) / np.sqrt(n1 * n2 * (n1 + n2 + 1) / 12)
+                    z /= np.sqrt(_design_effect(lots, flag.astype(float), x))
+                    first, last = profile.iloc[0], profile.iloc[-1]
+                    share = lambda b: float(((data.assign(bin=bins).bin.eq(b)) & flag).sum() / max(1, (bins == b).sum()))
+                    other = 'p90' if key == 'p10' else 'p10'
+                    row[side] = dict(move=moves[key], center=moves['p50'], opposite=moves[other],
+                                     share_low_x=share(bins.min()), share_high_x=share(bins.max()),
+                                     x_low=float(first.x), x_high=float(last.x))
+                    # '밑둥 들림' = 한쪽 꼬리만 움직이고 반대쪽 꼬리는 그대로(분포 바닥만 들림).
+                    # 양쪽 꼬리가 같이 움직이면 전체 이동이라 R² 가 잡는다. 효과 = x 양끝 구간의 꼬리 wafer 비율 차.
+                    shape = abs(moves[key]) >= float(settings.get('factor_tail_min', .5)) and \
+                        abs(moves[key]) >= float(settings.get('factor_tail_ratio', 1.5)) * abs(moves[other])
+                    spread = abs(row[side]['share_low_x'] - row[side]['share_high_x'])
+                    add(report, row, side, float(2 * stats.norm.sf(abs(z))), spread if shape else 0.,
+                        minimum=float(settings.get('factor_tail_share_min', .2)))
+            else:
+                data = data.assign(x=data[col].astype(str))
+                counts = data.x.value_counts()
+                data = data.loc[data.x.isin(counts[counts >= min_wafers].index)]
+                levels = data.x.nunique()
+                row.update(wafers=len(data), lots=int(data[lotcol].nunique()), levels=int(levels))
+                if levels < 2:
+                    report['skipped'].append(f'{name}: 비교 가능한 수준 2개 미만 (수준당 wafer ≥ {min_wafers})')
+                    continue
+                if levels > max_levels:
+                    report['skipped'].append(f'{name}: 수준 {levels}개 — 너무 많아 제외')
+                    continue
+                mixed = float(data.groupby(lotcol).x.nunique().gt(1).mean())
+                scale = scale_of(data.y)
+                if mixed >= .5:
+                    data['yc'] = data.y - data.groupby(lotcol).y.transform('median')
+                    groups = [g.yc.to_numpy(float) for _, g in data.groupby('x')]
+                    unit = 'lot 내 비교 (lot 중앙값 보정)'
+                else:
+                    lot = data.groupby([lotcol, 'x']).y.median().reset_index()
+                    counts = lot.x.value_counts()
+                    groups = [g.y.to_numpy(float) for k, g in lot.groupby('x') if counts[k] >= min_lots]
+                    unit = 'lot 간 비교 (root lot 중앙값)'
+                    if len(groups) < 2:
+                        report['skipped'].append(f'{name}: lot 단위 인자 — 수준별 lot {min_lots}개 미만')
+                        continue
+                per = data.groupby('x').y.agg(median='median', p10=lambda v: v.quantile(tail_q),
+                                               p90=lambda v: v.quantile(1 - tail_q), n='size')
+                threshold = float(data.y.quantile(tail_q))
+                data['in_tail'] = data.y <= threshold
+                per['tail_share'] = data.groupby('x').in_tail.mean()
+                row.update(unit=unit, mixed_lots=mixed, per_level=per.reset_index().to_dict('records'),
+                           median_gap=float(per['median'].max() - per['median'].min()) / scale,
+                           tail_gap=float(per['p10'].max() - per['p10'].min()) / scale,
+                           top_gap=float(per['p90'].max() - per['p90'].min()) / scale, tail_quantile=tail_q,
+                           plot=dict(x=data.x.tolist(), y=data.y.astype(float).tolist(), recent=data.recent.astype(bool).tolist(),
+                                     lot=data[lotcol].astype(str).tolist()))
+                if all(len(g) >= 2 for g in groups) and len({round(v, 12) for g in groups for v in g}) > 1:
+                    h, p = stats.kruskal(*groups)
+                    n_total = sum(len(g) for g in groups)
+                    eps2 = max(0., (h - len(groups) + 1) / (n_total - len(groups))) if n_total > len(groups) else 0.
+                    row['epsilon2'] = float(eps2)
+                    add(report, row, 'level', p, eps2, minimum=float(settings.get('factor_level_effect_min', .15)))
+                table = pd.crosstab(data.x, data.in_tail)
+                if table.shape == (levels, 2) and data.in_tail.sum() >= 3:
+                    chi2 = stats.chi2_contingency(table, correction=False)
+                    deff = _design_effect(data[lotcol].astype(str).to_numpy(), data.in_tail.astype(float),
+                                          (data.x == counts.index[0]).astype(float))
+                    p_tail = float(stats.chi2.sf(chi2[0] / deff, levels - 1))
+                    spread = float(per.tail_share.max() - per.tail_share.min())
+                    shape = row['tail_gap'] >= float(settings.get('factor_tail_min', .5)) and \
+                        row['tail_gap'] >= float(settings.get('factor_tail_ratio', 1.5)) * row['top_gap']
+                    row['level_tail'] = dict(share_spread=spread, worst=str(per.tail_share.idxmax()),
+                                             worst_share=float(per.tail_share.max()))
+                    add(report, row, 'level_tail', p_tail, spread if shape else 0.,
+                        minimum=float(settings.get('factor_tail_share_min', .2)))
+            report['rows'].append(row)
+    tests.sort(key=lambda t: t['p'])
+    q = 1.
+    for rank in range(len(tests), 0, -1):
+        test = tests[rank - 1]
+        q = min(q, test['p'] * len(tests) / rank)
+        test['q'] = q
+    alpha = float(settings.get('factor_fdr_alpha', .05))
+    for test in tests:
+        row = test['row']
+        row.setdefault('tests', {})[test['signal']] = dict(p=test['p'], q=test['q'], effect=test['effect'], minimum=test['minimum'])
+        if test['q'] <= alpha and test['effect'] >= test['minimum']:
+            row['signals'].append(test['signal'])
+    top_k = max(1, int(settings.get('factor_top_k', 4)))
+    for entry in entries:
+        report = entry['_factors']
+
+        def strength(row):
+            best = max([row['tests'][s]['effect'] / max(row['tests'][s]['minimum'], 1e-9) for s in row['signals']] or [0])
+            return (bool(row['signals']), best, -min([t['q'] for t in row.get('tests', {}).values()] or [1]))
+        report['rows'].sort(key=strength, reverse=True)
+        report['flagged'] = [r for r in report['rows'] if r['signals']][:top_k]
+        for row in report['rows']:
+            fam = report['families'].setdefault(row['family'], dict(tested=0, flagged=0))
+            fam['tested'] += 1
+            fam['flagged'] += bool(row['signals'])
+    return dict(items=len(entries), tests=len(tests), flagged=sum(len(e['_factors']['flagged']) for e in entries),
+                seconds=round(time.monotonic() - started, 3), fdr_alpha=alpha)
 
 
 def mlmode_evaluate(settings, output_dir, seeds=(7,19,43)):

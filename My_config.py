@@ -50,7 +50,7 @@ _REPORT_HTML_TEMPLATE = r"""<!DOCTYPE html>
         /* 여백은 본문 wrapper div의 inline style로 지정(메일/포워딩 동일 표시) — body엔 미지정 */
         body {
             font-family: 'NanumGothic', '나눔고딕', 'Segoe UI', Arial, '맑은 고딕', Malgun Gothic, sans-serif;
-            font-size: 12px;
+            font-size: 13px;
             background-color: #ffffff;
             color: #1a1a1a;
             line-height: 1.5;
@@ -498,7 +498,7 @@ class Config:
             (89.9,  '#FFD700'),   # 89.9: 노랑(직전)
             (90.0,  '#FFD700'),   # 90:  노랑 — 100 미만은 눈에 띄게
             (99.9,  '#FFD700'),   # 99.9: 노랑 유지
-            (100.0, '#00B050'),   # 100: 초록(만점만 초록)
+            (100.0, '#178A43'),   # 100: 초록(만점만 초록). 흰 글자 대비 4.5:1 — 예전 #00B050 은 2.9:1로 숫자가 흐렸다
         ]
         self.score_color_na = '#555555'   # 측정 없음(N/A) 회색
 
@@ -526,14 +526,32 @@ class Config:
         self.mail_connect_timeout_sec = 10
         self.mail_read_timeout_sec = 90
         self.mail_max_attempts = 3
+        # 사내 메일 API 첨부 개수 한도. 본문 인라인(data:image) 이미지도 첨부로 떼어 세는 경우가 있어
+        # '이미지 + 첨부' 합계가 넘으면 'Attach file count is over 10' 으로 메일 전체가 거부된다(2026-07 실제 발생).
+        self.mail_attach_limit = 10
+        # 메일 1통 본문 이미지 상한(Daily Trend 한 줄 띠·ML 항목 시트·ALL 시트 수). 기본 8 = 10 − PPT 1 − 여유 1.
+        self.mail_inline_image_limit = 8
 
         # ── 독립 일일 서비스 ──
         # 수신처는 제품 YAML email_receiver와 분리한다(실제 주소 또는 메일링 시트명).
-        # 제품 미선택/수신처 미설정 시 외부 발송하지 않는다. 수정 후 Scheduler 재시작.
+        # products=[]이면 Scheduler에 등록된 제품을 사용한다. enabled=False이면 중지.
+        # 전역 설정은 이 파일, 제품별 설정은 config.yaml, 제품 순서는 scheduler.yaml.
+        # Excel의 실제 시트명에 맞게 변경하세요(공백과 밑줄은 서로 다릅니다).
+        self.service_recipient_group = 'POWER USER'
+        # GUI는 선택 기능. 시작 실패/탭 종료와 무관하게 제품 순회는 지속됩니다.
+        self.manager = dict(enabled=True, host='127.0.0.1', port=8765,
+                            poll_sec=5, root_lot_length=5)
+        # 관리 화면 자연어 명령·로그 요약용 사내 LLM(Gemma4). 선택 기능 — 꺼져 있거나 응답이 없으면
+        # 규칙 해석으로 동작하고, LLM이 고른 제품/Lot/Step도 로그 후보에 있어야만 쓴다(판정은 규칙이 한다).
+        # 비밀값(credential_key)은 이 파일 대신 환경변수 AUTO_REPORT_LLM_KEY로 주는 것을 권장.
+        # api_url·system_name도 환경변수 AUTO_REPORT_LLM_URL / AUTO_REPORT_LLM_SYSTEM 이 있으면 우선.
+        self.manager_llm = dict(enabled=True, provider='gemma4', api_url='', model='Gemma4-260430',
+                                credential_key='', system_name='', user_id='', user_type='',
+                                auth_mode='dep_ticket', timeout_s=60, temperature=0.1)
         # 키 이름 대응: recipients(서비스 수신처) vs email_receiver(제품별) vs mail_vehicle(발신 계정 제품).
         self.watchdog = dict(
             # -- 일정/알림 --
-            enabled=True, daily_time='09:00', recipients=[], mail_vehicle='',
+            enabled=True, daily_time='09:00', recipients=[self.service_recipient_group], mail_vehicle='',
             ops_root='RUN/OPS',
         )  # 운영 확인: team/부서 수신처
         # 두 모드의 아이템별 색상: reformatter split_check에 ML_TABLE의 임의 열 이름 지정.
@@ -541,21 +559,21 @@ class Config:
         # CUSTOM 검색은 fnmatch 와일드카드 지원: FAB 1.0*ppid (대소문자 무시, 복수 매칭은 값 조합).
         self.daily_trend = dict(
             # -- 일정/대상 --
-            enabled=False, daily_time='09:30', products=[], recipients=[], mail_vehicle='',
+            enabled=True, daily_time='09:30', products=[], recipients=[self.service_recipient_group], mail_vehicle='',
             # -- 요약 --
             summary_max_items=12,  # Daily Trend 이상·주의 요약은 누락 없이 전체 표시.
             category_order=[],  # CAT2 이름을 원하는 순서대로: ['Transistor', 'Leakage', ...]; 미지정은 뒤에 이름순
             # -- 데이터 --
             ml_table_dir='RUN/DB', ml_join_keys=['root_lot_id','wafer_id'],
             # -- 렌더/용량 --
-            chart_dpi=150, trend_marker_size=18, trend_recent_marker_size=32, trend_palette_colors=64, trend_background_alpha=0.3, html_legend_limit=6, html_columns=2, ppt_max_bytes=10_000_000, html_max_bytes=2_000_000,
+            chart_dpi=150, trend_marker_size=18, trend_recent_marker_size=32, trend_palette_colors=64, trend_background_alpha=0.3, html_legend_limit=6, html_columns=3, ppt_max_bytes=10_000_000, html_max_bytes=2_000_000,
             mail_max_bytes=20_000_000, max_mail_parts=10,
             # -- 실행 --
             report_timeout_sec=3600, poll_sec=30,
         )  # ML_TABLE 필수. 최근 24시간 측정 항목 + 과거 비교 추이. S3 업로드 없음.
         self.mlmode = dict(
             # -- 일정/대상 --
-            enabled=False, daily_time='10:00', products=[], recipients=[], mail_vehicle='',
+            enabled=True, daily_time='10:00', products=[], recipients=[self.service_recipient_group], mail_vehicle='',
             summary_max_items=12,
             with_vehicle={},  # 예: {'vehicle_A': ['Vehicle_B']}; 미지정 제품은 제품 YAML with_vehicle 사용
             # -- 데이터 --
@@ -563,7 +581,18 @@ class Config:
             # -- 렌더/용량 --
             chart_dpi=150, trend_palette_colors=64, html_columns=4, ppt_max_bytes=10_000_000, html_max_bytes=2_000_000,
             mail_max_bytes=20_000_000, max_mail_parts=10,
+            # -- 대상 선정 --
+            # candidate_source: 'daily'  = Daily Trend(Auto Report 판정)가 이상·주의로 본 항목만 ML 로 자세히 분석(가장 가볍다)
+            #                   'ml'     = 모든 항목을 아래 ML 기법으로 선별(예전 방식)
+            #                   'either' = 둘 중 하나라도 해당하면 포함(기본). 리포트에 '선정 이유'가 함께 나간다.
+            candidate_source='either',
+            # 기법별 설명 문구 덮어쓰기(리포트 '무엇을 보는가' 열). 예: {'isolation_forest': '여러 지표가 함께 틀어진 wafer'}
+            module_notes={},
             # -- 탐지(detector) --
+            # modules: 판정에 쓰는 기법(빼면 실행 안 함) / diagnostic_modules: 판정 보조(진단용) 기법
+            #   split_difference·time_trend·distribution_shift·spread_change·spike_rate(통계 검정, FDR 보정)
+            #   isolation_forest·local_outlier_factor(과거 wafer 로 학습한 비지도 이상탐지, sklearn)
+            #   equipment_difference·spatial_pattern(진단용)
             modules=['split_difference','time_trend','distribution_shift','spread_change','spike_rate','isolation_forest','local_outlier_factor'],
             diagnostic_modules=['equipment_difference','spatial_pattern'], equipment_columns=[],
             min_samples=12, min_lots=3, fdr_alpha=0.05,
@@ -582,6 +611,13 @@ class Config:
             influence_seconds=60, influence_max_tests=240, influence_max_join_rows=200000,
             influence_max_wafers_per_root=100, influence_min_matched_roots=5,
             influence_similar_mismatch=.15, influence_min_balance=.5,
+            # -- ML_TABLE 인자 스크리닝(항목 페이지 '인자 스크리닝' 표·차트) --
+            # 계열: KNOB_*/SPLIT_*, MASK_*/RETICLE_*, EQP_*/CHAMBER_*/RECIPE_*/FAB_* = 범주(수준별 비교),
+            #       INLINE_*, VM_* = 수치(R² 와 '밑둥 들림' — x 구간별 하단 꼬리 P10 만 움직이는지). factor_families 로 덮어쓰기.
+            factor_screen_enabled=True, factor_families={}, factor_min_wafers=6, factor_min_numeric_wafers=20,
+            factor_min_lots=3, factor_max_levels=12, factor_tail_quantile=.1, factor_tail_bins=4,
+            factor_tail_min=.5, factor_tail_ratio=1.5, factor_tail_share_min=.2, factor_r2_min=.3,
+            factor_level_effect_min=.15, factor_fdr_alpha=.05, factor_top_k=4, factor_seconds=60,
             # -- 실행 --
             report_timeout_sec=3600, poll_sec=30,
         )  # 분석 담당자 검토용: 탐지 근거·연관 후보 제공. 기본 Auto report 판정에는 반영하지 않음.
@@ -776,6 +812,18 @@ class Config:
         self.ppt_chart_dpi = 125           # PPT 삽입 차트 해상도 (DPI). 높이면 선명+용량↑
         self.ppt_chart_jpg_quality = 55    # 라인/박스/트렌드/CDF/레전드 JPEG 품질 (1~95, 용량의 주 레버)
         self.ppt_map_jpg_quality = 38      # WF MAP(연속색 산점) JPEG 품질 (index당 최대 용량 항목)
+        # 인코딩: 'auto'=차트마다 팔레트 PNG와 JPEG 중 작은 쪽(선·글자 차트는 PNG가 ~70% 작고 선명),
+        #         'jpeg'=예전 방식. WF MAP은 슬라이드 표시 폭 기준 ppt_map_max_dpi 이하로 줄여 팔레트 PNG.
+        self.ppt_image_codec = 'auto'
+        self.ppt_png_colors = 128          # 차트 팔레트 색 수(64~256). 낮출수록 가볍지만 반투명 겹침 표현이 거칠어짐
+        self.ppt_map_png_colors = 64       # WF MAP 팔레트 색 수. 64색이면 컬러맵 계조가 유지되며 원본 대비 ~53% 작다
+        self.ppt_map_max_dpi = 0           # WF MAP 해상도 상한(표시 크기 기준 DPI, 0=원본 유지). 점 지도는 축소하면 번짐 때문에 PNG가 오히려 커진다
+        # 메일 첨부 한도 대비 PPT 목표: 차트까지 만든 뒤 남은 용량으로 Description 이미지 화질을 정하고,
+        # 그래도 넘으면 큰 이미지부터 줄여 한도 아래로 맞춘다(ppt_mail_max_mb × ppt_budget_ratio).
+        self.ppt_mail_max_mb = 10.0
+        self.html_mail_max_mb = 2.0        # 메일 본문(HTML) 한도 — 넘으면 로그에 경고
+        self.ppt_budget_ratio = 0.92       # 여유분(메일 서버 오버헤드) — 10MB × 0.92 ≈ 9.2MB
+        self.description_min_px = 480      # 용량이 빠듯할 때 Description 이미지 최소 해상도(최대 변 px). 이보다 작아야 하면 이미지 생략(글자는 유지)
 
         # ── HTML 리포트용 이미지 해상도(DPI) — PPT와 독립적으로 조정 ──
         # HTML [0] Anomaly Trend chart(RUN/TEMP png)와 Score Board/anomaly WF MAP의 DPI.
@@ -805,6 +853,19 @@ class Config:
         self.parallel_max_workers = 8         # 자동 결정 시 상한
         self.parallel_mem_per_worker_gb = 1.2  # 워커 1개당 예상 메모리(GB) — pandas/matplotlib 상주 + 작업분
         self.parallel_reserve_gb = 3.0        # 메인 프로세스(merged_df/PPT 조립) 몫으로 남겨둘 가용 메모리(GB)
+        # 서버 공용 한도: 같은 서버에서 여러 Main(Scheduler·수동 bash)이 동시에 돌아도 워커 합계는
+        # (코어 − parallel_reserve_cores) 이하. 다른 작업(S3 전송 등)이 쓰는 CPU·메모리만큼 덜 쓰며
+        # parallel_replan_sec 마다(랏 사이) 다시 계산해 늘리거나 줄인다. 슬롯 폴더: env AUTO_REPORT_SLOT_DIR
+        self.parallel_reserve_cores = 1       # OS·메인 프로세스·S3 전송 몫으로 비워 둘 코어
+        self.parallel_replan_sec = 20         # 병렬도 재계산 최소 간격(초)
+        self.parallel_start_method = 'spawn'  # 워커 시작 방식. fork 는 DuckDB/S3 스레드와 교착 위험
+        self.parallel_max_tasks_per_child = 40  # 워커 1개가 이만큼 그리면 새로 띄움(Python 3.11+, 메모리 누적 방지)
+        # DuckDB: 기본값(모든 코어·RAM 80%) 대신 남은 코어·가용 메모리 비율만 쓴다(0=자동)
+        self.duckdb_threads = 0
+        self.duckdb_memory_fraction = 0.5
+        self.duckdb_memory_limit_gb = 0
+        self.s3_upload_threads = 2            # S3 전송 백그라운드 스레드(다음 Lot 렌더링과 겹쳐 수행)
+        self.product_lock_wait_sec = 3600     # 같은 제품 작업이 실행 중이면 기다리는 최대 시간(초, 0=즉시 실패)
 
         # ──────────────────────────────────────────────────────
         # 차트 공통 색 팔레트 (Chart color palette, matplotlib hex)
@@ -896,7 +957,7 @@ class Config:
         _must100 = getattr(self, 'score_color_must_100_items', None) or []
         if item is not None and str(item) in [str(x) for x in _must100]:
             if abs(v - 100.0) < 0.01:
-                return ('#00B050', '#ffffff')   # 100: 초록
+                return ('#178A43', '#ffffff')   # 100: 초록
             else:
                 return ('#C00000', '#ffffff')   # 100 아님: 빨강
         scale = None
@@ -1061,7 +1122,7 @@ class Config:
 
     def notify_config(self):
         """발송/업로드 그룹."""
-        keys=('mail_connect_timeout_sec','mail_read_timeout_sec','mail_max_attempts',
+        keys=('mail_connect_timeout_sec','mail_read_timeout_sec','mail_max_attempts','mail_attach_limit','mail_inline_image_limit',
               'report_max_attempts','use_email_send','use_s3_upload','use_description_page',
               'use_archive_snapshot')
         return {k:self.get(k) for k in keys}

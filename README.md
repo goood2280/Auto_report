@@ -1,5 +1,29 @@
 # ET Auto Report System
 
+## 운영 GUI 및 실행 안내 (2026-09-28)
+
+`python Scheduler.py` 하나로 기존 제품 순회와 독립 관리 웹 서버·Watchdog·Daily Trend·ML Mode를 준비합니다.
+웹 서버 시작 실패나 브라우저 탭 종료는 Scheduler를 중단시키지 않습니다. VS Code 안의 브라우저 탭에서
+`RUN/OPS/manager_url.txt`의 주소를 엽니다. 원격 접속/Notebook 프록시별 자세한 방법은
+[관리 화면 시작 안내](docs/MANAGER_START.md)를 참고하세요. ipynb 셀은 필요하지 않습니다.
+
+**Scheduler 실행 시 웹 서버는 자동 시작하며, VS Code 웹 탭은 직접 주소를 열어야 합니다.**
+`HOL Auto report` 상단의 **운영 · 가이드 · RUN 로그** 메뉴에서 실행 관리, 설치된 README와
+시작 안내, 제품별 RUN 로그와 서비스 로그를 읽을 수 있습니다. 좁은 분할 화면에서는 세로로 배치됩니다.
+가이드는 목차로 이동하며, 로그는 파일/내용 검색과 자동 갱신을 제공합니다.
+로그 조회는 파일 끝의 최대 256 KB 및 선택한 100/300/1000줄에 한정됩니다.
+
+전역 설정은 **My_config.py**, 제품별 설정은 **reformatter/config.yaml**, 제품 순회 순서는
+**reformatter/scheduler.yaml**입니다. 세 일일 서비스의 기본 수신자는
+`My_config.py`의 `service_recipient_group = 'POWER USER'`가 가리키는 Excel 시트입니다.
+실제 시트명과 정확히 일치해야 하며 누락되면 다른 그룹에 대체 발송하지 않습니다.
+Daily Trend/ML Mode는 기본 활성, 빈 products는 Scheduler 등록 제품을 사용합니다.
+
+GUI는 제품 미선택 시 제품별 측정 로그를 검색하고, 발견 제품·실제 Lot·DC Step을 사람이 확인한 뒤
+생성 전용 또는 생성 후 발행을 요청합니다. Gemma4 없이 동작합니다. Main과 Scheduler의 주요 단계는
+측정 조회·발행 대상 확인·차트 작성·저장·메일 발송처럼 업무 용어와 색으로 표시합니다.
+외부 AI 호출은 Main 실행 경로에 없습니다. 구버전 설치본을 사용하는 경우 재생성한 setup.py로 갱신하세요.
+
 > **2026-09-22 변경:** 외부 LLM·AI 해석과 판정 규칙([RULE]/NL_RULES/다이제스트)을 제거했다.
 > 이상 판정은 순수 통계(detector)만 사용한다. 아래 문서 중 `[RULE]`·AI·다이제스트·
 > `effect_sigma`·`--convert-nl-rules`·`--rule-digest` 언급은 과거 기록으로 보고 따르지 않는다.
@@ -57,21 +81,33 @@ flowchart LR
 | 경로 | 자동 기동 조건 | 기본값 |
 |---|---|---|
 | Auto Report | Scheduler의 제품 그룹 설정 | 설정된 제품 순회 |
-| Watchdog | `My_config.py`의 `watchdog.enabled=True` | 감시 활성, 수신처 없음 → 메일 미발송 |
-| Daily Trend | `daily_trend.enabled=True` + `products` + `recipients` | 비활성 |
-| ML Insight | `mlmode.enabled=True` + `products` + `recipients` | 비활성 |
+| Watchdog | `My_config.py`의 `watchdog.enabled=True` | 활성, POWER USER 그룹 |
+| Daily Trend | `daily_trend.enabled=True` + 운영 제품 + 수신 그룹 | 활성, POWER USER 그룹 |
+| ML Insight | `mlmode.enabled=True` + 운영 제품 + 수신 그룹 | 활성, POWER USER 그룹 |
 
 Watchdog의 기본 일일 보고 시각은 09:00, Daily Trend는 09:30, ML Insight는 10:00이며 운영 서버의 로컬 시각을 사용합니다. 수신처는 서비스별로 지정합니다. 기본 Auto Report 메일은 제품 설정의 `use_email_send`도 확인하세요. `--once` / `--drain`은 독립 서비스를 자동 기동하지 않습니다.
 
 설정 변경 후 Scheduler를 다시 시작하세요. 이미 실행 중인 독립 타이머는 설정을 주기적으로 읽으며, Scheduler 종료와 별개로 계속 실행될 수 있습니다. 서버 자체가 꺼지면 Watchdog도 동작할 수 없습니다.
 
-### ML Insight 차트 읽기
+### ML Insight 차트 읽기 (실험 기능 · 2026-09-29 개편)
 
-ML은 메일에서 항목별 전체 폭으로, PPT에서는 차트 한 개를 한 슬라이드에 표시합니다. Trend와 공간 상세는 각각의 비율을 유지하며 범례는 차트 밖에 표시합니다.
+ML 에 걸린 항목마다 **auto report PPT 항목 페이지와 같은 구조**로 한 장을 만듭니다.
+PPT: 요약 1장 → 항목마다 ① 항목 페이지 ② ML_TABLE 인자 스크리닝 페이지. 메일(HTML)은 flow 웹앱 톤의 카드이며 같은 차트를 한 장으로 합쳐 싣습니다.
 
-- **Trend**: 색은 제품/Split, 검정 테두리는 이전 성공 발행 이후 신규·변경 관측(첫 발행은 당일 측정)입니다. 검정선은 전체 그룹의 **일별 중앙값을 3일 이동평균한 참고선**입니다. 항목별 Y축 범위는 다를 수 있습니다.
-- **공간 상세**: 왼쪽은 신규 관측의 위치별 중앙값(모든 Split 합성), 가운데는 신규와 과거의 차이, 오른쪽은 Split별 반경 중앙값과 3차 근사선입니다. 가운데의 빨강/파랑은 증가/감소이며 Spec 불량 표시가 아닙니다.
-- **탐지 근거**: q는 여러 검정을 보정한 유의확률이며 불량률이 아닙니다. 탐지 여부는 q와 효과 크기 조건을 함께 사용합니다. 표본·좌표·공정시간 누락은 본문의 확인 사항과 첨부 목록을 함께 확인하세요.
+- **항목 페이지**: 왼쪽 위 요약 표(선정 이유·ML 근거·인자 신호·자료), 왼쪽 Box(신호가 난 범주 인자 → Split → 과거/신규 순으로 묶음, wafer 중앙값, 점선 = P10)·WF MAP(신규 site 중앙값 / 신규−과거), 오른쪽 Trend·Radius·Cumulative. 검정 테두리 점 = 신규 관측.
+- **인자 스크리닝**: ML_TABLE 열을 계열로 나눠 wafer 단위(최신 측정 shot 중앙값)로 대조합니다.
+  - 범주 `KNOB_*`·`SPLIT_*`·`MASK_*`·`EQP_*`·`CHAMBER_*`·`RECIPE_*`·`FAB_*`: lot 안에서 갈리는 인자는 lot 중앙값을 뺀 값, lot 단위 인자는 root lot 중앙값끼리 Kruskal-Wallis(ε²). 수준별 하단 꼬리 비율도 봅니다.
+  - 수치 `INLINE_*`·`VM_*`: **R²**(Pearson)와 **밑둥 들림** — x 를 구간으로 나눴을 때 한쪽 꼬리(P10)만 움직이고 반대쪽 꼬리는 그대로인 경우. 차트의 주황 선이 움직인 꼬리입니다.
+  - 같은 lot wafer 는 독립이 아니므로 유효 표본(Kish design effect)으로 p 를 계산하고, 리포트 전체 인자 검정에 BH 보정을 한 번 겁니다. 설정은 `My_config.mlmode` 의 `factor_*` 키(계열 패턴 `factor_families`).
+- **탐지 근거**: q는 여러 검정을 보정한 유의확률이며 불량률이 아닙니다. 연관 신호는 원인 확정이 아닌 탐색 결과입니다.
+
+### 메일 본문 그림 수 한도 (Attach file count is over 10)
+
+사내 메일 API 는 본문 인라인(data:image) 그림도 첨부로 떼어 세는 경우가 있어, **그림 + 첨부 PPT 가 10개를 넘으면 메일 전체를 거부**합니다(2026-07 실제 발생, 당시 Score Board 개별 WF MAP 이미지). 그래서:
+
+- Auto Report 본문은 합성 이미지(Anomaly Trend 상위 `anomaly_trend_chart_top_n`=3 등)로 그림 수를 줄여 둡니다.
+- Daily Trend 는 **한 줄(`html_columns` 칸) = 그림 1장** 띠로, ML Insight 는 **항목당 그림 1~2장**으로 합치고, 메일 1통 그림 수를 `mail_inline_image_limit`(기본 8 = 10 − PPT − 여유 1) 이하로 나눠 보냅니다. ALL Trends 메일도 2열 시트 그림으로 합칩니다.
+- 발송 직전 `_mail_attachment_guard` 가 그림+첨부를 `mail_attach_limit`(기본 10)과 다시 비교해, 넘치면 뒤쪽 그림을 안내 문구로 바꿔 발송이 실패하지 않게 합니다. 메일 API 의 거부 사유 문구는 메일 이력(reason)에 남습니다.
 
 > 반도체 **DC(ET) 측정 결과 자동 분석 → 자동 리포트 → 불량 해석**까지 한 번에 이어지는 시스템
 > ET(Electrical Test) 측정 데이터 → 통계 자동 해석 → 불량(Anomaly)·원인 해석 → PPT/HTML 리포트 → 메일 발송.
@@ -272,11 +308,11 @@ python setup.py            # 현재 폴더에 번들 파일 추출
 | 초기 DB에 최근 200일 적재 | `python Main.py --init-db vehicle_A` |
 | 평소 자동 실행 | `python Main.py vehicle_A` |
 | 지정 prime_key 한 랏만, ET 기간 제한 없이 생성 | `python Main.py "_TRIGGER_SINGLE_vehicle_A_T6677.1_test"` |
-| 한 사람에게만 강제 발송 | `python Main.py --send-user "user.id@samsung.com" --prime-key "vehicle_A_T6677.1_test"` |
+| 한 사람에게만 강제 발송 | `python Main.py --send-user "user.id" --prime-key "vehicle_A_T6677.1_test"` |
 | CLI 도움말 | `python Main.py --help` |
 
 기본 발송은 제품 설정 `email_receiver`에 지정된 엑셀 시트의 명단을 사용합니다.
-**`--send-user`는 메일링 엑셀을 읽지 않고 입력한 이메일 주소 한 명에게만 발송합니다.**
+**`--send-user`는 메일링 엑셀을 읽지 않고 입력한 ID에 `@samsung.com`을 붙여 한 명에게만 발송합니다.**
 끝에 `--single`을 붙이면 기간 제한 없이 지정 lot·step의 ET 데이터만 사용합니다.
 
 새 제품은 YAML 제품 블록과 reformatter를 먼저 준비한 뒤 초기 DB 적재를 실행하세요.
@@ -380,27 +416,28 @@ python Main.py "_TRIGGER_vehicle_A_T6677.1_test"
 Scheduler의 `AUTO_REPORT_EMAIL_RECEIVER`가 있으면 그 값에 해당하는 시트를 사용합니다.
 별도의 부서 지정 명령은 필요하지 않습니다.
 
-**개인 발송은 엑셀을 읽지 않습니다.** `--send-user`에 `@`와 도메인을 포함한 이메일 주소
-한 개를 입력하면, 기존 수신 그룹을 대체하고 그 사람에게만 보냅니다.
+**개인 발송은 엑셀을 읽지 않습니다.** `--send-user`에 Samsung 메일 주소의 `@` 앞부분만
+입력하면 코드가 `@samsung.com`을 붙입니다. 기존 수신 그룹을 대체하고 그 사람에게만 보냅니다.
 
 ```bash
-python Main.py --send-user "user.id@samsung.com" --prime-key "vehicle_A_T6677.1_test"
+python Main.py --send-user "user.id" --prime-key "vehicle_A_T6677.1_test"
 
 # 기간 제한 없이 해당 lot·step의 ET만 사용하여 한 명에게 발송
-python Main.py --send-user "user.id@samsung.com" --prime-key "vehicle_A_T6677.1_test" --single
+python Main.py --send-user "user.id" --prime-key "vehicle_A_T6677.1_test" --single
 ```
 
 | 항목 | 기본 발송 / 기존 TRIGGER | `--send-user` |
 |---|---|---|
-| 수신자 결정 | 설정된 엑셀 시트의 `KNOX_ID` 명단 | 명령에 입력한 이메일 한 개 |
+| 수신자 결정 | 설정된 엑셀 시트의 `KNOX_ID` 명단 | 명령에 입력한 user + `@samsung.com` 한 명 |
 | 메일링 엑셀 읽기 | 필요 | 읽지 않음; 파일 없어도 개인 발송 가능 |
-| 도메인 보완 | 엑셀의 ID에 `@samsung.com` 추가 | 보완하지 않음; 완전한 이메일 주소 필수 |
+| 도메인 보완 | 엑셀의 ID에 `@samsung.com` 추가 | 항상 `@samsung.com` 고정 |
 | 발송 활성화 | `use_email_send` 설정 | 이번 실행만 `use_email_send=True` |
 | 발행 설정 | 제품 설정 | 이번 실행만 `report_making=True`, `DB_Setting_mode=False` |
 | 기본 수신 그룹 | 그대로 사용 | YAML / Scheduler 수신 그룹을 사용하지 않음 |
 | S3 업로드 | AUTO는 제품 설정, TRIGGER는 비활성 | 비활성 |
 
-`--send-user`는 ID만 입력하거나 콤마·세미콜론으로 여러 주소를 입력하면 오류로 종료합니다.
+`--send-user`에는 영문·숫자·점(`.`)·밑줄(`_`)·하이픈(`-`)으로 된 user 부분만 입력합니다.
+`@samsung.com`까지 입력하거나 다른 도메인·여러 사용자를 입력하면 오류로 종료합니다.
 메일 API·발신 계정·TICKET 등 기존 사내 설정은 필요합니다. 설정 파일 자체는 변경하지 않습니다.
 엑셀 시트가 없거나 명단이 비었으면 기본 발송은 오류로 종료하며 다른 시트로 대체하지 않습니다.
 
@@ -413,7 +450,7 @@ flowchart TD
     CMD["제품 / prime_key 명령"] --> CFG["제품 설정 로드"]
     CFG --> ROUTE{"--send-user 사용?"}
     ROUTE -->|"아니오"| SHEET["설정된 엑셀 시트 읽기<br/>KNOX_ID 명단 → 이메일"]
-    ROUTE -->|"예"| USER["완전한 이메일 한 개 검증<br/>메일링 엑셀 읽지 않음"]
+    ROUTE -->|"예"| USER["user 부분 검증<br/>@samsung.com 고정 · 엑셀 미사용"]
     SHEET --> DEFAULT["시트 명단으로 수신자 확정<br/>use_email_send 설정 유지"]
     USER --> ONE["입력한 한 명만 수신자 확정<br/>이번 실행 메일 ON"]
     DEFAULT --> SCOPE["모드에 맞는 ET 조회<br/>SINGLE은 날짜 제한 없이 lot·step 하나"]
