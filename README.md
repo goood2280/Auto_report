@@ -1,5 +1,24 @@
 # ET Auto Report System
 
+> **2026-09-22 변경:** 외부 LLM·AI 해석과 판정 규칙([RULE]/NL_RULES/다이제스트)을 제거했다.
+> 이상 판정은 순수 통계(detector)만 사용한다. 아래 문서 중 `[RULE]`·AI·다이제스트·
+> `effect_sigma`·`--convert-nl-rules`·`--rule-digest` 언급은 과거 기록으로 보고 따르지 않는다.
+> ML mode는 라이브러리 기법(검정 + sklearn IF/LOF + 탐색적 연관 분석)만 사용한다.
+
+## 일일 서비스 변경 (2026-09-19, 2026-09-22 갱신)
+
+기본 AUTO의 대상 선정·판정·메일·S3 경로는 유지합니다. 아래 세 서비스는 메일 및 로컬 산출물만 사용하며 S3에 업로드하지 않습니다.
+
+- **Watchdog**: 본문 상단에서 제품별 메일 성공, 발행 대기, 설정 제외, 처리 실패와 사유를 함께 확인합니다. 첨부는 UTF-8 BOM CSV이며 Prime key, 측정 revision, 생성·저장·메일 상태, 발행 조건, 재시도 및 로그 정보를 보존합니다.
+- **Daily Trend**: 발행 시점 직전 24시간 `(시작, 종료]`에 측정된 항목·조건을 카테고리별로 표시합니다. 제품 viewing_period의 과거 데이터는 비교 배경입니다. 성공 발행 이력과 무관하게 동일한 24시간 구간을 강조합니다. 상단의 Auto Report 공통 분석 함수가 검출한 이상·주의 요약을 클릭하면 해당 차트로 이동합니다. PPT도 이상·주의 요약 → 카테고리별 Trend 순서이며 요약에서 해당 슬라이드로 이동합니다.
+- **ML mode**: 탐지된 항목만 본문에 표시하고 시간 추이, 분포·산포 변화, Split·장비·공간 차이, 극단값 비율 및 IF/LOF 결과를 검토합니다. 기법별 효과 기준과 전체 검정 FDR을 사용합니다. 원인 후보는 별도의 연관 분석이며 원인 확정을 뜻하지 않습니다.
+
+Daily Trend와 ML mode는 `ml_table_dir/ML_TABLE_제품명.parquet`가 없는 제품을 발행에서 제외합니다. 전부 없거나 대상 측정이 없으면 메일 없이 `skipped`로 기록하며, 정상 종료하므로 타이머는 다음 일일 일정으로 넘어갑니다. 부분 발행의 생략 제품은 coverage에 기록합니다. 이미 시도한 메일은 재시도 시 저장한 산출물을 그대로 사용합니다.
+
+ML 기본 연산 한도: `analysis_seconds=120`, `analysis_max_tests=2000`, `max_group_pairs=64`, `model_max_samples=5000`(학습·과거 검증·최근 평가 각각). 시간 제한은 항목·그룹·모델 사이에서 검사하며 이미 시작한 단일 연산은 완료합니다. IF/LOF는 단일 작업자로 실행합니다. 상한으로 생략한 분석은 자료 제한에 표시하고, 후보가 없는 불완전 분석을 정상 판정으로 취급하지 않습니다. 연관 분석은 별도 `influence_seconds=60` 및 열·검정·join 행 상한을 사용합니다.
+
+소스 수정 후 `python gen_setup.py`로 `setup.py` 배포 번들을 재생성합니다. 미리보기는 `Scheduler.py --watchdog-preview`, `--daily-trend-preview`, `--mlmode-preview`로 생성하며 메일을 보내지 않습니다.
+
 ## 처음 읽는 분: 그림으로 전체 흐름 보기
 
 **[가이드 열기 — docs/guide/index.html](docs/guide/index.html)** · [Markdown / Mermaid 가이드](docs/guide/auto-report-architecture.md)
@@ -104,25 +123,19 @@ watchdog:
   daily_time: '09:00'          # 한국시간으로 설정된 운영 서버의 로컬 시간
   recipients: []              # ['user@example.com'] 또는 ['정확한_메일링_시트명']
   mail_vehicle: ''            # 메일 API/발신자 설정 제품; 빈 값이면 첫 순회 제품
+  ops_root: 'RUN/OPS'         # 운영 기록 저장 위치(Scheduler와 Main이 동일해야 함)
   poll_sec: 30
   stale_sec: 180              # loop heartbeat 무응답 경고
   progress_stale_sec: 1800    # Main 단계 장기 체류 → 처리 지연 표시
   immediate_alerts: false    # true면 상태 이상/복구 때 추가 알림
-  analysis_days: 14
-  active_days: 3
-  min_lots: 3
-  low_score_pct: 95
-  spec_out_pct: 1
-  shift_sigma: 2
-  shift_min_spec_frac: 0.02
-  trend_correlation: 0.7
+  report_timeout_sec: 900     # 일일 보고 생성 상한(초)
 ```
 
 ```bash
 python Scheduler.py                       # 상시 Scheduler + 독립 watchdog 자동 기동
 python Scheduler.py --watchdog            # watchdog만 독립 실행
-python Scheduler.py --watchdog-preview    # 실제 메일 없이 HTML/PPT 생성
-python Scheduler.py --watchdog-once       # 1회 점검; 일일 발송 조건이면 발송
+python Scheduler.py --watchdog-preview    # 실제 메일 없이 HTML/CSV 생성
+python Scheduler.py --watchdog-once       # 1회 점검 후 즉시 1회 발행(수신처 필요)
 ```
 
 Watchdog은 Scheduler의 자식 작업 처리와 분리된 프로세스입니다. Scheduler 종료 후에도
@@ -139,21 +152,10 @@ Watchdog은 Scheduler의 자식 작업 처리와 분리된 프로세스입니다
 - 신규·갱신 측정 제품/lot/prime key와 측정 시각.
 - prime key별 생성·저장 확인, 메일 성공/실패/응답 불확실/비활성, 시도 수, 소요 시간, 미발행 사유.
 - 조회·피벗/ADDP·좌표 병합·분석·차트·저장·메일 단계별 시간 및 실행 실패.
-- 제품별 반복 Spec out, 지속 저점수, 분포 중심 변화 표와 첨부 PPT 페이지 번호.
+- 발송 상태가 `unknown`(응답 불확실)인 건은 서버 수신 이력을 확인한 뒤 재발송 여부를 결정합니다(자동 재전송 안 함).
 
-비교는 제품·Step·프로그램·온도·FULL/13pt·Spec/집계 규칙이 같은 집단 안에서만 수행합니다.
-재측정은 prime key별 최신 측정을 사용하여 동일 lot 반복 실행이 반복 이상으로 집계되지 않습니다.
-최근 기본 3개 lot의 연속 Spec out ≥ 1%, 연속 점수 < 95%, 또는 최소 6개 lot의
-중심 변화 ≥ 2σ와 지속 방향/상관 조건을 사용합니다. 양측 Spec이면 Spec 폭 2%의 변화량
-게이트도 적용합니다. 점수는 wafer별 Spec pass 비율 평균이며 집계 항목은 설정된 집계값 기준입니다.
-표본 부족·Spec 없음·관측 이력 없음은 정상 판정과 구분합니다.
-
-PPT는 해당 항목의 lot 중앙값 Trend, 전체 값 분포와 Spec 경계, Spec out 비율을 표시합니다.
-Spec 밖 히스토그램 막대는 진한 붉은색입니다. 분포 그림은 24-bin 요약을 재구성한 근사 그림이고,
-Spec out 수치는 원자료(집계 항목은 집계값)에서 계산합니다. 첨부 PPT는 10MB 미만으로 압축합니다.
-관측 자료는 리포팅 데이터 처리 시 갱신되며, 새 발행 대상이 없는 사이클은 기존 자료를 사용합니다.
-첫 설치 때 운영 성공 이력은 소급 추정하지 않으며, 기존 측정 로그의 첫 관측과 실제 신규 측정은
-표의 측정 시각으로 구분할 수 있습니다.
+Watchdog은 운영 ledger 롤업(HTML/CSV)만 제공하며 추세분석·PPT는 만들지 않습니다.
+추세·이상 분석은 Daily Trend·ML mode가 담당합니다.
 
 ### 안정성 및 재시도
 
@@ -268,11 +270,6 @@ python Main.py vehicle_A
 # 3) 강제 발행 (특정 LOT 즉시 리포트)
 python Main.py _TRIGGER_vehicle_A_T6677.1_test
 #                          └vehicle┘ └lot┘ └step┘
-
-# 4) 자연어 규칙 변환 도구 (리포트 발행과 별개)
-python Main.py --convert-nl-rules      # NL_RULES 변환 결과 미리보기 + 캐시 갱신(MD 변경 없음)
-python Main.py --convert-nl-rules-md   # 변환해서 바로 MD의 ANOMALY_RULES에 [RULE]로 적용
-python Main.py --rule-digest           # 규칙 제안 다이제스트 미리보기(발송/상태 변경 없음)
 ```
 
 새 vehicle 추가:
@@ -307,15 +304,13 @@ python setup.py              # 현재 폴더에 전체 소스 추출 (기존 파
 | `.env` | 메일/S3 사용 시 | 메일/S3 자격 등 (GPT 설정은 미사용) |
 | `HOL_Auto_Report_Description.pptx` | 선택 | CAT2별 설명 간지. 있으면 해당 슬라이드를 리포트에 직접 복사 삽입(없어도 진행) |
 | 좌표 xlsx(zone define) | 선택 | WF MAP 실좌표(flat-zone) 보정용 |
-| `ANOMALY_KNOWLEDGE.md` | 선택 | **판정 규칙(`[RULE]`)·PCHK 매핑** + AI 페르소나·답변 스타일 |
+| `ANOMALY_KNOWLEDGE.md` | 선택 | PCHK 매핑·공간 패턴 라벨 해석 기준 |
 
 > `reformatter/`, `config.yaml`, `*.pptx/xlsx/png`, `.env`, mock 모듈은 **setup.py 번들에서 제외**됩니다(사내 별도 관리).
 
 ### 4) 설정 (My_config.py)
 
-- **LLM 제거**: 기존 AI 토글은 호환성용이며 Main 발행에서 활성화할 수 없습니다.
-- **규칙 컴파일**: `anomaly_nl_autocompile`(True — NL_RULES 자연어 규칙을 발행 시 자동 변환/적용).
-- **분석 민감도**: `anomaly_lot_dispersion_ratio`(↑=덜 민감), 플라이어 `anomaly_flier_sigma`/`anomaly_flier_max_pts`/`anomaly_flier_offdir_relax`(반대 방향 완화 배수), 산포 절대량 게이트 `anomaly_disp_min_spec_frac`, 지식 규칙용 `anomaly_median_low_sigma`. **통계 우선순위 제외**: `anomaly_exclude_items`(완전 제외) / `anomaly_exclude_unless_rule`(RULE 매칭 시 부활, 와일드카드). → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
+- **분석 민감도**: `anomaly_lot_dispersion_ratio`(↑=덜 민감), 플라이어 `anomaly_flier_sigma`/`anomaly_flier_max_pts`/`anomaly_flier_offdir_relax`(반대 방향 완화 배수), 산포 절대량 게이트 `anomaly_disp_min_spec_frac`. **통계 우선순위 제외**: `anomaly_exclude_items`(완전 제외, 와일드카드). → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
 - **WF MAP**: `wfmap_exclude_keywords`(예: `['PCHK']`).
 - **이미지 해상도**: PPT `ppt_chart_dpi`/`ppt_map_jpg_quality`, HTML `html_chart_dpi`/`html_wfmap_dpi`(독립 조정).
 - **색상**: `score_color_scale`(Score Board 연속 색), `score_color_scale_by_item`(ITEM별 override).
@@ -341,6 +336,7 @@ python Main.py _TRIGGER_<vehicle>_<lot>_<step> # 특정 LOT 즉시 강제 발행
 python Main.py "_TRIGGER_vehicle_A_T6677.1_test"
 python Main.py "_TRIGGER_FORCE_user@example.com_vehicle_A_T6677.1_test"
 python Main.py "_TRIGGER_NORMAL_vehicle_A_T6677.1_test"
+python Main.py "_TRIGGER_SINGLE_vehicle_A_T6677.1_test"
 python Main.py "_TRIGGER_ALL_user@example.com_vehicle_A_T6677.1_test"
 # mail에 메일링 엑셀의 정확한 시트명도 사용 가능
 python Main.py "_TRIGGER_ALL_POWER_USER_vehicle_A_T6677.1_test"
@@ -351,12 +347,19 @@ python Main.py "_TRIGGER_ALL_POWER_USER_vehicle_A_T6677.1_test"
 | TRIGGER | 기존 조회 기간의 전체 shot, 일반 리포트 | 기존 config / Scheduler 환경변수 |
 | TRIGGER_FORCE_{mail} | 일반 리포트. 대상 lot+step의 prime key 진행날짜가 조회 기간보다 오래되면 그 날짜 **2일 전**까지 조회 시작일을 확장 | 지정 mail만 |
 | TRIGGER_NORMAL | Extractor 좌표 파일 `Zone_Define`의 **13pt 열이 O / y / true**인 shot만 포함한 일반 리포트 | 기존 config / Scheduler 환경변수 |
+| TRIGGER_SINGLE | `viewing_period` 없이 지정한 **prime_key의 lot+step 하나만** 현재 daily DB 전체 기간에서 조회. 형제 lot·다른 step·with_vehicle 비교 제품의 ET 데이터 제외 | 기존 config / Scheduler 환경변수 |
 | TRIGGER_ALL_{mail} | **CAT2(category)가 비어 있지 않은 모든 항목**의 Trend만, category별 HTML/PPTX | 지정 mail만 |
 
 모든 트리거는 쿼리를 재실행하지 않고 현재 daily DB를 사용합니다. 실제 메일 발송은
 `use_email_send=True`여야 합니다. `{mail}`은 실제 이메일 주소(여러 주소는 콤마 구분) 또는
 메일링 엑셀의 정확한 시트명입니다. 없는 시트는 오류로 처리하며 기본 그룹으로 대체하지 않습니다.
 Scheduler JSON 규약은 기존 TRIGGER 그대로 유지됩니다. 추가 모드는 위 Main CLI로 실행합니다.
+
+- **SINGLE**: `python Main.py "_TRIGGER_SINGLE_<prime_key>"` (`prime_key = vehicle_lot_step`).
+  예: `python Main.py "_TRIGGER_SINGLE_vehicle_A_T6677.1_test"`.
+  저장된 모든 날짜 파티션에서 해당 lot/step의 ET 데이터만 읽으며, 날짜 제한을 늘리는 FORCE와 달리
+  다른 lot을 trend에 포함하지 않습니다. 보관된 대상 데이터가 없으면 오류로 종료합니다.
+  Inline Table은 기존 root lot 기반 조회를 유지합니다. 설정 파일의 viewing_period는 바뀌지 않습니다.
 
 - **FORCE**: `Final_et_log`의 대상 lot+step 진행날짜를 사용하며, 여러 prime key이면 가장 오래된
   날짜를 포함합니다. 확장 전/후 시작일과 일수를 로그에 남깁니다. 이미 기간 내이면 그대로 유지합니다.
@@ -384,13 +387,19 @@ Trend는 PPT/HTML 모두 고정 canvas와 여백을 사용합니다. 긴 Y축 �
 | `RUN/Report/<vehicle>/HTML/<날짜>-<prod>-<lot>-HOL_<step>_Report.html` | HTML 리포트([0] 요약·Score Board·Inline·상세) |
 | `RUN/Report/<vehicle>/Mail/<...>.pptx` | 메일용 PPT (표지·Score Board·Anomaly 상세·항목별 차트·Index Aggregation) |
 | `RUN/TEMP/anomaly_basis_<lot>_<step_id>.json/.csv` | Anomaly 판단 근거(device·PCHK 통합: spec-out wafer·robust 산포·이탈도·특이맵 trace + PCHK `meas_overlap_*` 동일 shot 겹침). 랏 완료 후에도 보존(이미지 파일만 정리) |
-| `RUN/AI/ai_input_<lot>_<step_id>.md/.json` | AI에 실제 투입된 단계별 프롬프트(system/user)+응답 덤프(검증용) |
-| `RUN/AI/anomaly_rule_check_<lot>_<step_id>.txt/.json` | **전 규칙 체크 결과**(모든 `[RULE]` 매칭/미매칭, 조건·결과·근거) |
-| `RUN/AI/nl_rules_json.json` | NL_RULES 자연어 → JSON 규칙 컴파일 캐시(원문 sha256 일치 시 재사용 — "무엇으로 컴파일됐는지" 검수 지점) |
-| `RUN/ARCHIVE/<lot>_<step_id>/` | **발행 스냅샷**(`use_archive_snapshot`) — `summary.json`(발행 메타·일시+findings+item_stats+rule_trace) + `target_rows.parquet`(target lot rows 중 **당시 REPORT ORDER index 컬럼만**+좌표 메타 — PCHK도 REPORT ORDER를 부여하면 포함). 규칙 제안 다이제스트/확정 사례 아카이브 입력 — **지워지거나 없어도 리포트 발행에 영향 없음** |
-| `RUN/AI/rule_digest_<날짜>.txt` | **규칙 제안 다이제스트**(1일 1회) — 규칙별 매칭 현황·불량모드 매칭 통계·미매칭 반복 패턴의 `[RULE]` 제안. `rule_digest_state.json`이 발송일 기록 |
+| `RUN/ARCHIVE/<lot>_<step_id>/` | **발행 스냅샷**(`use_archive_snapshot`) — `summary.json`(발행 메타·일시+findings+item_stats) + `target_rows.parquet`(target lot rows 중 **당시 REPORT ORDER index 컬럼만**+좌표 메타 — PCHK도 REPORT ORDER를 부여하면 포함). **지워지거나 없어도 리포트 발행에 영향 없음** |
 | `RUN/DB/<vehicle>_daily/date=YYYY-MM-DD/data.parquet` | Hive 파티션 ET 데이터 |
+| `RUN/DB/Score/<vehicle>_score.csv` | HTML Score Board의 prime_key별 항목·lot·wafer score (DB 경로 변경 시 해당 DB 아래 `Score/`) |
 | `RUN/log/<prod>_log.txt` | 통합 실행 로그(30MB rotation) |
+
+Score CSV는 HTML 저장 직후 자동 저장합니다(별도 설정 불필요). 한 행은 HTML의 항목·lot·wafer 셀 하나이며,
+열은 `prime_key, vehicle, lot_id, dc_step_id, fab_lot_id, wafer_id, category, item_id, score, generated_at, html_file`입니다.
+`prime_key`와 `lot_id`는 발행 대상, `fab_lot_id`는 HTML 셀의 실제 lot입니다(일반 모드의 형제 lot 포함).
+HTML과 같은 소수점 한 자리 score를 저장하고, 미측정 셀은 빈 값으로 보존합니다. `PPT_ONLY` 항목은 제외됩니다.
+같은 prime_key 재발행 시 기존 행 전체를 새 HTML 기준으로 교체하고, 다른 prime_key 기록은 유지합니다.
+UTF-8 BOM CSV를 임시 파일과 원자적 교체로 저장하며, 제품별 잠금으로 동시 갱신 손실을 방지합니다.
+기존 HTML을 소급 변환하지는 않습니다. 과거 prime_key는 SINGLE 명령으로 재발행하면 저장됩니다.
+Score Board가 없는 `TRIGGER_ALL` 및 독립 Daily Trend/ML 리포트는 이 CSV 저장 대상이 아닙니다.
 
 ---
 
@@ -402,7 +411,7 @@ Trend는 PPT/HTML 모두 고정 canvas와 여백을 사용합니다. 긴 Y축 �
 |------|------|----------|
 | `My_config.py` | 전체 공통 설정 (경로, 임계값, 색상, 토글) | 시스템 관리자 |
 | `reformatter/config.yaml` + `*_reformatter.csv` | Vehicle별 항목·스펙·ADDP 정의 | Vehicle 담당자 |
-| `ANOMALY_KNOWLEDGE.md` | **판정 규칙(`[RULE]` 자연어)·PCHK 매핑** + AI 해석 페르소나·답변 스타일 | 분석 설계자 |
+| `ANOMALY_KNOWLEDGE.md` | PCHK 매핑·공간 패턴 라벨 해석 기준 | 분석 설계자 |
 
 **핵심 원칙**: 코드를 고치지 않고 위 3개 파일만 편집해서 동작을 바꾼다.
 
@@ -416,9 +425,7 @@ auto report/
 └── RUN/
     ├── DB/vehicle_A_daily/date=YYYY-MM-DD/data.parquet   # Hive 파티션 ET 데이터
     ├── TEMP/anomaly_basis_<lot>_<step_id>.json/.csv      # Anomaly 판단 근거(보존, 이미지만 정리)
-    ├── AI/                                               # AI 입력 덤프·rule 체크 로그·NL 규칙 캐시
     ├── ARCHIVE/<lot>_<step_id>/                          # 발행 스냅샷(summary.json + target_rows.parquet)
-    ├── EXAMPLE/                                          # (선택) AI 판정 예시 few-shot *.md
     ├── Report/vehicle_A/{HTML,Mail}/                     # 산출물
     └── log/<prod>_log.txt                                # 통합 실행 로그
 ```
@@ -432,32 +439,26 @@ auto report/
 
 [0] 섹션은 위에서부터 다음 순서로 조립됩니다(`Main.py`):
 
-1. **(AI 있으면) AI 다단계 해석** — 연한 색 박스, "AI 자동 생성 참고용" 안내(`[RULE]` 판정 문장 포함)
-2. **통계 기반 자동 분석** — AI on이면 `render_findings_count_html`(`● 이상 N건 | ● 주의 N건` 한 줄만 —
-   판정 상세는 위 AI 블록에), AI off면 `render_findings_html`(상위 목록, 전체 N건은 PPT 상세 참조)
+1. **통계 기반 자동 분석** — `render_findings_html`(상위 목록, 전체 N건은 PPT 상세 참조)
 3. **Anomaly Trend Chart** — 이상/주의 항목의 Trend 차트 + spec-out WF MAP 그리드
 
 > 같은 통계 Finding이 PPT에서는 Score Board **바로 뒤** `Anomaly 상세(통계)` 페이지(`insert_findings_page`)에 **전체**가 들어갑니다.
 
 ### analyze_commonality — 코드 단독 동작
 
-`anomaly_engine.analyze_commonality()`는 **각 측정 Index(항목)마다 한 개의 Finding**을 산출하고,
-그 위에 **지식 규칙(`KNOWLEDGE`)으로 여러 항목을 조합한 판정**을 추가로 얹습니다.
+`anomaly_engine.analyze_commonality()`는 **각 측정 Index(항목)마다 한 개의 Finding**을 산출합니다.
 **항목 단위 판정은 target lot의 '각 wafer'를 제품 전체의 'wafer별' 기준과 비교**하는 방식이며(PCHK 포함 전 항목 동일),
 finding type과 우선순위(값이 클수록 위에 정렬)는 다음과 같습니다.
 
 | 우선(priority) | type | severity | 조건 | 코멘트 |
 |---|---|---|---|---|
-| **40000+** | `DEFECT_MODE` | 🔴 이상 / 🟠 주의 | `ANOMALY_KNOWLEDGE.md`의 **`[RULE]`** 충족 → 여러 항목 조합 판정(매칭 규칙마다 각각 finding) | `[불량 모드] <note>` + LINK + spec-out wafer 번호. → [지식 규칙 엔진](#지식-규칙-엔진--rule-단일-포맷-코드-조합-판정--ai-불량-모드-판정-공용) |
-| **30000+** | `KNOWLEDGE` | 🔴 이상 / 🟠 주의 | 수기 `[RULE]` 체이닝 블록의 산포 비교(`compare_disp`) 등 지식 판정 | `[지식 판정] <name>` |
 | **20000+** | `SPEC_OUT` | 🔴 CRITICAL (이상) | 타깃 lot에서 spec(SPECLOW~SPECHIGH) 이탈 측정점 ≥ 1 | wafer별 (이탈 pt/측정 pt) 비율, 위치(radius zone)·PGM(pt) |
 | **10000+** | `FLIER` | 🟠 WARNING (주의) | spec 미초과 + 어떤 wafer에서 **\|값−wafer median\| > `anomaly_flier_sigma`×보통 wafer 산포**인 pt가 1개 이상 (`anomaly_flier_max_pts`>0이면 그 개수 이하일 때만). **REPORT DIRECTION 방향 감시**: UPPER/LOWER는 spec 방향 정상 감도·반대 방향은 `×anomaly_flier_offdir_relax`(기본 2.0) 초과 시만, BOTH는 양방향 동일 감도 | worst wafer의 Flier pt 수 + 최대 이탈 σ |
 | **10000+** | `DISPERSION` | 🟠 WARNING (주의) | spec 미초과 + **어떤 wafer의 산포** `> anomaly_lot_dispersion_ratio` 배 (`anomaly_disp_min_spec_frac`>0이면 절대 산포 게이트도 통과해야) | worst wafer 내부 산포가 '보통 wafer 산포'의 몇 배 |
-| **하위(참고)** | `MEAS_SUSPECT` | 🟡 NOTICE (측정이상 추정) | **판정 제외(`wfmap_exclude_keywords`) PCHK**가 spec-out | 동일 shot 겹침 신호만 산출 → AI 측정이상 추정 입력 |
+| **하위(참고)** | `MEAS_SUSPECT` | 🟡 NOTICE (측정이상 추정) | **판정 제외(`wfmap_exclude_keywords`) PCHK**가 spec-out | 동일 shot 겹침 신호만 산출 |
 
-> **median 이탈은 더 이상 finding을 만들지 않습니다.** 각 wafer median이 제품 wafer 분포에서 몇 σ 떨어졌는지는
-> **detail 문구·`anomaly_basis_<lot>_<step_id>.json`(`worst_wafer_median_sigma`)에 기록만** 하고, 이상/주의 판정 대상에서는 뺐습니다
-> (median 기반 판정은 지식 규칙의 `median_low()`/`median_pctile()` 원자로 이전).
+> **median 이탈은 finding을 만들지 않습니다.** 각 wafer median이 제품 wafer 분포에서 몇 σ 떨어졌는지는
+> **detail 문구·`anomaly_basis_<lot>_<step_id>.json`(`worst_wafer_median_sigma`)에 기록만** 합니다.
 
 **wafer 단위 비교 기준** (제품=main vehicle 전체를 (lot, wafer) 단위로 계산):
 
@@ -468,18 +469,16 @@ finding type과 우선순위(값이 클수록 위에 정렬)는 다음과 같습
 | 산포 배수 | `wafer 내부 robust 산포 / 보통 wafer 산포(=제품 각 wafer 내부 산포의 중앙값)` |
 | robust 산포 | `1.4826 × MAD` (0이면 IQR/1.349 → std) — 이상치에 둔감 |
 
-- **정렬**: `_priority(f)` 수식값 내림차순 → 동점 시 `DEFECT_MODE`는 MD 규칙 순서, 그 외는 `REPORT ORDER` 오름차순. `DEFECT_MODE(40000+) > KNOWLEDGE(30000+) > SPEC_OUT(20000+) > DISPERSION(10000+) > MEAS_SUSPECT(하위)` 순이 항상 보장됩니다. priority 값은 투명성을 위해 각 finding에 `priority` 필드로 부착됩니다.
+- **정렬**: `_priority(f)` 수식값 내림차순 → 동점 시 `REPORT ORDER` 오름차순. `SPEC_OUT(20000+) > FLIER/DISPERSION(10000+) > MEAS_SUSPECT(하위)` 순이 항상 보장됩니다. priority 값은 투명성을 위해 각 finding에 `priority` 필드로 부착됩니다.
 - **각 detector는 항목 단위 try/except**라 한 항목이 실패해도 나머지 분석은 계속됩니다.
 - **spec-out 분류는 리포팅 대상 `target_lot_id`에만 한정**합니다. 같은 root의 형제 lot은 이상으로 분류하지 않습니다.
 - spec-out 판정은 reformatter의 `REPORT DIRECTION`(UPPER/LOWER/BOTH)을 따릅니다.
   예) `LOWER` 항목은 상한 초과를 불량으로 보지 않으므로, 상한을 넘어도 spec-out으로 잡지 않습니다(median 이탈은 detail·basis에만 기록).
-- **PCHK도 일반 Index와 동일 판정**(spec-out → 이상). **PCHK 인식 기준 = reformatter의 `CAT2`가 `PCHK`이거나 `ALIAS`에 'PCHK' 부분일치**(예: `PCHK_LKG`, `RMAX_PCHK_LKG` 모두 인식 — Main.py 컬럼 보존과 anomaly_engine 판정 합류가 동일 기준). PCHK spec-out site에서 **동일 shot(wafer·PGM(pt)·CHIP_X/Y)에 다른 항목도 함께 spec-out**인 '겹침 신호'는 `anomaly_basis_<lot>_<step_id>.json`의 `meas_overlap_*`에 기록되고 finding에도 실려 **AI의 '측정이상 추정'** 판단 재료로 넘어갑니다. PCHK 종류별 검증 대상은 `ANOMALY_KNOWLEDGE.md`의 `PCHK_ITEM_MAP` 마커(`- PCHK명: CAT2_1, CAT2_2` — 그 CAT2에 속한 항목 전체와 대조, 원명/표시명 모두 인식, 매핑 없으면 전체 대조)로 관리합니다. PCHK가 `wfmap_exclude_keywords`에 걸리면 이상 판정 대신 `MEAS_SUSPECT`(🟡 측정이상 추정) 신호로만 산출합니다.
+- **PCHK도 일반 Index와 동일 판정**(spec-out → 이상). **PCHK 인식 기준 = reformatter의 `CAT2`가 `PCHK`이거나 `ALIAS`에 'PCHK' 부분일치**(예: `PCHK_LKG`, `RMAX_PCHK_LKG` 모두 인식 — Main.py 컬럼 보존과 anomaly_engine 판정 합류가 동일 기준). PCHK spec-out site에서 **동일 shot(wafer·PGM(pt)·CHIP_X/Y)에 다른 항목도 함께 spec-out**인 '겹침 신호'는 `anomaly_basis_<lot>_<step_id>.json`의 `meas_overlap_*`에 기록됩니다. PCHK 종류별 검증 대상은 `ANOMALY_KNOWLEDGE.md`의 `PCHK_ITEM_MAP` 마커(`- PCHK명: CAT2_1, CAT2_2` — 그 CAT2에 속한 항목 전체와 대조, 원명/표시명 모두 인식, 매핑 없으면 전체 대조)로 관리합니다. PCHK가 `wfmap_exclude_keywords`에 걸리면 이상 판정 대신 `MEAS_SUSPECT`(🟡 측정이상 추정) 신호로만 산출합니다.
 - 통계 우선순위에서 특정 항목을 빼려면 → [통계 자동 분석 튜닝](#통계-자동-분석-튜닝).
 
-> **여러 Index 조합→불량 모드 판정은 코드가 deterministic하게 수행**합니다(지식 규칙 엔진).
-> `ANOMALY_KNOWLEDGE.md`의 `NL_RULES` 마커에 **`[RULE]` 자연어 한 줄**씩 적으면 코드가 JSON 조건식으로
-> 컴파일해 **모든 규칙을 전부 점검, 매칭되는 규칙마다 각각** `DEFECT_MODE` finding을 만듭니다.
-> 지식판정(RULE)은 과거 AI 연결 경로의 기능으로 현재 발행에서는 비활성입니다. 이하 엔진 설명은 코드 참고용입니다.
+> **아래 '지식 규칙 엔진' 절([RULE]/NL_RULES/ANOMALY_RULES·AI 불량 모드·다이제스트·변환 CLI)은
+> 2026-09-22에 제거된 기능의 과거 기록이다. 코드를 따르지 않으며, 필요 시 별도 설계 후 재도입한다.**
 
 ### 지식 규칙 엔진 — `[RULE]` 단일 포맷 (코드 조합 판정 + AI 불량 모드 판정 공용)
 

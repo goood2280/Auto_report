@@ -860,7 +860,7 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
     HTML [0]에는 우선순위 상위 N건만 보이고, 전체 상세는 이 PPT 페이지를 참조.
     after_index 위치(보통 1=title + Score Board 페이지수)로 슬라이드를 이동시킨다.
     상단에는 비교 기준·robust 산포 계산법·radius zone 정의를 '참고사항'으로 1회만 안내한다.
-    rule_trace 전달 시 맨 뒤에 '전체 anomaly rule 체크 결과'(매칭/해당없음) 요약 블록을 덧붙인다.
+    rule_trace 인자는 과거 호환용으로만 유지하며 표시하지 않는다.
     """
     from pptx.util import Inches, Pt
     from pptx.dml.color import RGBColor
@@ -968,10 +968,6 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         _c = str(_f.get('cat2', '') or '').strip()
         if _c:
             return _c
-        if _f.get('type') == 'KNOWLEDGE':
-            return '지식 판정(규칙)'
-        if _f.get('type') == 'DEFECT_MODE':
-            return '불량 모드 판정(규칙)'
         return '기타'
     _cat_order, _by_cat = [], {}
     for _f in findings:
@@ -979,26 +975,14 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
         if _c not in _by_cat:
             _by_cat[_c] = []; _cat_order.append(_c)
         _by_cat[_c].append(_f)
-    # 렌더 블록 — 요청 레이아웃: 1페이지 상단에 'Rule Check 결과' 먼저,
-    #   그 아래 카테고리(cat2)별 finding 그룹이 이어진다.
+    # 렌더 블록 — 카테고리(cat2)별 finding 그룹.
     _blocks = []
-    # ① 전체 anomaly rule 체크 결과(매칭/해당없음) — 맨 앞 요약 블록
-    _rt = list(rule_trace or [])
-    if _rt:
-        _rt_hit = sum(1 for _t in _rt if _t.get('matched'))
-        _blocks.append(('H', f"Rule Check 결과 (전체 {len(_rt)}개 · 매칭 {_rt_hit} · 해당없음 {len(_rt) - _rt_hit})"))
-        for _t in _rt:   # 매칭 먼저, 그다음 해당없음
-            if _t.get('matched'):
-                _blocks.append(('R', _t))
-        for _t in _rt:
-            if not _t.get('matched'):
-                _blocks.append(('R', _t))
-    # ② 카테고리 헤더('H') + 그 카테고리 finding('F')들 → 카테고리별로 구분되어 보임
+    # 카테고리 헤더('H') + 그 카테고리 finding('F')들 → 카테고리별로 구분되어 보임
     for _c in _cat_order:
         _blocks.append(('H', _c))
         for _f in _by_cat[_c]:
             _blocks.append(('F', _f))
-    # 페이지 분할 — finding('F') 개수 기준: 1페이지 5개(참고사항·Rule Check 동거),
+    # 페이지 분할 — finding('F') 개수 기준: 1페이지 5개(참고사항 동거),
     #   2페이지부터 15개씩. (헤더/Rule Check 줄은 개수에 포함하지 않되 안전 상한 40블록)
     _FIRST_F = int(getattr(GLOBAL_CONFIG, 'anomaly_detail_first_page_items', 5) or 5)
     _NEXT_F = int(getattr(GLOBAL_CONFIG, 'anomaly_detail_page_items', 15) or 15)
@@ -1059,40 +1043,18 @@ def insert_findings_page(prs, findings, after_index=2, title="■ Anomaly 상세
                 _nr.font.color.rgb = RGBColor(0x6B, 0x72, 0x80); _nr.font.name = FONT
             _spp = tf.add_paragraph(); _spp.text = ""
 
-        if not findings and not _rt:
+        if not findings:
             p = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
             p.text = "유의미한 통계 이상 없음"; p.font.size = Pt(12); p.font.name = FONT
         else:
-            if not findings and _pi == 0:   # finding은 없지만 rule 체크 결과는 표시
-                p = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
-                p.text = "유의미한 통계 이상 없음 (아래는 전체 rule 체크 내역)"
-                p.font.size = Pt(11); p.font.name = FONT; p.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
             # 페이지가 카테고리 중간(finding)부터 시작하면 해당 카테고리 헤더를 상단에 재표기
             if _chunk and _chunk[0][0] == 'F':
                 _hp2 = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
                 _render_cat_header(_hp2, _fcat(_chunk[0][1]) + " (계속)")
-            elif _chunk and _chunk[0][0] == 'R':   # Rule Check 섹션이 다음 페이지로 이어짐
-                _hp2 = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
-                _render_cat_header(_hp2, "Rule Check 결과 (계속)")
             for _bk, _bv in _chunk:
                 if _bk == 'H':   # 카테고리 헤더
                     p = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
                     _render_cat_header(p, _bv)
-                    continue
-                if _bk == 'R':   # Rule Check 한 줄(매칭 O / 해당없음 ·)
-                    _t = _bv
-                    p = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
-                    p.space_before = Pt(1)
-                    _ok = bool(_t.get('matched'))
-                    _mr = p.add_run(); _mr.text = ("● " if _ok else "○ ")
-                    _mr.font.bold = True; _mr.font.size = Pt(10); _mr.font.name = FONT
-                    _mr.font.color.rgb = (RGBColor(0xD6, 0x27, 0x28) if _ok else RGBColor(0x9A, 0xA0, 0xA6))
-                    _nm = p.add_run(); _nm.text = f"[{_t.get('kind','')}] {_t.get('name','')}"
-                    _nm.font.bold = True; _nm.font.size = Pt(10); _nm.font.name = FONT
-                    _nm.font.color.rgb = (RGBColor(0x1A, 0x1A, 0x1A) if _ok else RGBColor(0x6B, 0x72, 0x80))
-                    _rs = p.add_run(); _rs.text = f"  —  {_t.get('result','')}"
-                    _rs.font.size = Pt(9); _rs.font.name = FONT
-                    _rs.font.color.rgb = (RGBColor(0x55, 0x55, 0x55) if _ok else RGBColor(0x9A, 0xA0, 0xA6))
                     continue
                 f = _bv
                 p = tf.paragraphs[0] if _firstpara else tf.add_paragraph(); _firstpara = False
@@ -4446,6 +4408,32 @@ def atomic_json(path, value):
     atomic_bytes(path, json.dumps(value, ensure_ascii=False, default=str, allow_nan=False).encode('utf-8'))
 
 
+def save_score_csv(score_board, db, vehicle, lot, step, html_file):
+    """Upsert the HTML score-board snapshot, one row per lot/wafer/item cell."""
+    prime_key = f'{vehicle}_{lot}_{step}'
+    columns = ['prime_key', 'vehicle', 'lot_id', 'dc_step_id', 'fab_lot_id',
+               'wafer_id', 'category', 'item_id', 'score', 'generated_at', 'html_file']
+    generated_at = datetime.now().isoformat(timespec='seconds')
+    rows = []
+    for (category, item), values in score_board.iterrows():
+        for (cell_lot, wafer), value in values.items():
+            # Use exactly the HTML display precision; an unmeasured cell stays blank.
+            score = '' if pd.isna(value) or value == '' else f'{float(value):.1f}'
+            rows.append([prime_key, vehicle, lot, step, str(cell_lot), str(wafer),
+                         category, item, score, generated_at, os.path.basename(html_file)])
+    current = pd.DataFrame(rows, columns=columns)
+    path = os.path.join(db, 'Score', f'{vehicle}_score.csv')
+    with process_lock(path + '.lock'):
+        if os.path.exists(path):
+            previous = pd.read_csv(path, dtype=str, keep_default_na=False, encoding='utf-8-sig')
+            if list(previous.columns) != columns:
+                raise ValueError(f'Score CSV 열 구성이 다릅니다: {path}')
+            current = pd.concat([previous.loc[previous['prime_key'] != prime_key], current],
+                                ignore_index=True)
+        atomic_output(path, lambda temp: current.to_csv(temp, index=False, encoding='utf-8-sig'))
+    return path
+
+
 def operations_root():
     return os.path.abspath(os.getenv('AUTO_REPORT_OPS_ROOT') or os.path.join(os.path.dirname(__file__), 'RUN', 'OPS'))
 
@@ -4532,10 +4520,12 @@ def trim_runtime_cache(root, days=14, max_bytes=2_000_000_000):
             except OSError:pass
 
 
-def load_daily_projected(conn, daily_path, days, reformatter):
-    """Read only referenced REAL inputs and report metadata; reuse unchanged date partitions."""
+def load_daily_projected(conn, daily_path, days, reformatter, *, lot=None, step=None):
+    """Read projected inputs; optional exact lot/step scope is applied before caching."""
     import hashlib, json
     from pathlib import Path
+    if (lot is None) != (step is None):
+        raise ValueError('lot과 step은 함께 지정해야 합니다')
     cutoff = (pd.Timestamp.now().normalize() - pd.Timedelta(days=int(days))).date().isoformat() if days is not None else '0000-00-00'
     real=reformatter.loc[reformatter['CATEGORY'].eq('REAL')]
     vramp_ids=set(real.loc[real['ALIAS'].astype(str).str.contains('vramp',case=False,na=False) |
@@ -4552,7 +4542,8 @@ def load_daily_projected(conn, daily_path, days, reformatter):
     frames=[]; hits=0
     for source in files:
         source_ids=itemids if source.parent.name[5:]>=cutoff else sorted(vramp_ids)
-        key=hashlib.sha256((file_fingerprint([source])+json.dumps(source_ids)+json.dumps(wanted)+'v2').encode()).hexdigest()
+        key=hashlib.sha256((file_fingerprint([source])+json.dumps(source_ids)+json.dumps(wanted)
+                           +json.dumps([lot, step])+'v3').encode()).hexdigest()
         dest=cache/(key+'.parquet')
         if dest.exists():
             try:
@@ -4562,9 +4553,13 @@ def load_daily_projected(conn, daily_path, days, reformatter):
         selected=[c for c in wanted if c in schema]
         if not {'item_id','et_value'}.issubset(selected):
             raise ValueError(f'raw DB 필수 열 누락: {source.name}')
+        if lot is not None and not {'fab_lot_id', 'step_id'}.issubset(selected):
+            raise ValueError(f'SINGLE raw DB lot/step 열 누락: {source.name}')
         names=', '.join('"'+c+'"' for c in selected)
-        data=conn.execute(f'SELECT {names} FROM read_parquet(?) WHERE CAST(item_id AS VARCHAR) IN (SELECT unnest(?))',
-                          [str(source), source_ids]).df()
+        scope = '' if lot is None else ' AND CAST(fab_lot_id AS VARCHAR) = ? AND CAST(step_id AS VARCHAR) = ?'
+        parameters = [str(source), source_ids] + ([] if lot is None else [str(lot), str(step)])
+        data=conn.execute(f'SELECT {names} FROM read_parquet(?) WHERE CAST(item_id AS VARCHAR) IN (SELECT unnest(?)){scope}',
+                          parameters).df()
         atomic_output(dest, lambda temp: data.to_parquet(temp,index=False))
         frames.append(data)
     print(f'[PERF] raw partitions {len(files)}, cache hits {hits}, selected inputs {len(itemids)}')
@@ -4644,72 +4639,6 @@ def ops_many(kind, records):
                         [(kind,str(key),now,json.dumps(value,ensure_ascii=False,default=str,allow_nan=False)) for key,value in records])
 
 
-def watchdog_observe(frame, reformatter, mode='AUTO'):
-    """Compact observations, scoped by product/step/program/temperature/shot mode/spec version."""
-    import hashlib,json
-    from anomaly_engine import trend_agg_spec
-    vehicle=GLOBAL_CONFIG.get('vehicle')
-    frame=frame.loc[frame['MASK'].astype(str).eq(str(vehicle))].copy()
-    if frame.empty:return
-    frame['_step']=frame['search_key'].astype(str).str.rsplit('_',n=1).str[-1]
-    keys=['FAB_LOT_ID','_step','TKOUT_TIME']
-    for key in ['STEP_SEQ','TEMPERATURE']:
-        if key in frame:keys.append(key)
-    selected=reformatter.loc[reformatter['CAT2'].notna() & reformatter['CAT2'].astype(str).str.strip().ne('')].drop_duplicates('ALIAS')
-    aliases=sorted(selected['ALIAS'].astype(str),key=len,reverse=True)
-    mode='NORMAL' if mode=='NORMAL' else 'FULL'
-    fingerprint=hashlib.sha256(pd.util.hash_pandas_object(frame,index=True).values.tobytes()+
-                              reformatter.to_csv(index=False).encode()+str(GLOBAL_CONFIG.get('trend_tkout_agg')).encode()).hexdigest()
-    marker=f'{vehicle}|{mode}'
-    if ops_get('observation_cache',marker,{}) .get('fingerprint')==fingerprint:
-        print('[PERF] watchdog observations cache hit');return
-    rows=[]
-    for item in frame.columns:
-        owner=next((a for a in aliases if str(item)==a or str(item).startswith(a+'_')),None)
-        if owner is None:continue
-        spec=selected.loc[selected['ALIAS'].eq(owner)].iloc[0]
-        direction=str(spec.get('REPORT DIRECTION','BOTH')).upper()
-        low=pd.to_numeric(spec.get('SPECLOW'),errors='coerce'); high=pd.to_numeric(spec.get('SPECHIGH'),errors='coerce')
-        low=None if pd.isna(low) or direction=='UPPER' else float(low)
-        high=None if pd.isna(high) or direction=='LOWER' else float(high)
-        agg=trend_agg_spec(item,GLOBAL_CONFIG.get('trend_tkout_agg',{}) or {},owner)
-        signature=hashlib.sha256(json.dumps([low,high,str(agg),str(spec.get('UNIT',''))]).encode()).hexdigest()[:12]
-        for groupkey, group in frame.groupby(keys,dropna=False,sort=False):
-            meta=dict(zip(keys,groupkey)); vals=pd.to_numeric(group[item],errors='coerce').replace([np.inf,-np.inf],np.nan).dropna()
-            valid=group.loc[vals.index]
-            if vals.empty:continue
-            if agg:
-                selector=valid.assign(_value=vals).groupby('WAFER_ID')['_value']
-                kind=str(agg).upper()
-                if kind in ('MEAN','AVG'):vals=selector.mean()
-                elif kind in ('MEDIAN','P50'):vals=selector.median()
-                else:
-                    match=re.fullmatch(r'P(\d+(?:\.\d+)?)',kind)
-                    if not match:raise ValueError(f'지원하지 않는 Trend 집계: {agg}')
-                    vals=selector.quantile(float(match.group(1))/100)
-            outside=pd.Series(False,index=vals.index)
-            if low is not None:outside |= vals<low
-            if high is not None:outside |= vals>high
-            counts,edges=np.histogram(vals.to_numpy(),bins=24)
-            spec_known=low is not None or high is not None
-            pass_score=float((~outside).mean()*100) if agg else float((~outside).groupby(valid['WAFER_ID']).mean().mean()*100)
-            pk=f"{vehicle}_{meta['FAB_LOT_ID']}_{meta['_step']}"
-            context=[vehicle,str(meta['_step']),str(item),str(meta.get('STEP_SEQ','')),str(meta.get('TEMPERATURE','')),mode,signature]
-            stamp=pd.Timestamp(meta['TKOUT_TIME']).isoformat()
-            identity=hashlib.sha256(json.dumps(context+[pk,stamp]).encode()).hexdigest()
-            values=dict(id=identity,vehicle=vehicle,prime_key=pk,lot=str(meta['FAB_LOT_ID']),step=str(meta['_step']),
-                        item=str(item),category=str(spec['CAT2']),time=stamp,program=str(meta.get('STEP_SEQ','')),
-                        temperature=str(meta.get('TEMPERATURE','')),mode=mode,signature=signature,
-                        unit=str(spec.get('UNIT','')),aggregation=str(agg or 'raw shot'),low=low,high=high,
-                        n=len(vals),wafers=int(valid['WAFER_ID'].nunique()),median=float(vals.median()),
-                        std=float(vals.std()) if len(vals)>1 else 0.,out=int(outside.sum()) if spec_known else None,
-                        score=pass_score if spec_known else None,
-                        hist=counts.tolist(),edges=edges.tolist(),context=context)
-            rows.append((identity,values))
-    ops_many('observations',rows)
-    ops_put('observation_cache',marker,dict(vehicle=vehicle,mode=mode,fingerprint=fingerprint,updated=time.time(),count=len(rows)))
-    print(f'[INFO] Watchdog 분석 관측값 {len(rows)}건 저장 (동일 lot/측정은 중복 집계하지 않음)')
-
 @contextmanager
 def process_lock(path):
     """OS-backed nonblocking lock; an exited process releases it even after a crash."""
@@ -4734,16 +4663,17 @@ def process_lock(path):
         else:fcntl.flock(stream.fileno(),fcntl.LOCK_UN)
         stream.close()
 
-def daily_trend_load(vehicle, reformatter):
+def daily_trend_load(vehicle, reformatter, days=None):
     """Use the same REAL scaling and whole-frame ADDP cache as the prime-key report.
 
     This reads the current DB even when no new prime key is eligible for publication.
+    days가 주어지면 해당 일수+여유분 파티션만 읽는다(미지정 시 전체).
     The existing product viewing_period owns the chart window.
     """
     import duckdb
     with duckdb.connect() as conn:
         raw=load_daily_projected(conn,GLOBAL_CONFIG.get('DB_et_daily'),
-                                 None,reformatter)
+                                 days,reformatter)
     if raw.empty:return raw
     real=reformatter.loc[reformatter['CATEGORY'].eq('REAL'),
                          ['ITEMID','ALIAS','SCALE FACTOR']].drop_duplicates('ITEMID')
@@ -4862,6 +4792,7 @@ def daily_trend_ml(frame, reformatter, vehicle, settings):
         total+=len(part)
         if deep and total>limit:
             for m in mappings.values():m['warnings'].append('ML join row budget exceeded: influence unavailable; narrow report scope')
+            settings['_influence_unavailable']=True
             return frame,mappings
         chunks.append(part)
     ml=pd.concat(chunks,ignore_index=True) if chunks else pd.DataFrame(columns=projection)
@@ -4888,6 +4819,51 @@ def daily_trend_ml(frame, reformatter, vehicle, settings):
     return left,mappings
 
 
+def daily_auto_findings(entries, reformatter):
+    """Use the production detector, on raw shots, once per context/recent lot.
+
+    Plot aggregation never feeds back into the detector. The production engine
+    applies its own aggregation, profile, direction and exclusion settings.
+    """
+    from anomaly_engine import analyze_commonality
+    contexts={}
+    for entry in entries:
+        entry['auto_findings']=[]
+        contexts.setdefault((entry['step'],entry['program'],entry['temperature']),[]).append(entry)
+    ref=reformatter.drop_duplicates('ALIAS').set_index('ALIAS')
+    for context,owners in contexts.items():
+        frames=[];specs=[]
+        for entry in owners:
+            raw=entry.get('spatial',pd.DataFrame())
+            if raw.empty:continue
+            # The shared source index identifies a measurement across item columns.
+            metadata=[c for c in raw if not c.startswith('_')]
+            item_frame=raw[metadata].copy()
+            item_frame[entry['item']]=raw['_value']
+            item_frame['_recent']=raw['_recent']
+            frames.append(item_frame)
+            alias=entry.get('alias',entry['item'])
+            if alias in ref.index:
+                spec=ref.loc[alias].copy();spec.name=entry['item'];specs.append(spec)
+        if not frames:continue
+        data=frames[0]
+        for extra in frames[1:]:data=data.combine_first(extra)
+        spec_data=pd.DataFrame(specs)
+        recent_lots=data.loc[data['_recent'],'fab_lot_id'].dropna().unique()
+        for lot in recent_lots:
+            findings=analyze_commonality(data,lot,{e['item']:{} for e in owners},spec_data,
+                main_vehicle=owners[0]['vehicle'],config=GLOBAL_CONFIG,
+                reformatter=reformatter,persist_basis=False)
+            for entry in owners:
+                entry['auto_findings'].extend(dict(f,lot=str(lot)) for f in findings
+                    if f.get('item')==entry['item'] and f.get('severity') in ('CRITICAL','WARNING')
+                    and not f.get('_excl_unless'))
+        for entry in owners:
+            entry['signals']=[f['title'] for f in entry['auto_findings']]
+            entry['reason']=' / '.join(dict.fromkeys(entry['signals'])) or '최근 24시간 Auto Report 이상·주의 신호 없음'
+    return entries
+
+
 def daily_trend_entries(frame, reformatter, vehicle, settings, now=None):
     """Every categorized item/context is retained, including no-data and no-spec items."""
     from anomaly_engine import trend_agg_spec
@@ -4906,7 +4882,7 @@ def daily_trend_entries(frame, reformatter, vehicle, settings, now=None):
             low=None if not np.isfinite(low) or direction=='UPPER' else float(low)
             high=None if not np.isfinite(high) or direction=='LOWER' else float(high)
             agg=trend_agg_spec(item,GLOBAL_CONFIG.get('trend_tkout_agg',{}) or {},owner)
-            base=dict(vehicle=vehicle,item=str(item),category=str(spec['CAT2']),unit=str(spec.get('UNIT','')),
+            base=dict(vehicle=vehicle,item=str(item),alias=owner,category=str(spec['CAT2']),unit=str(spec.get('UNIT','')),
                       low=low,high=high,aggregation=str(agg or 'raw shot'),warnings=list(mapping['warnings']),
                       x_label=('ML '+mapping['time']) if mapping['time'] else 'DC tkout_time',
                       log_scale=str(spec.get('REPORT LOG SCALE','')).strip().lower() in ('true','1','yes'),
@@ -4949,8 +4925,10 @@ def daily_trend_entries(frame, reformatter, vehicle, settings, now=None):
             data['_observation_id']=[hashlib.sha256((str(item)+'|'+str(vehicle)+'|'+str(v)).encode()).hexdigest()
                                      for v in pd.util.hash_pandas_object(data[idcols].astype(str),index=False).tolist()]
             prior=settings.get('_published_observations')
-            first_since=pd.Timestamp(settings.get('highlight_since',now.normalize()))
-            data['_recent']=~data['_observation_id'].isin(prior) if prior is not None else data['_dc_time'].between(first_since,now)
+            # Daily Trend는 항상 24시간 롤링(report_now-1일). 자정 폴백은 사용하지 않는다.
+            _default_since=now-pd.Timedelta(days=1)
+            first_since=pd.Timestamp(settings.get('highlight_since',_default_since))
+            data['_recent']=(data['_dc_time'].gt(first_since)&data['_dc_time'].le(now)) if settings.get('service')=='daily_trend' else (~data['_observation_id'].isin(prior) if prior is not None else data['_dc_time'].between(first_since,now))
             if settings.get('_candidate_observations') is not None:
                 settings['_candidate_observations'].update(data['_observation_id'])
             # Existing history stays within the product YAML window. Unpublished late arrivals do not.
@@ -5020,22 +4998,51 @@ def ml_trend_select(entries, settings):
     the recent population. Missing dependencies fail explicitly, not as 'no anomaly'.
     """
     from scipy import stats
-    from itertools import combinations
-    modules=set(settings.get('modules') or ['split_difference','time_trend','spike_rate','isolation_forest','local_outlier_factor'])
+    from itertools import combinations, islice
+    import time
+    _known_ml_keys={'service','products','ml_table_dir','ml_join_keys','chart_dpi','trend_palette_colors','html_columns',
+        'ppt_max_bytes','html_max_bytes','mail_max_bytes','max_mail_parts','summary_max_items','category_order',
+        'modules','diagnostic_modules','equipment_columns','min_samples','min_lots','fdr_alpha',
+        'rank_effect_min','trend_min_correlation','distribution_min_distance','analysis_seconds','analysis_max_tests',
+        'max_group_pairs','spike_sigma','rate_increase','model_contamination','model_max_samples','random_state',
+        'influence_enabled','influence_columns','influence_exclude_columns','influence_max_columns','influence_top_k',
+        'influence_min_lots','influence_max_categories','influence_min_coverage','influence_min_effect',
+        'influence_fdr_alpha','influence_permutations','influence_seconds','influence_max_tests',
+        'influence_max_join_rows','influence_max_wafers_per_root','influence_min_matched_roots',
+        'influence_similar_mismatch','influence_min_balance','with_vehicle','recipients','mail_vehicle',
+        'report_now','highlight_since','html_legend_limit','trend_marker_size','trend_recent_marker_size',
+        'trend_background_alpha','trend_ylim_band_pct','daily_time','enabled','html_columns','report_timeout_sec','poll_sec'}
+    _unknown=[k for k in settings if k not in _known_ml_keys and not k.startswith('_')]
+    if _unknown:print(f"[ML WARN] 미사용 설정키 무시: {sorted(_unknown)}")
+    modules=set(settings.get('modules') or ['split_difference','time_trend','distribution_shift','spread_change','spike_rate','isolation_forest','local_outlier_factor'])
     modules.update(settings.get('diagnostic_modules',['equipment_difference','spatial_pattern']))
-    supported={'split_difference','time_trend','spike_rate','isolation_forest','local_outlier_factor','equipment_difference','spatial_pattern'}
+    supported={'split_difference','time_trend','distribution_shift','spread_change','spike_rate','isolation_forest','local_outlier_factor','equipment_difference','spatial_pattern'}
     if modules-supported:raise ValueError('Unknown ML modules: '+', '.join(sorted(modules-supported)))
     if 'isolation_forest' in modules:from sklearn.ensemble import IsolationForest
     if 'local_outlier_factor' in modules:from sklearn.neighbors import LocalOutlierFactor
     minimum=max(6,int(settings.get('min_samples',12)));min_lots=max(3,int(settings.get('min_lots',3)))
-    effect_limit=float(settings.get('effect_sigma',1.5));tests=[];candidates=[]
+    tests=[];candidates=[]
+    started=time.monotonic();budget=max(1,float(settings.get('analysis_seconds',120)))
+    test_limit=max(1,int(settings.get('analysis_max_tests',2000)))
+    def exhausted():return time.monotonic()-started>=budget or len(tests)>=test_limit
+    def pairs(groups):return islice(combinations(groups,2),max(1,int(settings.get('max_group_pairs',64))))
+    def rank_effect(a,b,reference_scale=0):
+        # Rank tests can call floating-point cancellation a perfect separation.
+        # This is a numeric precision floor, independent of production dispersion.
+        magnitude=max(float(np.max(np.abs(a))),float(np.max(np.abs(b))),reference_scale,np.finfo(float).tiny)
+        if abs(float(np.median(a)-np.median(b)))<=magnitude*1e-10:return 0.
+        return abs(2*stats.mannwhitneyu(a,b).statistic/(len(a)*len(b))-1)
     def robust_scale(values):
         a=np.asarray(values,dtype=float);med=np.median(a)
         mad=np.median(abs(a-med))*1.4826
         return max(float(mad),float(np.std(a))*.1,abs(float(med))*1e-9,1e-12)
-    def add(index,module,p,effect,message):
-        if np.isfinite(p):tests.append(dict(index=index,module=module,p=float(p),effect=float(effect),message=message))
+    def add(index,module,p,effect,message,minimum_effect=None):
+        if not exhausted() and np.isfinite(p):tests.append(dict(index=index,module=module,p=float(p),effect=float(effect),message=message,
+            minimum_effect=float(settings.get('rank_effect_min',.33)) if minimum_effect is None else minimum_effect))
+    for entry in entries:
+        entry['ml_findings']=[];entry['ml_test_count']=0;entry['ml_tested_modules']=[]
     for index,entry in enumerate(entries):
+        if exhausted():break
         entry['low']=entry['high']=entry['out_pct']=None
         entry['reason']='';entry['ml_findings']=[];entry['ml_test_count']=0;entry['ml_tested_modules']=[]
         points=entry['points']
@@ -5046,6 +5053,7 @@ def ml_trend_select(entries, settings):
         if '_vehicle' not in diagnostic:diagnostic['_vehicle']=entry['vehicle']
         if not diagnostic.empty:
             for (vehicle,knob),source in diagnostic.groupby(['_vehicle','_knob']):
+                if exhausted():break
                 if knob=='UNMATCHED':continue
                 if 'equipment_difference' in modules:
                     eqcols=[c for c in source if c.startswith('__ml_') and ('EQP' in c.upper() or 'CHAMBER' in c.upper())]
@@ -5055,13 +5063,15 @@ def ml_trend_select(entries, settings):
                         lot=recent_source.groupby([col,'fab_lot_id'])['_value'].median().reset_index()
                         groups=[(k,g) for k,g in lot.groupby(col) if len(g)>=min_lots]
                         if len(groups)<2:entry['warnings'].append(f'{col}: insufficient recent independent lots for equipment comparison')
-                        for (ka,a),(kb,b) in combinations(groups,2):
+                        if len(groups)*(len(groups)-1)//2>int(settings.get('max_group_pairs',64)):entry['warnings'].append('Group comparison cap reached: coverage is partial')
+                        for (ka,a),(kb,b) in pairs(groups):
+                            if exhausted():break
                             overlap=set(a.fab_lot_id)&set(b.fab_lot_id)
                             a=a.loc[~a.fab_lot_id.isin(overlap)];b=b.loc[~b.fab_lot_id.isin(overlap)]
                             if min(len(a),len(b))<min_lots:continue
-                            effect=abs(a._value.median()-b._value.median())/max(robust_scale(a._value),robust_scale(b._value))
+                            effect=rank_effect(a._value,b._value)
                             add(index,'equipment_difference',stats.mannwhitneyu(a._value,b._value).pvalue,effect,
-                                f'{vehicle}/{knob}: {col[5:]} {ka} vs {kb}, recent lots={len(a)}/{len(b)}, effect={effect:.2f} sigma; association, not causation')
+                                f'{vehicle}/{knob}: {col[5:]} {ka} vs {kb}, recent lots={len(a)}/{len(b)}, rank effect={effect:.2f}; association, not causation')
                 if 'spatial_pattern' in modules:
                     coords=['chip_x_pos','chip_y_pos']
                     if not set(coords).issubset(source):
@@ -5071,14 +5081,15 @@ def ml_trend_select(entries, settings):
                     # Subtract wafer center: detect shape changes independently of overall level.
                     sites['residual']=sites['_value']-sites.groupby(['fab_lot_id','wafer_id','_recent'])['_value'].transform('median')
                     for site,g in sites.groupby(sitekeys):
+                        if exhausted():break
                         lot=g.groupby(['fab_lot_id','_recent']).residual.median().reset_index()
                         b=lot.loc[~lot._recent];r=lot.loc[lot._recent]
                         overlap=set(b.fab_lot_id)&set(r.fab_lot_id)
                         b=b.loc[~b.fab_lot_id.isin(overlap)];r=r.loc[~r.fab_lot_id.isin(overlap)]
                         if min(len(b),len(r))<min_lots:continue
-                        effect=abs(r.residual.median()-b.residual.median())/max(robust_scale(b.residual),robust_scale(source.loc[~source['_recent'],'_value']))
+                        effect=rank_effect(r.residual,b.residual,float(source['_value'].abs().max()))
                         add(index,'spatial_pattern',stats.mannwhitneyu(r.residual,b.residual).pvalue,effect,
-                            f'{vehicle}/{knob}: site {site} centered spatial shift, effect={effect:.2f} sigma')
+                            f'{vehicle}/{knob}: site {site} centered spatial shift, rank effect={effect:.2f}')
         # Shots are not independent ML samples. Collapse each wafer/measurement first.
         keys=['_vehicle','fab_lot_id','wafer_id','_time','_knob']
         wafer=points.groupby(keys,dropna=False).agg(value=('_value','median'),spread=('_value',lambda x: x.quantile(.9)-x.quantile(.1)),recent=('_recent','max')).reset_index()
@@ -5088,7 +5099,9 @@ def ml_trend_select(entries, settings):
             # Compare splits within each product; never mistake a vehicle offset for a knob effect.
             for vehicle,source in lots.groupby('_vehicle'):
                 groups=[(k,g) for k,g in source.groupby('_knob') if k!='UNMATCHED' and len(g)>=min_lots]
-                for (ka,a),(kb,b) in combinations(groups,2):
+                if len(groups)*(len(groups)-1)//2>int(settings.get('max_group_pairs',64)):entry['warnings'].append('Group comparison cap reached: coverage is partial')
+                for (ka,a),(kb,b) in pairs(groups):
+                    if exhausted():break
                     if not a.recent.any() and not b.recent.any():continue
                     # Paired lots use Wilcoxon; disjoint lots use Mann-Whitney.
                     paired=a.merge(b,on='fab_lot_id',suffixes=('_a','_b'))
@@ -5100,9 +5113,10 @@ def ml_trend_select(entries, settings):
                         b=b.loc[~b.fab_lot_id.isin(paired.fab_lot_id)]
                         if min(len(a),len(b))<min_lots:continue
                         p=stats.mannwhitneyu(a.value,b.value,alternative='two-sided').pvalue
-                    effect=abs(float(a.value.median()-b.value.median()))/max(robust_scale(a.value),robust_scale(b.value))
-                    add(index,'split_difference',p,effect,f'{vehicle}: split {ka} vs {kb}, effect={effect:.2f} sigma')
+                    effect=rank_effect(a.value,b.value)
+                    add(index,'split_difference',p,effect,f'{vehicle}: split {ka} vs {kb}, rank effect={effect:.2f}')
         for (vehicle,knob),g in wafer.groupby(['_vehicle','_knob']):
+            if exhausted():break
             if knob=='UNMATCHED':continue
             recent=g.loc[g.recent];base=g.loc[~g.recent]
             if len(base)<minimum or len(recent)<max(3,minimum//3) or base.fab_lot_id.nunique()<min_lots:
@@ -5114,8 +5128,20 @@ def ml_trend_select(entries, settings):
                 t=(series.t-series.t.min()).dt.total_seconds().to_numpy()
                 if len(series)>=min_lots*2 and np.unique(t).size>=min_lots:
                     rho,p=stats.spearmanr(t,series.value)
-                    effect=abs(float(recent.value.median()-base.value.median()))/scale
-                    add(index,'time_trend',p,effect,f'{prefix}: {"upward" if rho>0 else "downward"} trend, rho={rho:.2f}, effect={effect:.2f} sigma')
+                    effect=abs(float(rho))
+                    add(index,'time_trend',p,effect,f'{prefix}: {"upward" if rho>0 else "downward"} trend, rho={rho:.2f}',float(settings.get('trend_min_correlation',.6)))
+            if modules & {'distribution_shift','spread_change'}:
+                b_lot=base.groupby('fab_lot_id').agg(value=('value','median'),spread=('spread','median'))
+                r_lot=recent.groupby('fab_lot_id').agg(value=('value','median'),spread=('spread','median'))
+                overlap=b_lot.index.intersection(r_lot.index);b_lot=b_lot.drop(overlap);r_lot=r_lot.drop(overlap)
+                if min(len(b_lot),len(r_lot))>=min_lots:
+                    if 'distribution_shift' in modules:
+                        ks=stats.ks_2samp(b_lot.value,r_lot.value,method='asymp')
+                        add(index,'distribution_shift',ks.pvalue,ks.statistic,f'{prefix}: lot distribution change, KS D={ks.statistic:.2f}',float(settings.get('distribution_min_distance',.3)))
+                    if 'spread_change' in modules:
+                        effect=rank_effect(b_lot.spread,r_lot.spread)
+                        p=stats.mannwhitneyu(b_lot.spread,r_lot.spread).pvalue
+                        add(index,'spread_change',p,effect,f'{prefix}: wafer spread change, rank effect={effect:.2f}')
             def rate_test(base_flags,recent_flags,module):
                 # Test lot-level affected fractions: raw shot count must not inflate significance.
                 b=pd.DataFrame(dict(lot=base.fab_lot_id.to_numpy(),flag=np.asarray(base_flags,dtype=float))).groupby('lot').flag.mean()
@@ -5124,8 +5150,8 @@ def ml_trend_select(entries, settings):
                 overlap=b.index.intersection(r.index);b=b.drop(overlap);r=r.drop(overlap)
                 if len(b)<min_lots or len(r)<min_lots:return
                 delta=float(r.mean()-b.mean());p=stats.mannwhitneyu(r,b,alternative='greater').pvalue
-                add(index,module,p,delta/max(float(settings.get('rate_increase',.15)),1e-9)*effect_limit,
-                    f'{prefix}: {module} affected fraction {b.mean():.1%} -> {r.mean():.1%}')
+                add(index,module,p,delta,
+                    f'{prefix}: {module} affected fraction {b.mean():.1%} -> {r.mean():.1%}',float(settings.get('rate_increase',.15)))
             if 'spike_rate' in modules:
                 threshold=float(settings.get('spike_sigma',4))
                 rate_test(abs(base.value-center)>threshold*scale,abs(recent.value-center)>threshold*scale,'spike_rate')
@@ -5137,7 +5163,15 @@ def ml_trend_select(entries, settings):
                 if len(calibration)<max(3,minimum//3):
                     entry['warnings'].append(f'ML {prefix}: insufficient held-out baseline for IF/LOF');continue
                 limit=int(settings.get('model_max_samples',5000))
-                if len(training)>limit:training=training.iloc[np.linspace(0,len(training)-1,limit,dtype=int)]
+                if len(training)>limit:
+                    training=training.iloc[np.linspace(0,len(training)-1,limit,dtype=int)]
+                    entry['warnings'].append('IF/LOF training sampled to model_max_samples')
+                if len(calibration)>limit:
+                    calibration=calibration.iloc[np.linspace(0,len(calibration)-1,limit,dtype=int)]
+                    entry['warnings'].append('IF/LOF baseline scoring sampled to model_max_samples')
+                if len(recent)>limit:
+                    recent=recent.iloc[np.linspace(0,len(recent)-1,limit,dtype=int)]
+                    entry['warnings'].append('IF/LOF recent scoring sampled to model_max_samples')
                 features=['value','spread']
                 centers=training[features].median()
                 scales=pd.Series({c:robust_scale(training[c]) for c in features})
@@ -5146,9 +5180,13 @@ def ml_trend_select(entries, settings):
                 r=((recent[features]-centers)/scales).to_numpy()
                 contamination=float(settings.get('model_contamination',.05))
                 for module in sorted(ml_modules):
+                    if exhausted():break
                     if module=='isolation_forest':
                         model=IsolationForest(n_estimators=100,contamination=contamination,random_state=int(settings.get('random_state',42)),n_jobs=1)
-                    else:model=LocalOutlierFactor(n_neighbors=min(20,len(training)-1),contamination=contamination,novelty=True,n_jobs=1)
+                    else:
+                        _k_neighbors=max(5,min(20,len(training)-1))
+                        model=LocalOutlierFactor(n_neighbors=_k_neighbors,contamination=contamination,novelty=True,n_jobs=1)
+                        entry['warnings']=list(dict.fromkeys(entry.get('warnings',[])+[f'LOF n_neighbors={_k_neighbors} (train {len(training)})']))
                     model.fit(x)
                     original=base;base=calibration
                     rate_test(model.predict(b)<0,model.predict(r)<0,module)
@@ -5161,7 +5199,7 @@ def ml_trend_select(entries, settings):
         owner=entries[row['index']]
         owner['ml_test_count']+=1
         if row['module'] not in owner['ml_tested_modules']:owner['ml_tested_modules'].append(row['module'])
-        if row['q']<=float(settings.get('fdr_alpha',.05)) and row['effect']>=effect_limit:
+        if row['q']<=float(settings.get('fdr_alpha',.05)) and row['effect']>=row['minimum_effect']:
             entries[row['index']]['ml_findings'].append(row)
     for entry in entries:
         entry['ml_status']='flagged' if entry['ml_findings'] else ('no_findings' if entry['ml_test_count'] else 'not_tested')
@@ -5177,10 +5215,18 @@ def ml_trend_select(entries, settings):
         entry['reason']=' / '.join(summaries)
         entry['warnings']=list(dict.fromkeys(entry['warnings']))
         candidates.append(entry)
+    budget_limited=exhausted()
+    if budget_limited:
+        for entry in entries:
+            if not entry.get('ml_test_count'):
+                entry['warnings'].append('ML analysis budget reached: coverage is partial (not tested)')
+        _untested=[e['vehicle']+'/'+e['item'] for e in entries if not e.get('ml_test_count')]
+        if _untested:print(f"[ML] budget reached — untested {len(_untested)}: {_untested[:8]}{'...' if len(_untested)>8 else ''}")
     tested_items=sum(bool(e['ml_test_count']) for e in entries)
     return candidates,dict(tested=len(entries),tested_items=tested_items,untested_items=len(entries)-tested_items,
+                           untested=[e['vehicle']+'/'+e['item'] for e in entries if not e.get('ml_test_count')],
                            statistical_tests=len(tests),flagged=len(candidates),
-                           modules=sorted(modules),fdr_alpha=float(settings.get('fdr_alpha',.05)))
+                           modules=sorted(modules),fdr_alpha=float(settings.get('fdr_alpha',.05)),budget_limited=budget_limited,elapsed_seconds=round(time.monotonic()-started,3))
 
 
 def _ml_split_evidence(data, col, ka, kb, controls, settings):

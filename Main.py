@@ -29,16 +29,9 @@ import requests
 from My_Function import *
 from My_Function import _filter_inline_by_vehicle  # import * 는 언더스코어 이름 미포함
 from My_config import GLOBAL_CONFIG
-from anomaly_engine import analyze_commonality, render_findings_html, render_findings_count_html, item_excluded, compile_nl_to_json
+from anomaly_engine import analyze_commonality, render_findings_html, item_excluded
 
-# ==================================================================================================================================
-# 외부 LLM 연결 없이 코드 분석만 사용
-# ==================================================================================================================================
-
-
-
-
-# ==================================================================================================================================
+# 순수 통계 판정만 사용(외부 LLM·룰 없음)
 
 warnings.filterwarnings("ignore", message="DataFrame is highly fragmented")
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -156,93 +149,22 @@ def _slide_title(slide):
     return ""
 
 
-def _save_rule_check_log(ai_dir, lot_id, step_id, rule_trace, findings):
-    """전체 anomaly rule 체크 결과를 RUN/AI 폴더에 파일로 저장.
+def _save_archive_snapshot(report_key, meta, findings, item_stats,
+                           target_rows=None, index_items=None, rule_trace=None):
+    """발행 스냅샷을 RUN/ARCHIVE/<report_key>/에 저장.
 
-    모든 [RULE] 규칙(체이닝/산포억제/산포비교)을 순회한 매칭/해당없음 전량을 기록하고,
-    사람이 읽는 .txt(요약+표)와 기계용 .json(rule_trace 원본) 2개를 남긴다.
-    파일명: anomaly_rule_check_{lot}_{step_id}.(txt|json) — 리포트 키({lot}_{step_id},
-    원본 step_id 기준)와 동일 체계. (AI 인풋 폴더 = 사이클 정리 대상 아님)
-    """
-    import json as _json
-    try:
-        os.makedirs(ai_dir, exist_ok=True)
-    except Exception:
-        pass
-    _safe = lambda s: re.sub(r'[^0-9A-Za-z가-힣._-]+', '_', str(s or 'NA'))
-    base = f"anomaly_rule_check_{_safe(lot_id)}_{_safe(step_id)}"
-    trace = rule_trace or []
-    n_all = len(trace)
-    n_hit = sum(1 for t in trace if t.get('matched'))
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-    lines = []
-    lines.append("=" * 78)
-    lines.append(f"Anomaly Rule Check 결과  (LOT={lot_id}  STEP_ID={step_id})")
-    lines.append(f"생성시각: {ts}")
-    lines.append(f"전체 규칙 {n_all}개 체크 — 매칭 {n_hit}건 / 해당없음 {n_all - n_hit}건")
-    lines.append("=" * 78)
-    if trace:
-        lines.append("")
-        lines.append("[매칭된 규칙]")
-        _hit = [t for t in trace if t.get('matched')]
-        if _hit:
-            for t in _hit:
-                lines.append(f"  ● [{t.get('kind','')}] {t.get('name','')}")
-                lines.append(f"       조건: {t.get('cond','')}")
-                lines.append(f"       결과: {t.get('result','')}")
-                if t.get('note'):
-                    lines.append(f"       비고: {t.get('note','')}")
-        else:
-            lines.append("  (매칭된 규칙 없음)")
-        lines.append("")
-        lines.append("[해당없음(미매칭) 규칙]")
-        _miss = [t for t in trace if not t.get('matched')]
-        if _miss:
-            for t in _miss:
-                lines.append(f"  · [{t.get('kind','')}] {t.get('name','')} — {t.get('result','')}  |  조건: {t.get('cond','')}")
-        else:
-            lines.append("  (미매칭 규칙 없음)")
-    else:
-        lines.append("")
-        lines.append("정의된 anomaly rule 없음(체크 대상 0개).")
-    # 최종 finding 요약(참고)
-    lines.append("")
-    lines.append("-" * 78)
-    lines.append(f"[최종 Finding 요약] 총 {len(findings or [])}건")
-    for f in (findings or []):
-        lines.append(f"  · [{f.get('severity','')}/{f.get('type','')}] {f.get('title','')}")
-
-    txt_path = os.path.join(ai_dir, base + '.txt')
-    json_path = os.path.join(ai_dir, base + '.json')
-    with open(txt_path, 'w', encoding='utf-8') as fh:
-        fh.write("\n".join(lines) + "\n")
-    with open(json_path, 'w', encoding='utf-8') as jf:
-        _json.dump({'lot_id': lot_id, 'step_id': step_id, 'generated': ts,
-                    'n_rules': n_all, 'n_matched': n_hit, 'rule_trace': trace,
-                    'findings': [{'severity': f.get('severity'), 'type': f.get('type'),
-                                  'title': f.get('title'), 'item': f.get('item')}
-                                 for f in (findings or [])]},
-                   jf, ensure_ascii=False, indent=2)
-    print(f"[RULE CHECK] 결과 저장: RUN/AI/{base}.txt (+.json) — 규칙 {n_all}개(매칭 {n_hit})")
-
-
-def _save_archive_snapshot(report_key, meta, findings, item_stats, rule_trace,
-                           target_rows=None, index_items=None):
-    """발행 스냅샷을 RUN/ARCHIVE/<report_key>/에 저장 — 규칙 제안 다이제스트·확정 사례 아카이브 입력.
-
-    - summary.json        : 발행 메타(generated_at 포함) + findings + item_stats + rule_trace.
+    - summary.json        : 발행 메타(generated_at 포함) + findings + item_stats.
     - target_rows.parquet : target lot 측정 rows 중 '발행 당시 REPORT ORDER index' 컬럼만(+좌표 메타)
                             — 이후 reformatter/ADDP가 바뀌어도 당시 값이 고정 보존.
     스냅샷은 부가 산출물: 읽는 기능은 파일이 지워져 있어도 동작해야 하고, 저장 실패도
     리포트 발행에 영향을 주지 않는다(호출부 try/except).
+    rule_trace 인자는 과거 호환용으로만 유지하며 저장하지 않는다.
     """
     import json as _json
     _dir = os.path.join('RUN', 'ARCHIVE', re.sub(r'[^0-9A-Za-z가-힣._-]+', '_', str(report_key)))
     os.makedirs(_dir, exist_ok=True)
     with open(os.path.join(_dir, 'summary.json'), 'w', encoding='utf-8') as f:
-        _json.dump({**meta, 'findings': findings, 'item_stats': item_stats,
-                    'rule_trace': rule_trace}, f, ensure_ascii=False, indent=2, default=str)
+        _json.dump({**meta, 'findings': findings, 'item_stats': item_stats}, f, ensure_ascii=False, indent=2, default=str)
     n_rows = 0
     if target_rows is not None and len(target_rows) > 0 and index_items:
         _meta_cols = [c for c in ('FAB_LOT_ID', 'WAFER_ID', 'CHIP_X_ADJ', 'CHIP_Y_ADJ',
@@ -253,76 +175,6 @@ def _save_archive_snapshot(report_key, meta, findings, item_stats, rule_trace,
             _snap.to_parquet(os.path.join(_dir, 'target_rows.parquet'), index=False)
             n_rows = len(_snap)
     print(f"[archive] 발행 스냅샷 저장: {_dir} (summary.json + rows {n_rows})")
-
-
-def _maybe_send_rule_digest(json_rules, llm_fn, force=False):
-    """규칙 제안 다이제스트를 1일 1회 생성/발송 — POWER_USER 대상, 승인 여부와 무관하게 매일 반복 제안.
-
-    - 생성: anomaly_engine.build_rule_digest(RUN/ARCHIVE 집계) → RUN/AI/rule_digest_<날짜>.txt 저장.
-    - 발송: 메일링 xlsx에 'POWER_USER' 시트가 있고 use_email_send=True일 때만
-      (시트 존재를 직접 확인 — get_email_list의 기본 그룹 fallback으로 전체 오발송하지 않도록).
-    - 상태: RUN/AI/rule_digest_state.json(last_sent)으로 1일 1회 보장(force=True는 재발송).
-    스냅샷/규칙/수신처가 없어도 파일 저장까지는 정상 동작. 예외는 호출부에서 무시(발행 무영향).
-    """
-    import json as _json
-    import html as _html
-    from anomaly_engine import build_rule_digest
-    if not getattr(GLOBAL_CONFIG, 'rule_digest_enabled', False):
-        return
-    _ai_dir = os.path.join('RUN', 'AI')
-    os.makedirs(_ai_dir, exist_ok=True)
-    _state_p = os.path.join(_ai_dir, 'rule_digest_state.json')
-    _today = datetime.now().strftime('%Y-%m-%d')
-    if not force:
-        try:
-            with open(_state_p, encoding='utf-8') as f:
-                if _json.load(f).get('last_sent') == _today:
-                    return
-        except Exception:
-            pass   # 상태 파일 없음/손상 → 오늘 미발송으로 간주
-    d = build_rule_digest(json_rules=json_rules, llm_fn=llm_fn,
-                          window_days=getattr(GLOBAL_CONFIG, 'rule_digest_window_days', 14),
-                          min_repeat=getattr(GLOBAL_CONFIG, 'rule_digest_min_repeat', 3))
-    _out = os.path.join(_ai_dir, f"rule_digest_{_today.replace('-', '')}.txt")
-    with open(_out, 'w', encoding='utf-8') as f:
-        f.write(d['text'])
-    print(f"[digest] 규칙 다이제스트 저장: {_out} (리포트 {d['n_reports']}건 집계 · "
-          f"규칙 {d['n_rules']}개 · 제안 {d['n_proposals']}건 · 좌표재발 {d.get('n_coord', 0)}건)")
-    _sent_note = ''
-    try:
-        _elp = GLOBAL_CONFIG.get('email_list_path')
-        if not getattr(GLOBAL_CONFIG, 'use_email_send', False):
-            _sent_note = 'use_email_send=False → 파일만 저장'
-        elif not (_elp and os.path.exists(_elp) and 'POWER_USER' in pd.ExcelFile(_elp).sheet_names):
-            _sent_note = '메일링 xlsx에 POWER_USER 시트 없음 → 파일만 저장'
-        else:
-            _rcv = get_email_list(_elp, 'POWER_USER')
-            _payload_content = {
-                'content': ('<pre style="font-family:Consolas,Menlo,monospace; font-size:13px;">'
-                            + _html.escape(d['text']) + '</pre>'),
-                'receiverList': _rcv,
-                'senderMailAddress': f"{GLOBAL_CONFIG.get('KNOXID')}@samsung.com",
-                'statusCode': 'SENT',
-                'title': (f"[HOL] 규칙 제안 다이제스트 {_today} "
-                          f"(리포트 {d['n_reports']}건 · 제안 {d['n_proposals']}건)"),
-            }
-            # 사내 메일 API(/send/attach)는 multipart/form-data를 요구한다. 첨부(PPT)가
-            # 있는 리포트 발송은 files=[...] 덕에 자동으로 multipart가 되지만, 첨부가 없는
-            # 다이제스트는 data= 만 쓰면 application/x-www-form-urlencoded로 전송돼
-            # 서버가 content type 오류(HTTP 500)를 낸다. → mailSendString을 multipart
-            # form-data 파트(None=파일 아님)로 보내 리포트 발송과 동일한 Content-Type 사용.
-            _resp = requests.request('POST', GLOBAL_CONFIG.get('url'),
-                                     headers={'x-dep-ticket': GLOBAL_CONFIG.get('TICKET')},
-                                     files=[('mailSendString', (None, f'{_payload_content}'))])
-            _sc = getattr(_resp, 'status_code', None)
-            _sent_note = f"POWER_USER {len(_rcv)}명 발송(HTTP {_sc})"
-            if _sc != 200:
-                print(f"[ERROR] 다이제스트 발송 응답 오류 (HTTP {_sc}) 상세: {getattr(_resp, 'text', '')}")
-    except Exception as _me:
-        _sent_note = f'발송 실패: {_me}'
-    print(f"[digest] {_sent_note}")
-    with open(_state_p, 'w', encoding='utf-8') as f:
-        _json.dump({'last_sent': _today, 'note': _sent_note}, f, ensure_ascii=False)
 
 
 def _move_aggregation_after_scoreboard(prs):
@@ -508,7 +360,6 @@ def _img_datauri(raw, max_kb=None):
     raise ValueError('인라인 이미지 크기 제한 초과')
 
 
-
 def _parse_trigger(argument):
     """TRIGGER[_MODE[_mail]]_<vehicle>_<lot>_<step>; leading underscore optional."""
     value = argument[1:] if argument.startswith('_') else argument
@@ -516,7 +367,7 @@ def _parse_trigger(argument):
         return None, argument, None, None, None
     value = value[len('TRIGGER_'):]
     mode = 'TRIGGER'
-    for candidate in ('FORCE', 'NORMAL', 'ALL'):
+    for candidate in ('FORCE', 'NORMAL', 'ALL', 'SINGLE'):
         if value.startswith(candidate + '_'):
             mode, value = candidate, value[len(candidate) + 1:]
             break
@@ -623,9 +474,7 @@ def _trend_artifacts(charts, title):
         ppt = io.BytesIO()
         prs.save(ppt)
         if len(content.encode('utf-8')) < 2_000_000 and ppt.tell() < 10_000_000:
-            sources = re.findall(r'<img\s[^>]*?src="([^"]*)"', content, re.DOTALL)
-            if len(sources) != len(charts) or any(not src.startswith('data:image/') for src in sources):
-                raise ValueError('HTML 인라인 이미지 불변식 위반')
+            _assert_inline_images(content, len(charts))
             print('[INFO] HTML 인라인 이미지 검증 OK')
             return content, ppt.getvalue()
     raise ValueError('ALL: 모든 trend를 유지하면서 HTML 2MB/PPTX 10MB 미만으로 축소할 수 없습니다')
@@ -655,7 +504,6 @@ def _publish_all_trends(frame, reformatter, vehicle, lot, root, dc, step, recipi
     if state in ('failed','unknown'):raise RuntimeError(f'ALL 메일 발송 {state}')
     if _RUN and _RUN.current:_RUN.finish_report('success')
     print(f'[INFO] ALL {len(charts)} trends: HTML {len(content.encode("utf-8"))} bytes / PPTX {len(ppt)} bytes')
-
 
 
 _RUN = None
@@ -727,7 +575,6 @@ class OperationRun:
         output=os.getenv('AUTO_REPORT_RESULT_PATH')
         if output:atomic_json(output,self.data)
         return 1 if failed else 0
-
 
 
 def _retry_candidates(candidates, final_log, vehicle):
@@ -903,45 +750,6 @@ def _main_impl():
     raw_arg = sys.argv[1]
     trigger_flag = False
 
-    # ── CLI: 자연어 규칙 변환 도구 (리포트 생성과 별개) ──
-    #   python Main.py --convert-nl-rules      : 변환 결과(자연어→when) 미리보기 + 매핑 캐시 갱신(발행/MD 변경 없음)
-    #   python Main.py --convert-nl-rules-md   : 변환해서 '바로' MD의 ANOMALY_RULES에 [RULE]로 적용(확인 없음)
-    #   키워드 규칙 변환만 사용. 같은 문구는 캐시로 항상 같은 코드.
-    # ── CLI: 규칙 제안 다이제스트 미리보기 (리포트 발행과 별개, 상태 파일/메일 발송 없음) ──
-    #   RUN/ARCHIVE 스냅샷을 집계해 터미널에 출력. 실제 저장/발송은 발행 루프 말미에 1일 1회 자동.
-    if raw_arg == '--rule-digest':
-        from anomaly_engine import build_rule_digest
-        _llm = None
-        _kp = GLOBAL_CONFIG.get("anomaly_knowledge_path")
-        _kt = ''
-        if _kp and os.path.exists(_kp):
-            with open(_kp, encoding='utf-8') as _kf:
-                _kt = _kf.read()
-        _rules = compile_nl_to_json(_kt, _llm, cache_dir=os.path.join('RUN', 'AI')) if _kt else []
-        _d = build_rule_digest(json_rules=_rules, llm_fn=_llm,
-                               window_days=getattr(GLOBAL_CONFIG, 'rule_digest_window_days', 14),
-                               min_repeat=getattr(GLOBAL_CONFIG, 'rule_digest_min_repeat', 3))
-        # 콘솔 인코딩(cp949 등)에 없는 문자는 ?로 치환해 출력(통합 print 훅 설치 전 단계)
-        _enc = getattr(sys.stdout, 'encoding', None) or 'utf-8'
-        print(_d['text'].encode(_enc, errors='replace').decode(_enc))
-        sys.exit(0)
-
-    if raw_arg in ('--convert-nl-rules', '--convert-nl-rules-md'):
-        from anomaly_engine import preview_nl_rules, apply_nl_rules_to_md
-
-        _llm = None
-        print("[NL] 변환 방식: 키워드 규칙")
-        _kp = GLOBAL_CONFIG.get("anomaly_knowledge_path")
-        if not (_kp and os.path.exists(_kp)):
-            print(f"[NL] anomaly_knowledge_path를 찾을 수 없습니다: {_kp}")
-            sys.exit(1)
-        _cd = os.path.join('RUN', 'AI')
-        if raw_arg.endswith('-md'):
-            _ok = apply_nl_rules_to_md(_kp, llm_fn=_llm, cache_dir=_cd)
-        else:
-            _ok = preview_nl_rules(_kp, llm_fn=_llm, cache_dir=_cd)
-        sys.exit(0 if _ok else 2)
-
     trigger_mode, vehicle_name, trigger_lot, trigger_step, trigger_mail = _parse_trigger(raw_arg)
     trigger_flag = trigger_mode is not None
     if trigger_flag:
@@ -949,8 +757,6 @@ def _main_impl():
 
     # config.yaml에서 설정 로드
     GLOBAL_CONFIG.load_from_yaml(vehicle_name)
-    GLOBAL_CONFIG.use_gpt_summary = False
-    GLOBAL_CONFIG.use_gpt_multistep = False
 
     # =============================================== Config get ==================================================================
 
@@ -995,10 +801,9 @@ def _main_impl():
     # =============================================== Folder path 생성 ==================================================================
     # NOTE: DB_et_LOTWF_raw / DB_et_LOTWF_pivot_raw 삭제됨 — daily DB에서 DuckDB로 직접 조회
 
-    # RUN/AI = AI 인풋파일 보관 폴더(사이클 정리 대상 아님), RUN/TEMP = 임시 산출물 폴더
-    _ai_dir = os.path.join(ROOT, 'AI')
+    # RUN/TEMP = 임시 산출물 폴더
     _temp_dir = os.path.join(ROOT, 'TEMP')
-    for target_path in [ROOT, DB, DB_et_daily, log, Report, low_qual_ppt_save_path, html_save_path, _ai_dir, _temp_dir]:
+    for target_path in [ROOT, DB, DB_et_daily, log, Report, low_qual_ppt_save_path, html_save_path, _temp_dir]:
         if not os.path.exists(target_path):
             os.makedirs(target_path)
 
@@ -1047,7 +852,6 @@ def _main_impl():
     datetime_now = datetime.now()
     upload_date = datetime_now.strftime('%Y%m%d')
 
-    _LLM_FN = None
     _ANOMALY_KNOWLEDGE_TEXT = ""
     try:
         _kp = GLOBAL_CONFIG.get("anomaly_knowledge_path")
@@ -1056,21 +860,6 @@ def _main_impl():
                 _ANOMALY_KNOWLEDGE_TEXT = _kf.read()
     except Exception as _ke:
         print(f"[WARN] 이상 지식베이스 로드 실패: {_ke}")
-
-    # ── [RULE] 규칙은 아래 NL→JSON 단일 엔진으로만 판정한다 ──
-    #   NL_RULES 마커의 `[RULE]` 한 줄들을 JSON 조건으로 변환해 evaluate_json_rules로 판정한다.
-    #   판정 방식: '모든 [RULE]을 전부 점검 → 조건 만족하는 규칙마다 각각 코멘트' (다중 매칭 전부 표기).
-    #   (구 verbose [RULE] 체이닝(먼저 만족한 분기 1개만) 컴파일 경로는 중복 판정 방지를 위해 비활성화.)
-
-    # ── 자연어 규칙 → JSON 변환 (판정 엔진용) ──
-    _json_rules = None
-    if getattr(GLOBAL_CONFIG, 'anomaly_nl_autocompile', True):
-        try:
-            _json_rules = compile_nl_to_json(_ANOMALY_KNOWLEDGE_TEXT, _LLM_FN, cache_dir=_ai_dir)
-            if _json_rules:
-                print(f"[INFO] NL→JSON 규칙 {len(_json_rules)}개 로드")
-        except Exception as _je:
-            print(f"[WARN] NL→JSON 변환 실패: {_je}")
 
     reformatter = pd.read_csv(f'reformatter/{vehicle}_reformatter.csv')
 
@@ -1237,11 +1026,16 @@ def _main_impl():
 
                 # DuckDB로 viewing_period 범위의 raw 데이터 로드
                 _RUN.stage('raw_load')
-                raw_df = load_daily_projected(conn, DB_et_daily, viewing_period, reformatter)
+                if trigger_mode == 'SINGLE':
+                    print(f'[INFO] SINGLE {vehicle}_{trigger_lot}_{trigger_step}: 기간 제한 없이 한 lot/step만 조회')
+                    raw_df = load_daily_projected(conn, DB_et_daily, None, reformatter,
+                                                  lot=trigger_lot, step=trigger_step)
+                else:
+                    raw_df = load_daily_projected(conn, DB_et_daily, viewing_period, reformatter)
 
                 if raw_df.empty:
-                    print(f'[WARN] daily DB에 {viewing_period}일 이내 데이터 없음')
-                    raise ValueError(f'daily DB에 {viewing_period}일 이내 필요한 측정 데이터 없음')
+                    scope = f'{trigger_lot}_{trigger_step} (기간 제한 없음)' if trigger_mode == 'SINGLE' else f'{viewing_period}일 이내'
+                    raise ValueError(f'daily DB에 {scope} 필요한 측정 데이터 없음')
 
                 # ── Scale Factor 적용 (REAL item 값 × SCALE FACTOR) ──
                 # 매칭 안된 raw item은 SCALE FACTOR=1.0 (원값 유지). REAL 값이 여기서 스케일되므로
@@ -1278,7 +1072,7 @@ def _main_impl():
                 merged_df = merged_df.reset_index()
                 merged_df['mask'] = vehicle
                 # ── with_vehicle 데이터 로드 & Merge (daily Hive 파티션 사용) ──
-                if not vehicle in with_vehicle :
+                if trigger_mode != 'SINGLE' and vehicle not in with_vehicle:
                     print("[INFO] with_vehicle안에 vehicle 없음. 진행")
                     try : 
                         with_vehicle_Table = pd.DataFrame() 
@@ -1659,13 +1453,9 @@ def _main_impl():
 
                         _RUN.stage('analysis')
                         # 1-3b. 코드 통계 분석(findings) — HTML [0]와 PPT 상세 페이지에 공용 사용
-                        #   ⚠️ 지식판정(RULE) 기능은 AI 연결 시에만 동작 — AI 미연결이면 기존 이상/주의 판정만.
-                        _ai_on = bool(GLOBAL_CONFIG.use_gpt_summary
-                                      and getattr(GLOBAL_CONFIG, 'use_gpt_multistep', True)
-                                      and _LLM_FN is not None)
+                        #   순수 통계 판정(spec-out / Flier / 산포 / 수준 이동 / trend / SPC run)만 산출.
                         code_findings = []
-                        anomaly_item_stats = {}   # 항목별 통계 요약 — AI 해석 [항목 통계] 입력
-                        anomaly_rule_trace = []   # 전체 anomaly rule 체크 결과(매칭/해당없음) — RUN/AI 저장·PPT 반영
+                        anomaly_item_stats = {}   # 항목별 통계 요약
                         # anomaly 분석 입력을 '현재 step_id'로 한정 — 다른 step에서 측정된 항목의
                         # 이상이 이 리포트(키=lot+step)의 finding/Anomaly 차트에 섞이지 않게 한다.
                         #  (insert_plots는 이미 match_key(root+step)로 step을 스코프 → metrics_dict·
@@ -1683,20 +1473,12 @@ def _main_impl():
                                 main_vehicle=vehicle, config=GLOBAL_CONFIG, reformatter=reformatter,
                                 knowledge_text=_ANOMALY_KNOWLEDGE_TEXT,
                                 item_stats_out=anomaly_item_stats,
-                                rule_trace_out=anomaly_rule_trace,
-                                json_rules=(_json_rules if _ai_on else None),
                                 report_key=report_key)
                             print(f"[INFO] commonality 분석: {len(code_findings)}건 finding")
                         except Exception as ce:
                             print(f"[WARN] commonality 분석 스킵 (오류): {ce}")
-                        # 전체 anomaly rule 체크 결과를 RUN/AI 폴더에 파일로 저장(매칭·해당없음 전량 기록)
-                        try:
-                            _save_rule_check_log(_ai_dir, target_lot_id, target_DC_step_id,
-                                                 anomaly_rule_trace, code_findings)
-                        except Exception as _rce:
-                            print(f"[WARN] rule 체크 결과 저장 스킵 (오류): {_rce}")
-                        # 발행 스냅샷(RUN/ARCHIVE/<key>/) — 규칙 제안 다이제스트·사례 아카이브 입력.
-                        #   부가 산출물: 지워지거나 없어도 리포트 발행/판정에 영향 없음(저장 실패도 무시).
+                        # 발행 스냅샷(RUN/ARCHIVE/<key>/) — 부가 산출물.
+                        #   지워지거나 없어도 리포트 발행/판정에 영향 없음(저장 실패도 무시).
                         if getattr(GLOBAL_CONFIG, 'use_archive_snapshot', True):
                             try:
                                 _save_archive_snapshot(
@@ -1705,7 +1487,7 @@ def _main_impl():
                                      'step_id': target_DC_step_id, 'dc_step': target_DC_step,
                                      'vehicle': vehicle, 'wafers': target_wafer_id_list,
                                      'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')},
-                                    code_findings, anomaly_item_stats, anomaly_rule_trace,
+                                    code_findings, anomaly_item_stats,
                                     target_rows=search_key_rows,
                                     # 당시 index = REPORT ORDER 보유 항목 그대로(사내 reformatter는
                                     # PCHK_LKG/PCHK_RES에도 REPORT ORDER가 있어 자연히 포함됨)
@@ -1719,8 +1501,7 @@ def _main_impl():
                                 prs_low_qual, code_findings, after_index=1 + _sb_pages,
                                 main_vehicle=vehicle,
                                 radius_zones=GLOBAL_CONFIG.get('radius_zones', [60, 100]),
-                                item_slide_map=item_slide_map,
-                                rule_trace=anomaly_rule_trace)
+                                item_slide_map=item_slide_map)
                         except Exception as fe:
                             print(f"[WARN] Anomaly 상세 페이지 삽입 스킵: {fe}")
 
@@ -2015,21 +1796,14 @@ def _main_impl():
                             lot_detail_html += '    </tr>\n'
                         lot_detail_html += '  </tbody>\n</table>\n'
 
-                        # ==================== [0] Anomaly: 코드 분석 + (선택)AI 다단계 해석 + Trend chart ====================
-                        # 코드(analyze_commonality)는 AI 유무와 무관하게 항상 동작하여 통계 Finding을 산출.
-                        # use_gpt_summary가 켜져 있고 LLM이 가능하면, 그 Finding을 입력으로 AI 다단계 해석을 곁들임.
+                        # ==================== [0] Anomaly: 코드 통계 분석 + Trend chart ====================
+                        # analyze_commonality가 순수 통계 Finding을 산출한다(외부 LLM 없음).
                         _top_n = getattr(GLOBAL_CONFIG, 'anomaly_trend_chart_top_n', 3)
 
                         # 1) 코드 통계 분석 결과(위 1-3b에서 계산) → HTML 요약
-                        #    AI on: 지식판정(RULE) 내용은 상단 AI 해석 블록(_ai_block)에만 표시하고,
-                        #           그 아래에는 '이상 N건 · 주의 N건' 간단 요약만(지식판정 상세 목록/‘몇 pt’ 제거).
-                        #    AI off: 기존과 동일(전체 이상/주의 목록 요약).
                         code_summary_html = ""
                         try:
-                            if _ai_on:
-                                code_summary_html = render_findings_count_html(code_findings)
-                            else:
-                                code_summary_html = render_findings_html(code_findings, top_n=5)
+                            code_summary_html = render_findings_html(code_findings, top_n=5)
                         except Exception as ce:
                             print(f"[WARN] findings 렌더 스킵 (오류): {ce}")
 
@@ -2045,26 +1819,9 @@ def _main_impl():
                         _excl_items += [f"*{str(_k).strip()}*"
                                         for _k in (getattr(GLOBAL_CONFIG, 'wfmap_exclude_keywords', []) or [])
                                         if str(_k).strip()]
-                        # 조건부 제외(anomaly_exclude_unless_rule): RULE에 걸려 code_findings에 살아남은
-                        #   항목만 Trend chart에 노출하고, 그 외(미매칭)는 metrics 폴백에서도 제외한다.
-                        #   (anomaly_engine이 built-in finding을 이미 억제 → code_findings에 없으면 미매칭.)
-                        _excl_unless = list(getattr(GLOBAL_CONFIG, 'anomaly_exclude_unless_rule', []) or [])
-                        _finding_item_set = set()
-                        if _excl_unless:
-                            for _f in (code_findings or []):
-                                for _fi in str(_f.get('item', '')).split(','):
-                                    _fi = _fi.strip()
-                                    if _fi:
-                                        _finding_item_set.add(_fi)
 
                         def _is_excluded(_it):
-                            if item_excluded(_it, _excl_items):
-                                return True
-                            # 조건부 제외: RULE 미매칭(=code_findings에 없음)일 때만 제외
-                            if (_excl_unless and item_excluded(_it, _excl_unless)
-                                    and _it not in _finding_item_set):
-                                return True
-                            return False
+                            return bool(item_excluded(_it, _excl_items))
                         top_item_names = []
                         _seen = set()
 
@@ -2097,18 +1854,7 @@ def _main_impl():
                             if _c2 is not None:
                                 _seen_cat2.add(_c2)
 
-                        # (AI on) 지식판정(RULE) 매칭 항목을 MD 규칙 순서대로 '먼저' 배치 →
-                        #         위에 적힌(강한) 규칙 항목이 앞, 일반 이상 항목보다 우선.
-                        if _ai_on:
-                            for _f in (code_findings or []):
-                                if _f.get('type') != 'DEFECT_MODE':
-                                    continue
-                                for _k in (_f.get('rule_matched_keys') or [_f.get('item', '')]):
-                                    _try_add(_k)
-                                    if len(top_item_names) >= _top_n: break
-                                if len(top_item_names) >= _top_n: break
-
-                        # 그다음 일반 이상 항목(SPEC_OUT 등)으로 채움(이미 담긴 매칭 항목은 _seen으로 스킵)
+                        # 일반 이상 항목(SPEC_OUT 등)으로 채움
                         for _f in (code_findings or []):
                             for _it in str(_f.get('item', '')).split(','):
                                 _try_add(_it)
@@ -2465,19 +2211,16 @@ def _main_impl():
                         else:
                             print("[INFO] show_anomaly_trend_chart=False → 이상 Trend chart 스킵")
 
-                        ai_html = None
-
                         # ==================== HTML 조립 ====================
                         sub_title = f'{target_lot_id} / {target_step_merged}'
                         html_content = html_code.replace('sub_title', sub_title)
 
-                        # [0] 섹션 = (AI 다단계 해석 있으면 상단) + 코드 자동 분석(통계 Finding) + Trend chart 그리드
+                        # [0] 섹션 = 코드 자동 분석(통계 Finding) + Trend chart 그리드
                         # 섹션 제목/컨테이너 여백은 메일 클라이언트(<style> 무시)·포워딩에서도 동일하게
                         # 보이도록 inline style로 지정(class는 브라우저 sticky/스크롤 보조용으로 유지).
                         _SEC_T = ('border-left:4px solid #003366; padding-left:8px; font-size:15px; '
                                   'font-weight:bold; color:#003366; margin-top:20px; margin-bottom:6px;')
                         _TBL_C = 'margin-top:5px; margin-bottom:15px;'
-                        _ai_block = (ai_html + '<hr style="border:none;border-top:1px solid #eee;margin:8px 0;">') if ai_html else ''
                         _chart_sub = (f'<div class="section-title" style="{_SEC_T} font-size:13px; margin-top:14px;">'
                                       'Anomaly Trend Chart</div>')
                         # ── 판정 로직 안내 박스(차트 위 고정 표기) — 임계값은 My_config에서 동적 반영 ──
@@ -2561,7 +2304,7 @@ def _main_impl():
                         html_content = html_content.replace(
                             '<div id="target0"></div>',
                             f'<div id="target0"><div class="section-title" style="{_SEC_T}">■ [0] Anomaly Summary</div>'
-                            f'{_ai_block}{code_summary_html}{_chart_sub}{_chart_logic}{anomaly_html}</div>'
+                            f'{code_summary_html}{_chart_sub}{_chart_logic}{anomaly_html}</div>'
                         )
                         html_content = html_content.replace(
                             '<div id="target1"></div>',
@@ -2603,6 +2346,10 @@ def _main_impl():
                         # ==================== HTML 저장 ====================
                         _RUN.stage('html_save')
                         atomic_bytes(f'{html_save_path}{fname}', html_content.encode('utf-8'))
+                        _RUN.stage('score_save')
+                        score_path = save_score_csv(VIP_group_HTML, DB, vehicle, target_lot_id,
+                                                    target_DC_step_id, fname)
+                        print_status('Score CSV 저장', 'ok', score_path)
                         _capture_artifacts(f'{html_save_path}{fname}', f'{low_qual_ppt_save_path}{final_ppt_file_name_DX}')
 
                         # ==================== 고화질 PPT(EDM) 미사용 ====================
@@ -2677,20 +2424,11 @@ def _main_impl():
 
         conn.close()
 
-        # ── 규칙 제안 다이제스트(1일 1회) — 규칙 현황·불량모드 통계·미매칭 패턴 제안을
-        #    RUN/AI에 저장하고, 메일링 xlsx에 POWER_USER 시트가 있으면 발송(반영 전까지 매일 반복 제안).
-        try:
-            if not trigger_flag:
-                _maybe_send_rule_digest(_json_rules, _LLM_FN)
-        except Exception as _dge:
-            print(f"[WARN] 규칙 다이제스트 스킵 (오류): {_dge}")
-
         shutdown_chart_pool()   # 병렬 렌더링 워커 풀 정리 (atexit에도 등록되어 있으나 명시 종료)
         print(f'[INFO] ============== {vehicle} 전체 프로세스 완료 ==============')
 
     else:
         raise ValueError("reformatter 검증 실패")
-
 
 
 def _trend_legend_info(entry, settings):
@@ -2758,6 +2496,23 @@ def _service_table(headers, rows):
     return body+'</tbody></table>'
 
 
+def _assert_inline_images(html_content, expected=None):
+    """HTML 인라인 이미지 불변식 검증(공통 헬퍼, 수정 시 주의).
+
+    모든 <img> src는 data:image/...;base64 인라인이어야 한다.
+    expected가 주어지면 이미지 개수까지 검증한다.
+    위반 시 ValueError, 통과 시 이미지 개수를 반환한다.
+    """
+    sources=re.findall(r'<img\s[^>]*?src="([^"]*)"', html_content, re.DOTALL)
+    bad=[s for s in sources if not s.startswith('data:image/')]
+    if bad:
+        raise ValueError('HTML 인라인 이미지 불변식 위반')
+    if expected is not None and len(sources)!=expected:
+        raise ValueError('HTML 인라인 이미지 불변식 위반')
+    print(f"[INFO] HTML 인라인 이미지 검증 OK — <img> {len(sources)}개 모두 data:image 인라인")
+    return len(sources)
+
+
 def _service_metrics(metrics):
     import html
     return ('<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:12px 0;border-top:1px solid #cbd5df;border-bottom:1px solid #cbd5df"><tr>'+
@@ -2771,6 +2526,11 @@ def _trend_review(entry, ml=False):
         if entry.get('ml_findings'):return '검토 후보','#a45100','탐지 근거와 비교 lot을 확인한 뒤 공정 이력을 대조하세요.'
         if not entry.get('ml_test_count'):return '분석 불가','#666666','과거·신규 lot 수와 시간·Split 매칭을 확인하세요.'
         return '탐지 없음','#1f497d','실행된 검정에서 설정 기준을 만족하는 후보가 없습니다.'
+    if 'auto_findings' in entry:
+        findings=entry['auto_findings']
+        if findings:return ('이상' if any(f['severity']=='CRITICAL' for f in findings) else '주의'),'#b4232d','아래 Lot별 Auto Report 판정 근거를 확인하세요.'
+        if entry.get('warnings'):return '자료 확인','#a45100','자료 제한을 확인한 뒤 추이를 해석하세요.'
+        return '이상·주의 없음','#1f497d','최근 24시간 측정에서 Auto Report 기준 이상·주의 신호가 없습니다.'
     if (entry.get('recent_out_pct') or 0)>0:return '신규 Spec 이탈','#b4232d','신규·변경 측정의 이탈 lot과 측정 재현성을 확인하세요.'
     if entry.get('signals'):return '변화 확인','#b4232d','Spec 이탈 및 Split별 변화가 최근 lot에서도 이어지는지 확인하세요.'
     if entry.get('out_pct') is None:return 'Spec 없음','#666666','추이 참고용입니다. 제품 reformatter의 Spec을 확인하세요.'
@@ -2797,9 +2557,11 @@ def _trend_brief(entries, settings):
     if ml:
         analysis=settings.get('_analysis',{})
         body+='<p>전체 분석: 대상 '+str(analysis.get('tested',len(owners)))+' / 검정 실행 항목 '+str(analysis.get('tested_items',0))+' / 검정 미실행 항목 '+str(analysis.get('untested_items',0))+' / 통계 검정 '+str(analysis.get('statistical_tests',0))+'회. 일부 모듈 제외 사유는 항목별 자료 제한을 확인하세요.</p>'
-        body+='<p>탐지 기준: 보정 q ≤ '+html.escape(str(settings.get('fdr_alpha',.05)))+' 및 효과 기준 ≥ '+html.escape(str(settings.get('effect_sigma',1.5)))+'. q는 불량률이 아닙니다. 연관 후보는 원인 확정이나 공정 변경 지시가 아닙니다.</p>'
+        body+='<p>탐지 기준: 보정 q ≤ '+html.escape(str(settings.get('fdr_alpha',.05)))+' 및 각 기법의 효과 기준(순위 차이·상관·분포 거리·이상 비율 증가). Auto Report의 robust 산포 배수와 독립입니다. q는 불량률이 아니며 연관 후보는 원인 확정이 아닙니다.</p>'
+        if settings.get('_influence_unavailable'):body+='<p style="color:#8a3800">연관 분석 불가: ML join 행 상한 초과로 시간·Split 정제 없이 탐지했습니다. 영향 후보는 참고하지 마세요.</p>'
+        if analysis.get('budget_limited'):body+='<p style="color:#8a3800">연산 상한에 도달해 일부 검정을 생략했습니다. 탐지 없음은 전체 정상 판정이 아닙니다.</p>'
     else:
-        body+='<p>검정 테두리 점은 이전 성공 발행 이후 신규·변경 관측이며 첫 발행은 당일 측정입니다. Spec out은 표시 기간의 전체 유효 값 기준이며, 집계 항목은 설정된 집계값으로 계산합니다.</p>'
+        body+='<p>검정 테두리 점은 발행 시점 직전 24시간 구간의 측정입니다. 과거 측정은 비교 배경이며 성공 발행 이력과 무관하게 동일한 24시간 구간을 강조합니다. Spec out은 표시 기간의 전체 유효 값 기준이며, 집계 항목은 설정된 집계값으로 계산합니다.</p>'
     ranked=sorted(owners,key=lambda e:(0 if _trend_review(e,ml)[0] in ('검토 후보','변화 확인','신규 Spec 이탈') else 1,0 if e.get('warnings') or not e.get('n') else 1,e['vehicle'],e['category'],e['item']))
     limit=max(1,min(30,int(settings.get('summary_max_items',12))))
     rows=[]
@@ -3042,7 +2804,7 @@ def _ml_reading_note(entry):
     if ' / spatial / ' in entry['item']:
         return ('왼쪽: 신규 관측의 위치별 중앙값(모든 Split 합성). 가운데: 신규 - 과거, 빨강은 증가·파랑은 감소이며 Spec 불량 표시는 아닙니다. '
                 '오른쪽: Split별 반경 중앙값(점)과 3차 근사선. 색은 Trend와 같습니다.')
-    return ('색: 제품 / Split. 검정 테두리: 이전 성공 발행 이후 신규·변경 관측(첫 발행은 당일 측정). '
+    return ('색: 제품 / Split. 검정 테두리: 미발행 관측(첫 발행은 당일 측정). '
             '검정선: 전체 그룹의 일별 중앙값을 3일 이동평균한 참고선. X축: '+str(entry.get('x_label','시간 정보 없음'))+
             '. Y축: '+str(entry.get('unit','단위 정보 없음'))+' / '+str(entry['aggregation'])+'. 항목별 Y축 범위는 다를 수 있습니다.')
 
@@ -3050,7 +2812,8 @@ def _ml_reading_note(entry):
 def _ml_finding_summary(entry):
     names={'isolation_forest':'Isolation Forest 이상 증가','local_outlier_factor':'주변 패턴 대비 이상 증가',
            'spatial_pattern':'웨이퍼 공간 패턴 변화','time_trend':'시간 추이 변화','split_difference':'Split 간 차이',
-           'equipment_difference':'장비 간 차이','spike_rate':'극단값 비율 증가'}
+           'equipment_difference':'장비 간 차이','spike_rate':'극단값 비율 증가',
+           'distribution_shift':'분포 변화','spread_change':'웨이퍼 산포 변화'}
     findings=entry.get('ml_findings',[])
     summary=' · '.join(dict.fromkeys(names.get(f['module'],f['module']) for f in findings)) or entry['reason']
     if findings:summary+=' / 보정 q 최소 '+format(min(f['q'] for f in findings),'.3g')
@@ -3155,10 +2918,10 @@ def _ml_compact_html(entry, panels, maps, settings):
         content+='</table>'
     cat=next((i for i,c in enumerate(candidates) if c['kind']=='categorical'),None)
     num=next((i for i,c in enumerate(candidates) if c['kind']=='numeric'),None)
-    cells=[picture(entry['png'],'Trend'),
-           picture(panels[cat],'Box · #'+str(candidates[cat]['rank'])) if cat is not None else _ml_context_box(entry),
+    content+=picture(entry['png'],'Trend · 과거 대비 신규 측정')
+    cells=[picture(panels[cat],'Box · #'+str(candidates[cat]['rank'])) if cat is not None else _ml_context_box(entry),
            picture(panels[num],'Correlation scatter · #'+str(candidates[num]['rank'])) if num is not None else empty('Correlation scatter · 유의한 수치 인자 없음')]
-    content+='<table role="presentation" width="100%" cellspacing="0" cellpadding="3" style="table-layout:fixed"><tr>'+''.join('<td width="33.33%" style="vertical-align:top">'+v+'</td>' for v in cells)+'</tr></table>'
+    content+='<table role="presentation" width="100%" cellspacing="0" cellpadding="3" style="table-layout:fixed"><tr>'+''.join('<td width="50%" style="vertical-align:top">'+v+'</td>' for v in cells)+'</tr></table>'
     chosen=next((sp for sp in maps if sp is not None),None)
     if chosen is None:chosen=_ml_context_spatial(entry)
     content+='<div style="max-width:1080px;margin:0 auto">'+(picture(chosen,'Wafer map / Radius') if chosen is not None else empty('Wafer map / Radius · 공간 좌표 없음'))+'</div>'
@@ -3166,6 +2929,11 @@ def _ml_compact_html(entry, panels, maps, settings):
     if rest:
         content+='<table role="presentation" width="100%" cellspacing="0" cellpadding="3" style="table-layout:fixed"><tr>'
         content+=''.join('<td style="vertical-align:top" width="'+str(100/len(rest))+'%">'+picture(panels[i],'#'+str(candidates[i]['rank'])+' '+candidates[i]['column'])+'</td>' for i in rest)+'</tr></table>'
+    content+=_service_heading('탐지 근거 · 기법별 결과')+_service_table(['기법','비교 / 근거','보정 q','효과 / 해당 기준'],
+        [[f['module'],f['message'],f"{f['q']:.3g}",f"{f['effect']:.3g} / {f.get('minimum_effect','-')}"] for f in entry.get('ml_findings',[])])
+    content+='<p style="font-size:12px;padding:0 10px">실행 기법: '+esc(', '.join(entry.get('ml_tested_modules',[])))+' · 유효 검정 '+str(entry.get('ml_test_count',0))+'회</p>'
+    restrictions=list(dict.fromkeys(entry.get('warnings',[])+[str(v) for v in entry.get('_influence',{}).get('skipped',[])]))
+    if restrictions:content+='<p style="font-size:12px;color:#8a3800;padding:0 10px">자료·연산 제한: '+esc(' / '.join(restrictions))+'</p>'
     return content+'</section>'
 
 
@@ -3194,6 +2962,9 @@ def _ml_context_spatial(entry):
     if 'flat_zone' in raw and raw.flat_zone.nunique()>1:return None
     if '_vehicle' in raw:raw=raw.loc[raw['_vehicle'].eq(entry['vehicle'])]
     raw=raw.dropna(subset=list(needed)).copy()
+    raw['chip_x_pos']=pd.to_numeric(raw['chip_x_pos'],errors='coerce')
+    raw['chip_y_pos']=pd.to_numeric(raw['chip_y_pos'],errors='coerce')
+    raw=raw.dropna(subset=['chip_x_pos','chip_y_pos']).copy()
     wafer=raw.groupby(['root_lot_id','wafer_id','_recent','chip_x_pos','chip_y_pos'])._value.median().reset_index()
     roots=wafer.groupby(['root_lot_id','_recent','chip_x_pos','chip_y_pos'])._value.median().reset_index()
     sites=roots.groupby(['_recent','chip_x_pos','chip_y_pos'])._value.median().reset_index()
@@ -3283,9 +3054,7 @@ def _ml_influence_pack(entries,settings,title):
             sections.append(_ml_compact_html(entry,panels,maps,settings))
         body=_service_html_start(title,'', '')
         body+=''.join(sections)+'</div></body></html>'
-        sources=re.findall(r'<img\s[^>]*?src="([^"]*)"',body,re.DOTALL)
-        if any(not s.startswith('data:image/') for s in sources):raise ValueError('HTML 인라인 이미지 불변식 위반')
-        print('[INFO] HTML 인라인 이미지 검증 OK',flush=True)
+        _assert_inline_images(body)
         _service_deck_style(prs)
         stream=io.BytesIO();prs.save(stream);return body,stream.getvalue()
     result=[];batch=[]
@@ -3301,6 +3070,26 @@ def _ml_influence_pack(entries,settings,title):
         result.append((b,p,len(batch)))
     if len(result)>min(10,int(settings.get('max_mail_parts',10))):raise _DailyTrendLimit('ML 메일 최대 분할 수 초과')
     return result
+
+
+def _trend_anchor(entry):
+    import hashlib,json
+    return 'item-'+hashlib.sha256(json.dumps([str(entry.get(k,'')) for k in ('vehicle','category','item','step','program','temperature')],ensure_ascii=False).encode()).hexdigest()[:16]
+
+
+def _daily_summary(entries, settings):
+    import html
+    esc=lambda v:html.escape(str(v))
+    flagged=[e for e in entries if e.get('auto_findings')]
+    body=_service_metrics([('24시간 측정 항목·조건',len(entries),'#003366'),('이상·주의 항목',len(flagged),'#b4232d')])
+    body+='<p>측정 구간: '+esc(settings.get('highlight_since',''))+' ~ '+esc(settings.get('report_now',''))+'. 검정 테두리는 이 구간의 측정입니다. 과거 측정은 비교 배경이며, 아래 판정은 Auto Report와 같은 분석 함수와 제품 설정을 사용합니다.</p>'
+    body+=_service_heading('Auto Report 기준 이상·주의 · 항목 클릭 시 차트로 이동','daily-findings')
+    if not flagged:body+='<p>최근 24시간 측정에서 이상·주의 신호가 없습니다.</p>'
+    for e in flagged:
+        body+='<p style="margin:8px 0"><a style="color:#0055aa;font-weight:bold" href="#'+_trend_anchor(e)+'">'+esc(e['vehicle']+' / '+e['category']+' / '+e['item']+' / '+e['step']+' / '+e['program']+' / '+str(e['temperature']))+'</a> · '+esc(_trend_review(e)[0])+'<br>'+esc(' / '.join(dict.fromkeys(f['lot']+': '+f['title'] for f in e['auto_findings'])))+'</p>'
+    skipped=[r for r in settings.get('_coverage',[]) if r['status']!='ok']
+    if skipped:body+='<p style="color:#8a3800">발행 생략: '+esc(' / '.join(r['vehicle']+': '+r.get('reason',r['status']) for r in skipped))+'</p>'
+    return body
 
 
 def _daily_trend_pack(entries, settings, title):
@@ -3330,12 +3119,34 @@ def _daily_trend_pack(entries, settings, title):
             box.text=row['label'];box.paragraphs[0].font.size=Pt(10 if ml_mode else 8)
     def build(batch):
         prs=Presentation();prs.slide_width=Inches(13.333);prs.slide_height=Inches(7.5)
+        flagged=[e for e in batch if e.get('auto_findings')]
+        summary_links=[];item_slides={}
+        for start in range(0,max(1,len(flagged)),6):
+            overview=prs.slides.add_slide(prs.slide_layouts[6])
+            tf=overview.shapes.add_textbox(Inches(.4),Inches(.25),Inches(12.4),Inches(.5)).text_frame
+            tf.text='Daily Trend · 최근 24시간 이상·주의';tf.paragraphs[0].font.size=Pt(22)
+            tf=overview.shapes.add_textbox(Inches(.4),Inches(.9),Inches(12.4),Inches(.55)).text_frame
+            tf.text=str(settings.get('highlight_since',''))+' ~ '+str(settings.get('report_now',''))+' / Auto Report 공통 판정'
+            tf.paragraphs[0].font.size=Pt(12)
+            for j,e in enumerate(flagged[start:start+6]):
+                tf=overview.shapes.add_textbox(Inches(.5),Inches(1.6+j*.84),Inches(12.1),Inches(.78)).text_frame
+                tf.word_wrap=True
+                tf.text=e['vehicle']+' / '+e['category']+' / '+e['item']+' / '+e['step']+' / '+e['program']+' / '+str(e['temperature'])+' — '+_trend_review(e)[0]
+                tf.paragraphs[0].font.size=Pt(15)
+                summary_links.append((tf.paragraphs[0].runs[0],overview,_trend_anchor(e)))
+                p=tf.add_paragraph();p.text='Lot: '+', '.join(dict.fromkeys(f['lot'] for f in e['auto_findings']))+' · '+', '.join(dict.fromkeys(f['title'] for f in e['auto_findings']))
+                p.font.size=Pt(10)
+            if not flagged:
+                tf=overview.shapes.add_textbox(Inches(.5),Inches(1.8),Inches(12),Inches(1)).text_frame
+                tf.text='최근 24시간 측정에서 Auto Report 기준 이상·주의 신호 없음\n카테고리별 전체 측정 추이를 다음 페이지에서 확인하세요.'
+                for p in tf.paragraphs:p.font.size=Pt(18)
         rows=[];cards=[];categories={};overflow=[]
         for i,entry in enumerate(batch):
             if ml_mode or i%2==0:
                 slide=prs.slides.add_slide(prs.slide_layouts[6])
                 tf=slide.shapes.add_textbox(Inches(.3),Inches(.08),Inches(12.7),Inches(.42)).text_frame
                 tf.text=title;tf.paragraphs[0].font.size=Pt(18)
+            item_slides[_trend_anchor(entry)]=slide
             y=.6 if ml_mode else .6+(i%2)*3.35
             label=f"{entry['vehicle']} / {entry['category']} / {entry['item']} / {entry['step']} / {entry['program']} / {entry['temperature']}"
             box=slide.shapes.add_textbox(Inches(.35),Inches(y),Inches(12.6),Inches(.35)).text_frame
@@ -3358,7 +3169,9 @@ def _daily_trend_pack(entries, settings, title):
                     state,_,action=_trend_review(entry)
                     info=slide.shapes.add_textbox(Inches(7.8),Inches(y+.65+.145*len(legend_rows)),Inches(4.9),Inches(1.35)).text_frame
                     info.word_wrap=True;info.margin_top=info.margin_bottom=0
-                    info.text=state+'\n'+f"전체 {entry['lots']} lots / 신규 {entry.get('recent_lots',0)} lots\n"+action
+                    evidence=entry.get('auto_findings',[])
+                    detail=(evidence[0].get('basis') or evidence[0]['title']) if evidence else '최근 24시간 이상·주의 신호 없음'
+                    info.text=state+'\n'+f"전체 {entry['lots']} lots / 24시간 {entry.get('recent_lots',0)} lots\n"+str(detail)
                     for p in info.paragraphs:p.font.size=Pt(12)
             pct='N/A' if entry['out_pct'] is None else f"{entry['out_pct']:.1f}%"
             metric='' if settings.get('service')=='mlmode' else f' / spec out={pct}'
@@ -3397,8 +3210,14 @@ def _daily_trend_pack(entries, settings, title):
                 if entry['warnings']:reading+='<p style="margin:4px 0;color:#8a3800">확인 사항: '+html.escape(' / '.join(dict.fromkeys(entry['warnings'])))+'</p>'
                 reading+='</div>'
             else:
-                reading=''
-            cards.append('<section style="'+card_layout+'border:1px solid #cbd5df;border-radius:0;overflow:hidden;background:white">'
+                state,color,_=_trend_review(entry)
+                reading='<div style="padding:8px 10px;font-size:12px;line-height:1.6"><b style="color:'+color+'">'+html.escape(state)+'</b> · 최근 24시간 '+str(entry.get('recent_lots',0))+' lots / '+str(entry.get('recent_n',0))+'점'
+                if entry.get('auto_findings'):
+                    reading+='<ul style="margin:4px 0;padding-left:18px">'+''.join('<li>'+html.escape(f['lot']+' · '+f['title']+' — '+str(f.get('detail','')))+'</li>' for f in entry['auto_findings'])+'</ul>'
+                if entry['warnings']:reading+='<p style="color:#8a3800;margin:4px 0">'+html.escape(' / '.join(dict.fromkeys(entry['warnings'])))+'</p>'
+                reading+='</div>'
+            anchor=_trend_anchor(entry)
+            cards.append('<section id="'+anchor+'" style="'+card_layout+'border:1px solid #cbd5df;border-radius:0;overflow:hidden;background:white"><a name="'+anchor+'"></a>'
                          '<h3 style="margin:0;padding:4px 6px;background:#e8edf3;color:#003366;font-size:14px;font-weight:600;line-height:18px">'+html.escape(entry['category']+' · '+entry['item']+' / '+entry['step']+' / '+entry['program']+' / '+str(entry['temperature']))+'</h3>'
                          '<img alt="'+html.escape(label,quote=True)+'" width="700" style="display:block;width:100%;max-width:100%;height:auto" src="'+uri+'">'
                          +reading+'</section>')
@@ -3412,10 +3231,11 @@ def _daily_trend_pack(entries, settings, title):
                 slide.shapes.add_picture(io.BytesIO(entry.get('_ppt_png',entry['png'])),Inches(.4),Inches(.9),width=Inches(7.2),height=Inches(7.2*3.6/12.4 if spatial and ml_mode else (3.2 if ml_mode else 2.65)))
                 draw_legend(slide,rest[start:start+18],9.5 if ml_mode else 7.8,.9)
         body=_service_html_start(title,'이상 후보의 탐지 근거와 후속 검토' if ml_mode else '',str(settings.get('report_now','')))
+        body+=_daily_summary(batch,settings)
         body+='<nav style="padding:8px 0;border-bottom:1px solid #e0e0e0">'+ ' &nbsp; '.join('<a style="color:#0f62fe;font-size:14px;display:inline-block;padding:4px 8px" href="#cat'+str(i)+'">'+html.escape('/'.join(key))+' ('+str(len(group))+')</a>' for i,(key,group) in enumerate(categories.items()))+'</nav>'
         for i,(key,group) in enumerate(categories.items()):
             body+='<div class="trend-category"><h2 id="cat'+str(i)+'" style="position:sticky;top:0;z-index:5;font-size:16px;font-weight:600;background:'+category_fill[key]+';border-left:3px solid #0f62fe;padding:8px;margin:16px 0 4px">'+html.escape(' / '.join(key))+' · '+str(len(group))+' <a href="#top" style="float:right;color:#0f62fe;font-size:12px;font-weight:400">목록 ↑</a></h2><table role="presentation" width="100%" style="table-layout:fixed;border-spacing:4px">'
-            columns=max(1,min(6,int(settings.get('html_columns',4))))
+            columns=max(1,min(2,int(settings.get('html_columns',2))))
             used=0;body+='<tr>'
             for card,spatial,card_entry in group:
                 # ML gives each item a large trend row, followed by its spatial panels.
@@ -3443,9 +3263,10 @@ def _daily_trend_pack(entries, settings, title):
             body+='</tr>'
             body+='</table></div>'
         body+='</div></body></html>'
-        sources=re.findall(r'<img\s[^>]*?src="([^"]*)"',body,re.DOTALL)
-        if len(sources)!=len(batch) or any(not s.startswith('data:image/') for s in sources):raise ValueError('HTML 인라인 이미지 불변식 위반')
+        _assert_inline_images(body, len(batch))
         _service_deck_style(prs)
+        from My_Function import _add_internal_slide_link
+        for run,source,anchor in summary_links:_add_internal_slide_link(run,source,item_slides[anchor])
         stream=io.BytesIO();prs.save(stream);ppt=stream.getvalue()
         return body,ppt
     def fits(body,ppt):
@@ -3490,7 +3311,7 @@ def _daily_trend_report(request):
     dest=os.path.join(operations_root(),service,re.sub(r'[^A-Za-z0-9_.-]','_',identity))
     settings['service']=service
     settings['report_now']=pd.Timestamp.fromtimestamp(request['now'])
-    settings['highlight_since']=pd.Timestamp.fromtimestamp(request['now']).normalize()
+    settings['highlight_since']=pd.Timestamp(settings.get('highlight_since') or (settings['report_now']-pd.Timedelta(days=1)))
     # Separate checkpoint per service/source selection, unaffected by daily date or recipients.
     checkpoint_key=service+'|'+hashlib.sha256(json.dumps([products,settings.get('with_vehicle',{})],sort_keys=True).encode()).hexdigest()
     checkpoint=ops_get('trend_publication_checkpoints',checkpoint_key,{})
@@ -3498,14 +3319,27 @@ def _daily_trend_report(request):
     settings['_candidate_observations']=set()
     os.makedirs(dest,exist_ok=True)
     manifest_path=os.path.join(dest,'manifest.json')
+    # 소스 지문: ML_TABLE 변경·기간 변경 시 동결 산출물을 재사용하지 않고 재빌드한다.
+    def _source_fingerprint():
+        fp={'highlight_since':str(settings.get('highlight_since')), 'products':list(products)}
+        for _v in dict.fromkeys(products):
+            _p=os.path.join(settings.get('ml_table_dir') or 'RUN/DB', f'ML_TABLE_{_v}.parquet')
+            try:_st=os.stat(_p);fp[_v]=dict(mtime=_st.st_mtime, size=_st.st_size)
+            except OSError:fp[_v]=None
+        return fp
+    _current_fp=_source_fingerprint()
     manifest=None
     if os.path.exists(manifest_path):
         with open(manifest_path,encoding='utf-8') as stream:manifest=json.load(stream)
-        # Never rebuild an already attempted report into a different set of parts.
-        for part in manifest['parts']:
-            for key in ('html','ppt'):
-                with open(part[key],'rb') as stream:digest=hashlib.sha256(stream.read()).hexdigest()
-                if digest!=part[key+'_sha256']:raise ValueError('Daily Trend 저장 산출물 변경 감지; 발송 이력 확인 필요')
+        if manifest.get('source_fingerprint')!=_current_fp:
+            print('[INFO] Daily Trend 소스 변경 감지(ML_TABLE·기간) → 저장 산출물을 재빌드합니다.')
+            manifest=None
+        else:
+            # Never rebuild an already attempted report into a different set of parts.
+            for part in manifest['parts']:
+                for key in ('html','ppt'):
+                    with open(part[key],'rb') as stream:digest=hashlib.sha256(stream.read()).hexdigest()
+                    if digest!=part[key+'_sha256']:raise ValueError('Daily Trend 저장 산출물 변경 감지; 발송 이력 확인 필요')
     if manifest is None:
         entries=[];coverage=[];companions={};sources=list(products);source_entries={}
         if service=='mlmode':
@@ -3518,6 +3352,10 @@ def _daily_trend_report(request):
         for vehicle in dict.fromkeys(sources):
             if not re.fullmatch(r'[A-Za-z0-9_.-]+',str(vehicle)):raise ValueError('잘못된 with_vehicle 제품 키')
             GLOBAL_CONFIG.load_from_yaml(vehicle)
+            ml_path=os.path.join(settings.get('ml_table_dir') or GLOBAL_CONFIG.get('DB') or 'RUN/DB',f'ML_TABLE_{vehicle}.parquet')
+            if not os.path.isfile(ml_path):
+                coverage.append(dict(vehicle=vehicle,status='missing_ml_table',items=0,reason=f'ML_TABLE_{vehicle}.parquet 없음'))
+                continue
             formatter=pd.read_csv(os.path.join('reformatter',vehicle+'_reformatter.csv'))
             coordinate_path=GLOBAL_CONFIG.get('coordinate_file_path')
             if coordinate_path and os.path.exists(coordinate_path):
@@ -3527,11 +3365,19 @@ def _daily_trend_report(request):
             selected=formatter.loc[formatter['CAT2'].notna() & formatter['CAT2'].astype(str).str.strip().ne('')]
             if selected.empty:
                 coverage.append(dict(vehicle=vehicle,status='no_category',items=0));continue
-            frame=daily_trend_load(vehicle,formatter)
+            frame=daily_trend_load(vehicle,formatter,int(GLOBAL_CONFIG.get('viewing_period',30))+2)
             product_entries=daily_trend_entries(frame,formatter,vehicle,settings,pd.Timestamp.fromtimestamp(request['now']))
+            if service=='daily_trend':
+                product_entries=[e for e in product_entries if e.get('recent_n',0)>0]
+                product_entries=daily_auto_findings(product_entries,formatter)
             source_entries[vehicle]=product_entries
-            coverage.append(dict(vehicle=vehicle,status='ok' if not frame.empty else 'no_data',items=len(product_entries),
+            coverage.append(dict(vehicle=vehicle,status='ok' if product_entries else 'no_recent_data',items=len(product_entries),
                                  viewing_period=GLOBAL_CONFIG.get('viewing_period',30)))
+        if not any(source_entries.get(p) for p in products):
+            result=dict(id=identity,status='skipped',reason='ML_TABLE 없음 또는 대상 측정 없음',created=request['now'],
+                        preview_only=not request.get('send',False),coverage=coverage,items=0,parts=[])
+            ops_put(service+'_reports',identity,result)
+            return result
         for vehicle in products:
             for entry in source_entries.get(vehicle,[]):
                 if service=='mlmode':
@@ -3559,7 +3405,13 @@ def _daily_trend_report(request):
         settings['_coverage']=coverage;settings['_analysis']=analysis
         entries.sort(key=lambda e:(e['vehicle'],e['category'],e['item'],e['step'],e['program'],e['temperature']))
         plot_entries=[]
+        _chart_vehicle=None
         for i,entry in enumerate(entries,1):
+            # 제품별 override(viewing_period·집계·밴드 등)가 차트에 섞이지 않도록 제품별 config로 렌더
+            if entry.get('vehicle')!=_chart_vehicle:
+                _chart_vehicle=entry.get('vehicle')
+                try:GLOBAL_CONFIG.load_from_yaml(_chart_vehicle)
+                except Exception:pass
             entry['png']=_daily_trend_chart(entry,settings)
             plot_entries.append(entry)
             if service=='mlmode' and '_influence' not in entry:plot_entries.extend(_ml_spatial_details(entry,settings))
@@ -3600,7 +3452,7 @@ def _daily_trend_report(request):
             audit=[dict(vehicle=e['vehicle'],item=e['item'],step=e['step'],program=e['program'],temperature=e['temperature'],analysis=e.get('_influence',{})) for e in entries]
             atomic_bytes(os.path.join(dest,'influence.json'),json.dumps(audit,ensure_ascii=False,indent=2,default=str).encode('utf-8'))
         manifest=dict(id=identity,parts=parts,notice=notice,summary_artifact=summary_artifact,coverage=coverage,items=len(entries),detail_panels=len(plot_entries)-len(entries),created=request['now'],analysis=analysis,
-                      checkpoint_key=checkpoint_key,observations=sorted(settings['_candidate_observations']))
+                      checkpoint_key=checkpoint_key,observations=sorted(settings['_candidate_observations']),source_fingerprint=_current_fp)
         atomic_bytes(manifest_path,json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
     if manifest.get('notice'):
         with open(manifest['notice']['html'],'rb') as stream:notice_digest=hashlib.sha256(stream.read()).hexdigest()
@@ -3612,7 +3464,7 @@ def _daily_trend_report(request):
     GLOBAL_CONFIG.load_from_yaml(settings.get('mail_vehicle') or products[0])
     result=dict(manifest,status='preview',preview_only=not request.get('send',False),manifest=manifest_path)
     if service=='mlmode' and not manifest['parts'] and not manifest.get('notice'):
-        result['status']='no_findings' if manifest['analysis'].get('tested_items',manifest['analysis'].get('statistical_tests',0)) else 'insufficient_data'
+        result['status']='no_findings' if manifest['analysis'].get('tested_items',manifest['analysis'].get('statistical_tests',0)) and not manifest['analysis'].get('budget_limited') else 'insufficient_data'
         ops_put('mlmode_reports',identity,result)
         if request.get('send') and result['status']=='no_findings':
             ops_put('trend_publication_checkpoints',checkpoint_key,dict(observations=manifest['observations'],completed=request['now'],id=identity))
@@ -3642,120 +3494,6 @@ def _daily_trend_report(request):
     return result
 
 
-def _watchdog_findings(observations, settings, now=None):
-    from collections import defaultdict
-    now=pd.Timestamp.now() if now is None else pd.Timestamp(now)
-    start=now-pd.Timedelta(days=int(settings.get('analysis_days',14)))
-    groups=defaultdict(list)
-    for row in observations:
-        if start <= pd.Timestamp(row['time']) <= now:
-            groups[tuple(row['context'])].append(row)
-    findings=[]
-    for context, rows in groups.items():
-        rows=sorted(rows,key=lambda r:r['time'])
-        # A repeated run of one lot cannot satisfy recurrence / low-score criteria.
-        lots={}
-        for row in rows:lots[row['prime_key']]=row
-        latest=sorted(lots.values(),key=lambda r:r['time'])
-        minimum=max(3,int(settings.get('min_lots',3)))
-        if len(latest)<minimum:continue
-        if pd.Timestamp(latest[-1]['time']) < now-pd.Timedelta(days=float(settings.get('active_days',3))):continue
-        recent=latest[-minimum:]
-        low_limit=float(settings.get('low_score_pct',95))
-        out_limit=float(settings.get('spec_out_pct',1))
-        low=all(r['score'] is not None and r['score']<low_limit for r in recent)
-        recurring=all(r['out'] is not None and r['out']/r['n']*100>=out_limit for r in recent)
-        med=np.array([r['median'] for r in latest],dtype=float)
-        drift=False;delta=0.;normalized=0.
-        if len(latest)>=max(6,minimum*2):
-            n=max(3,len(latest)//2)
-            before=med[:n]; after=med[-n:]
-            delta=float(np.median(after)-np.median(before))
-            noise=max(float(np.std(before)), float(np.median([r['std'] for r in latest[:n]])),1e-12)
-            normalized=abs(delta)/noise
-            required=float(settings.get('shift_sigma',2))
-            # Both persistent level change and sustained chronological drift are informative.
-            times=np.array([(pd.Timestamp(r['time'])-pd.Timestamp(latest[0]['time'])).total_seconds()/86400 for r in latest])
-            correlation=float(np.corrcoef(times,med)[0,1]) if np.std(times)>0 and np.std(med)>0 else 0.
-            span=(latest[-1]['high']-latest[-1]['low']) if latest[-1]['high'] is not None and latest[-1]['low'] is not None else 0.
-            material=abs(delta)>=abs(span)*float(settings.get('shift_min_spec_frac',.02))
-            drift=material and normalized>=required and (abs(correlation)>=float(settings.get('trend_correlation',.7)) or
-                                           all((after>np.median(before)) if delta>0 else (after<np.median(before))))
-        reasons=[]
-        if recurring:reasons.append(f'최근 {minimum} lot 연속 Spec out ≥ {out_limit:g}%')
-        if low:reasons.append(f'최근 {minimum} lot 연속 score < {low_limit:g}%')
-        if drift:reasons.append(f'분포 중심 변화 Δ={delta:.4g} ({normalized:.2f}σ)')
-        if not reasons:continue
-        count=sum(r['n'] for r in latest); outside=sum(r['out'] or 0 for r in latest)
-        findings.append(dict(context=context,rows=latest,latest=latest[-1],reason=' / '.join(reasons),
-                             lots=len(latest),n=count,out_pct=outside/count*100 if latest[-1]['out'] is not None else None,
-                             score=latest[-1]['score'],delta=delta,shift_sigma=normalized))
-    return sorted(findings,key=lambda f:(f['latest']['vehicle'],f['latest']['category'],f['latest']['item']))
-
-
-def _watchdog_deck(findings, summary, settings):
-    import io
-    from pptx import Presentation
-    from pptx.util import Inches,Pt
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    plt.rcParams['axes.unicode_minus']=False
-    for dpi in (140,110,85,65,45):
-        prs=Presentation();prs.slide_width=Inches(13.333);prs.slide_height=Inches(7.5)
-        def title(slide,text,top=.2,size=20):
-            box=slide.shapes.add_textbox(Inches(.35),Inches(top),Inches(12.6),Inches(.65)).text_frame
-            box.word_wrap=True;box.text=text if len(text)<=200 else text[:197]+'...'
-            for paragraph in box.paragraphs:paragraph.font.size=Pt(min(size,12) if len(text)>130 else size)
-        slide=prs.slides.add_slide(prs.slide_layouts[6]);title(slide,'Auto Report · Daily Watchdog')
-        title(slide,summary,1.2,15)
-        title(slide,f"관측 {settings.get('analysis_days',14)}일 / 최소 {settings.get('min_lots',3)}개 lot / "
-                    f"저점수 < {settings.get('low_score_pct',95)}% / 반복 Spec out ≥ {settings.get('spec_out_pct',1)}%",2.5,13)
-        title(slide,'비교 조건: 제품 · Step · 측정 프로그램 · 온도 · FULL/13pt · Spec/집계 규칙을 동일하게 분리',3.4,13)
-        title(slide,'각 페이지: lot 중앙값 Trend + 전체 값 분포(24-bin 요약)와 Spec out 비율\n'
-                    '집계 항목은 설정된 wafer/측정 집계값으로 계산하며 raw shot으로 대체하지 않습니다.',4.2,13)
-        if not findings:title(slide,'관측 자료에서 설정 조건을 만족하는 항목 없음 (자료 부족은 정상 판정이 아님)',5.5,15)
-        for index,finding in enumerate(findings,2):
-            latest=finding['latest'];rows=finding['rows']
-            slide=prs.slides.add_slide(prs.slide_layouts[6])
-            title(slide,f"{latest['vehicle']} / {latest['step']} / {latest['category']} / {latest['item']}",size=17)
-            title(slide,finding['reason'],.9,12)
-            fig,axes=plt.subplots(1,2,figsize=(12.2,4.2))
-            fig.subplots_adjust(left=.07,right=.98,bottom=.22,top=.87,wspace=.3)
-            points=sorted(rows,key=lambda r:r['time'])
-            axes[0].plot([pd.Timestamp(r['time']) for r in points],[r['median'] for r in points],'-o',ms=3,color='#2266aa')
-            axes[0].set_title('Lot / measurement median trend',fontsize=11)
-            axes[0].tick_params(axis='x',labelrotation=20,labelsize=8)
-            import matplotlib.dates as mdates
-            axes[0].xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
-            axes[0].xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=6))
-            centers=[];weights=[]
-            for row in rows:
-                centers.extend((np.array(row['edges'][:-1])+np.array(row['edges'][1:]))/2)
-                weights.extend(row['hist'])
-            # Distribution rebinning is approximate; Spec out count is exact from source values.
-            _,hist_edges,bars=axes[1].hist(centers,weights=weights,bins=32,color='#7797b5',edgecolor='white')
-            for left,right,bar in zip(hist_edges[:-1],hist_edges[1:],bars):
-                center=(left+right)/2
-                if (latest['low'] is not None and center<latest['low']) or (latest['high'] is not None and center>latest['high']):
-                    bar.set_facecolor('#b4232d')
-            axes[1].set_ylabel('Count')
-            pct=finding['out_pct'];pct_text='N/A' if pct is None else f'{pct:.2f}%'
-            axes[1].set_title(f'Value distribution · Spec out {pct_text}',fontsize=11)
-            for ax in axes:
-                if latest['low'] is not None:ax.axhline(latest['low'],color='#bb2222',ls='--',lw=1) if ax==axes[0] else ax.axvline(latest['low'],color='#bb2222',ls='--',lw=1)
-                if latest['high'] is not None:ax.axhline(latest['high'],color='#bb2222',ls='--',lw=1) if ax==axes[0] else ax.axvline(latest['high'],color='#bb2222',ls='--',lw=1)
-                ax.grid(alpha=.2)
-            raw=io.BytesIO();fig.savefig(raw,format='jpg',dpi=dpi,pil_kwargs={'quality':75});plt.close(fig)
-            slide.shapes.add_picture(io.BytesIO(raw.getvalue()),Inches(.35),Inches(1.7),width=Inches(12.2))
-            title(slide,f"{finding['lots']} lots / n={finding['n']} / {latest['aggregation']} / "
-                        f"program={latest['program']} / temp={latest['temperature']} / {latest['mode']}",6.2,11)
-            title(slide,f'PPT {index} · 점수=Spec pass 비율; 분포 그림은 요약 bin을 재구성, Spec out 수치는 원자료에서 계산',6.7,10)
-        output=io.BytesIO();prs.save(output)
-        if output.tell()<10_000_000:return output.getvalue()
-    raise ValueError('Watchdog PPT 10MB 미만 압축 실패')
-
-
 def _watchdog_publication(measurement, report, now, settings):
     """Use the exact measurement revision for both rollups and detail rows."""
     if report and str(report.get('tkout_time'))!=str(measurement.get('tkout_time')):report={}
@@ -3769,6 +3507,8 @@ def _watchdog_publication(measurement, report, now, settings):
         return report,('처리 지연' if stale else '진행 중'),('Main 마지막 단계와 실행 로그 확인' if stale else '현재 실행 완료 대기'),stale
     if status=='failed' or email in ('failed','retryable'):
         return report,'발행 실패','실패 단계와 재시도 이력 확인',True
+    if status=='skipped':
+        return report,'조건 제외 / 자료 없음',reason or '대상 측정과 발행 조건 확인',False
     if report.get('generated') and report.get('saved'):
         if email=='sent':return report,'발행 완료','추가 조치 없음',False
         if email=='disabled':return report,'저장 완료 · 발송 꺼짐','메일 사용 설정에 따른 미발송',False
@@ -3833,7 +3573,6 @@ def _watchdog_report(request):
                  ('최신 측정 저장 완료',sum(bool(r.get('generated') and r.get('saved')) for r,_,_,_ in publication.values()),'#003366'),
                  ('확인 필요 항목',len(action_rows),'#b4232d' if action_rows else '#003366')]))
     body.append('<p>Heartbeat와 발행 결과는 별도 상태입니다. 설정 제외·측정 대기는 실패로 세지 않으며, 발송 확인 필요 건은 수신 여부 확인 후 재발송하세요.</p>')
-    body.append(_service_heading('우선 확인 · 운영 조치','actions')+table(['제품 / 대상','상태','근거','다음 확인'],action_rows))
     body.append('<p><a href="#products" style="color:#0055aa">제품별 현황</a> &nbsp; <a href="#publications" style="color:#0055aa">최신 측정 발행 결과</a> &nbsp; <a href="#execution" style="color:#0055aa">실행 로그</a></p>')
     product_rows=[]
     for product in sorted(set(settings.get('products',[])) | {r.get('vehicle','') for r in runs} | {r.get('vehicle','') for r in scheduler_runs} | {r.get('vehicle','') for r in relevant.values()}):
@@ -3843,10 +3582,18 @@ def _watchdog_report(request):
         status='실패 확인' if failures else ('실행 완료 확인' if executions else '구간 내 완료 이력 없음')
         checked_reports=[publication[m['prime_key']][0] for m in checked]
         generated=sum(bool(r.get('generated')) for r in checked_reports)
-        product_rows.append([product,status,len(executions),failures,len(checked),generated,
-                             sum(bool(r.get('saved')) for r in checked_reports),sum(r.get('email')=='sent' for r in checked_reports),
-                             sum(publication[m['prime_key']][3] for m in checked)])
-    body+=[_service_heading('제품별 실행 및 최신 측정 발행 현황','products'),table(['제품','실행 상태','완료 횟수','실패 횟수','확인 대상','생성','저장','메일 성공','확인 필요'],product_rows)]
+        from collections import Counter
+        states=Counter(publication[m['prime_key']][1] for m in checked)
+        reasons=Counter(m.get('reason','사유 없음') for m in checked if publication[m['prime_key']][0].get('email')!='sent')
+        attention=sum(publication[m['prime_key']][3] for m in checked)
+        sent_count=sum(r.get('email')=='sent' for r in checked_reports)
+        outcome='확인 필요' if failures or attention else ('정상 처리' if checked else '확인 이력 없음')
+        product_rows.append([product,status,outcome,sent_count,len(checked),
+                             ' / '.join(f'{key} {value}건' for key,value in states.items()),
+                             ' / '.join(f'{key} ({value}건)' for key,value in reasons.items()) or ('모두 메일 발송 완료' if checked else '구간 내 확인 이력 없음'),
+                             f'실행 {len(executions)} / 실패 {failures} / 생성 {generated} / 저장 {sum(bool(r.get("saved")) for r in checked_reports)}',attention])
+    body+=[_service_heading('제품별 실행 및 최신 측정 발행 현황','products'),table(['제품','실행 상태','종합','메일 성공','확인 대상','발행 / 제외 / 대기','미발송 조건·사유','처리 건수','확인 필요'],product_rows)]
+    body.append(_service_heading('우선 확인 · 운영 조치','actions')+table(['제품 / 대상','상태','근거','다음 확인'],action_rows))
     body+=[_service_heading('Daily Trend / ML mode 발행 이력'),table(['서비스','분석 시각','결과','후보 / 항목 수','Manifest'],service_rows),
            '<p>이력 없음은 미사용·발행 시각 전·실행 실패 등을 구분할 수 없는 상태입니다. insufficient_data는 검정 가능한 자료 부족이며 정상 판정이 아닙니다.</p>']
     execution_body=[_service_heading('Scheduler 실행 로그별 소요 시간','execution'),table(['제품','Run ID','시작','종료','소요 시간','종료 코드','로그 파일'],
@@ -3864,8 +3611,8 @@ def _watchdog_report(request):
                      r.get('email','미발송'),r.get('attempts',0),f"{r.get('elapsed',0):.1f}s",status,reason,
                      ' / '.join(f'{k}:{v:.3f}s' for k,v in r.get('timings',{}).items()),
                      datetime.fromtimestamp(m['last_seen']).isoformat(timespec='seconds') if m.get('last_seen') else '',
-                     m.get('run_id',''),m.get('log_path','')])
-    headers=['제품','Prime key','Lot','Step','측정시각','생성','저장','메일','시도','시간','상태','사유','단계별 소요','로그 확인시각','Run ID','로그 파일']
+                     m.get('run_id',''),m.get('log_path',''),m.get('reason',''),r.get('mode','AUTO'),action])
+    headers=['제품','Prime key','Lot','Step','측정시각','생성','저장','메일','시도','시간','상태','사유','단계별 소요','로그 확인시각','Run ID','로그 파일','발행 대상 조건','발행 모드','다음 확인']
     body+=[_service_heading('최신 측정별 발행 결과','publications'),table(['제품','Lot / Step','측정시각','생성 / 저장','메일','상태','사유'],
            [[r[0],r[2]+' / '+r[3],r[4],r[5]+' / '+r[6],r[7],r[10],r[11]] for r in rows]),
            '<p>전체 Prime key, 시도 횟수, 단계별 시간, Run ID와 로그 경로는 첨부 CSV에 보존합니다.</p>']
@@ -3925,7 +3672,7 @@ def main():
         import json
         with open(sys.argv[2],encoding='utf-8') as stream:request=json.load(stream)
         result=_daily_trend_report(request)
-        return 0 if result['status'] in ('sent','preview','no_findings','insufficient_data','disabled') else 1
+        return 0 if result['status'] in ('sent','preview','no_findings','insufficient_data','disabled','skipped') else 1
     if argument=='--watchdog-report':
         import json
         with open(sys.argv[2],encoding='utf-8') as stream:request=json.load(stream)

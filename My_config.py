@@ -414,7 +414,6 @@ class Config:
         # S3 / API 엔드포인트 설정 (S3 / API endpoint settings)
         # ──────────────────────────────────────────────────────
         self.endpoint_url = '0'                    # S3 호환 엔드포인트 URL
-        self.GPT_USER_ID = 'simyung.woo'           # GPT API 사용자 ID
         self.bucket_dx = 'simyung.woo'             # DX 용 S3 버킷 이름
 
         # ──────────────────────────────────────────────────────
@@ -523,41 +522,58 @@ class Config:
         self.theme_title_color = (31, 73, 125)     # 슬라이드/차트 제목·헤더 색상 (Dark Blue, 전 슬라이드 통일)
 
         # ──────────────────────────────────────────────────────
-        # 이전 YAML과의 호환성 필드. Main은 LLM 연결/호출 없이 False로 고정한다.
-        self.use_gpt_summary = False
-        self.use_gpt_multistep = False
+        # 메일 발송 안정성 설정
         self.mail_connect_timeout_sec = 10
         self.mail_read_timeout_sec = 90
         self.mail_max_attempts = 3
 
-        # 독립 일일 서비스 수신처: 제품 YAML email_receiver와 분리합니다.
-        # 실제 메일 주소 또는 메일링 XLSX의 정확한 시트명을 각각 지정하세요.
-        # 제품 미선택/수신처 미설정 시 외부 발송하지 않습니다. 수정 후 Scheduler 재시작.
+        # ── 독립 일일 서비스 ──
+        # 수신처는 제품 YAML email_receiver와 분리한다(실제 주소 또는 메일링 시트명).
+        # 제품 미선택/수신처 미설정 시 외부 발송하지 않는다. 수정 후 Scheduler 재시작.
+        # 키 이름 대응: recipients(서비스 수신처) vs email_receiver(제품별) vs mail_vehicle(발신 계정 제품).
         self.watchdog = dict(
+            # -- 일정/알림 --
             enabled=True, daily_time='09:00', recipients=[], mail_vehicle='',
+            ops_root='RUN/OPS',
         )  # 운영 확인: team/부서 수신처
         # 두 모드의 아이템별 색상: reformatter split_check에 ML_TABLE의 임의 열 이름 지정.
         # 예: FAB_ETCH / Recipe / FAB_ETCH;KNOB_IMPLANT (여러 열은 값 조합). 접두사 제한 없음.
         self.daily_trend = dict(
+            # -- 일정/대상 --
             enabled=False, daily_time='09:30', products=[], recipients=[], mail_vehicle='',
-            summary_max_items=12,  # 메일 상단 우선 확인 항목 수. 전체 항목은 본문·PPT·catalog에 보존.
-            ml_table_dir='RUN/DB', ml_join_keys=['root_lot_id','wafer_id'],
-            chart_dpi=150, trend_marker_size=18, trend_recent_marker_size=32, trend_palette_colors=64, trend_background_alpha=0.3, html_legend_limit=6, html_columns=4, ppt_max_bytes=10_000_000, html_max_bytes=2_000_000,
-            max_mail_parts=10,
+            # -- 요약 --
+            summary_max_items=12,  # Daily Trend 이상·주의 요약은 누락 없이 전체 표시.
             category_order=[],  # CAT2 이름을 원하는 순서대로: ['Transistor', 'Leakage', ...]; 미지정은 뒤에 이름순
-        )  # 선택 제품 전체 Category + 당일 측정 lot 강조: 관련 team/부서 수신처
+            # -- 데이터 --
+            ml_table_dir='RUN/DB', ml_join_keys=['root_lot_id','wafer_id'],
+            # -- 렌더/용량 --
+            chart_dpi=150, trend_marker_size=18, trend_recent_marker_size=32, trend_palette_colors=64, trend_background_alpha=0.3, html_legend_limit=6, html_columns=2, ppt_max_bytes=10_000_000, html_max_bytes=2_000_000,
+            mail_max_bytes=20_000_000, max_mail_parts=10,
+            # -- 실행 --
+            report_timeout_sec=3600, poll_sec=30,
+        )  # ML_TABLE 필수. 최근 24시간 측정 항목 + 과거 비교 추이. S3 업로드 없음.
         self.mlmode = dict(
+            # -- 일정/대상 --
             enabled=False, daily_time='10:00', products=[], recipients=[], mail_vehicle='',
             summary_max_items=12,
             with_vehicle={},  # 예: {'vehicle_A': ['Vehicle_B']}; 미지정 제품은 제품 YAML with_vehicle 사용
+            # -- 데이터 --
             ml_table_dir='RUN/DB', ml_join_keys=['root_lot_id','wafer_id'],
+            # -- 렌더/용량 --
             chart_dpi=150, trend_palette_colors=64, html_columns=4, ppt_max_bytes=10_000_000, html_max_bytes=2_000_000,
-            mail_max_bytes=20_000_000,
-            modules=['split_difference','time_trend','spike_rate','isolation_forest','local_outlier_factor'],
+            mail_max_bytes=20_000_000, max_mail_parts=10,
+            # -- 탐지(detector) --
+            modules=['split_difference','time_trend','distribution_shift','spread_change','spike_rate','isolation_forest','local_outlier_factor'],
             diagnostic_modules=['equipment_difference','spatial_pattern'], equipment_columns=[],
-            min_samples=12, min_lots=3, fdr_alpha=0.05, effect_sigma=1.5,
-            spike_sigma=4.0, rate_increase=0.15, model_contamination=0.05,
+            min_samples=12, min_lots=3, fdr_alpha=0.05,
+            rank_effect_min=.33, trend_min_correlation=.6, distribution_min_distance=.3,
+            spike_sigma=4.0, rate_increase=0.15,
+            # -- 연산 예산 --
+            analysis_seconds=120, analysis_max_tests=2000, max_group_pairs=64,
+            # -- 모델(IF/LOF, sklearn) --
+            model_contamination=0.05,
             model_max_samples=5000, random_state=42,
+            # -- 연관 분석(탐색적, 원인 확정 아님) --
             influence_enabled=True, influence_columns=[], influence_exclude_columns=[],
             influence_max_columns=80, influence_top_k=6, influence_min_lots=8,
             influence_max_categories=12, influence_min_coverage=.5,
@@ -565,6 +581,8 @@ class Config:
             influence_seconds=60, influence_max_tests=240, influence_max_join_rows=200000,
             influence_max_wafers_per_root=100, influence_min_matched_roots=5,
             influence_similar_mismatch=.15, influence_min_balance=.5,
+            # -- 실행 --
+            report_timeout_sec=3600, poll_sec=30,
         )  # 분석 담당자 검토용: 탐지 근거·연관 후보 제공. 기본 Auto report 판정에는 반영하지 않음.
         self.report_max_attempts = 3
         self.et_refresh_days = 2
@@ -573,12 +591,10 @@ class Config:
         self.use_s3_upload = True          # 생성 PPT의 S3(DX) 업로드 on/off
         self.use_description_page = True   # PPT CAT2 간지(Description) 페이지 삽입 on/off
         self.use_archive_snapshot = True   # 발행 스냅샷(RUN/ARCHIVE/<lot>_<step_id>/) 저장 on/off
-        #   summary.json(발행 메타+findings+item_stats+rule_trace) + target_rows.parquet(당시 index 컬럼만).
-        #   규칙 제안 다이제스트/확정 사례 아카이브의 입력 — 지워지거나 없어도 리포트 발행엔 영향 없음.
+        #   summary.json(발행 메타+findings+item_stats) + target_rows.parquet(당시 index 컬럼만).
+        #   지워지거나 없어도 리포트 발행엔 영향 없음.
         # 이상 Trend chart([0] 섹션) 표시 여부.
-        #   - AI(GPT) 사용 여부와 무관하게 동작합니다.
-        #   - use_gpt_summary=False 이거나 GPT 호출이 실패해도,
-        #     metrics_dict 기반 코드 우선순위로 이상 Trend chart를 첨부합니다.
+        #   코드 통계 분석 결과(우선순위 상위)를 기준으로 Trend chart를 첨부합니다.
         self.show_anomaly_trend_chart = True
         self.anomaly_trend_chart_top_n = 3   # 이상 Trend chart 최대 개수(이상+주의 합산, 통계 자동분석 상위와 동일)
         self.anomaly_trend_mail_width_px = 460  # 메일 Anomaly Summary의 Trend 차트 표시 폭
@@ -663,7 +679,7 @@ class Config:
         self.anomaly_spc_two_of_three_sigma_sensitive = 1.7
         self.anomaly_spc_four_of_five_sigma_sensitive = 0.8
 
-        self.anomaly_median_low_sigma = 2.0      # 지식규칙 median_low(): target median이 제품 median 대비 이 σ 이상 낮으면 True
+        self.anomaly_median_low_sigma = 2.0      # 참고용: target median이 제품 median 대비 이 σ 이상 낮으면 detail에 기록
         # ── 통계 자동분석 제외 항목 ──
         #   여기에 넣은 ITEM(ALIAS)은 통계 자동분석(이상/주의 finding·우선순위·Anomaly Trend Chart)에서
         #   완전히 제외된다(Score Board/Trend 등 나머지 리포트에는 그대로 나옴).
@@ -671,20 +687,6 @@ class Config:
         #   - 파생/마진 컬럼처럼 통계 이상으로 잡을 필요 없는 항목을 걸러 우선순위 노이즈를 줄이는 용도.
         self.anomaly_exclude_items = [
             'MAWIN_minus_margin', 'MAWIN_plus_margin', 'MAWIN_ovl_index', 'MAWIN_new',
-        ]
-        # ── 통계자동분석 '조건부' 제외 항목 (RULE에 걸리지 않으면 제외) ──
-        #   여기에 넣은 ITEM(ALIAS)은 built-in 자동판정(spec-out/Flier/산포 확대/시계열 detector)으로는
-        #   이상/주의를 띄우지 않는다(= 평소엔 제외). 단, ANOMALY_KNOWLEDGE.md의 [RULE]/NL_RULES가
-        #   그 항목을 trigger/참조해 '걸리면' 그때만 finding으로 살아나 Trend chart·요약에 표시된다.
-        #   용도: Kelvin RES처럼 WF MAP 컬러링을 위해 spec을 tight하게 잡아 spec-out이 한두 개씩
-        #        상시 뜨는 항목 — built-in으로는 안 잡되, 엔지니어가 정의한 RULE(예: spec_out>=N)에
-        #        걸리는 '진짜 이상'일 때만 잡고 싶을 때.
-        #   차이: anomaly_exclude_items = 무조건 완전 제외 / anomaly_exclude_unless_rule = RULE 매칭 시 부활.
-        #   - 대소문자 무시, fnmatch 와일드카드(*,?) 지원. (예: 'ET_KELVIN_*')
-        #   - 두 리스트에 모두 있으면 완전 제외(anomaly_exclude_items)가 우선.
-        #   - RULE이 항목의 실제 통계(spec_out_pt·severity·disp 등)를 평가할 수 있도록 항목은
-        #     분석에서 빠지지 않고 컨텍스트가 유지된다(단 built-in finding만 조건부 억제).
-        self.anomaly_exclude_unless_rule = [
         ]
         # WF MAP 제외 키워드: item(ALIAS)명에 아래 키워드가 포함되면 통계 이상/주의 판정과
         # Anomaly Trend chart(WF MAP 포함)에서 제외한다. (예: PCHK 측정 항목)
@@ -729,27 +731,6 @@ class Config:
         self.trend_yaxis_label_font_pt = 8.5
         self.trend_axis_tick_font_pt = 7.5
 
-        # ── 자연어 규칙(NL_RULES) 발행 시 바로 적용 여부 ──
-        #   True(기본): NL_RULES의 자연어를 문구별 캐시(RUN/AI/nl_rules_map.json)로 변환해 발행 시
-        #              바로 적용. 같은 문구 → 항상 같은 코드. 미리보기/캐시정비는 `--convert-nl-rules`.
-        #   False: 발행 시 자동 적용 끔(수기 [RULE] + `--convert-nl-rules-md`로 명시 적용만).
-        self.anomaly_nl_autocompile = True
-
-        # ── 규칙 제안 다이제스트 (POWER_USER, 1일 1회) ──
-        #   RUN/ARCHIVE 발행 스냅샷을 집계해 '규칙별 매칭 현황 + 불량모드 매칭 통계 +
-        #   미매칭 반복 패턴의 [RULE] 자연어 제안'을 RUN/AI/rule_digest_<날짜>.txt로 저장하고,
-        #   메일링 xlsx에 'POWER_USER' 시트가 있으면(+use_email_send=True) 그 수신처로 발송한다.
-        #   제안은 자동 반영되지 않으며(propose-only), 반영/삭제 전까지 매일 반복 제안된다.
-        #   미리보기: python Main.py --rule-digest
-        self.rule_digest_enabled = False   # 다이제스트 생성 on/off (기본 off — 필요 시 True)
-        self.rule_digest_window_days = 14  # 집계 기간(일) — 스냅샷 summary.json의 generated_at 기준
-        self.rule_digest_min_repeat = 3    # 제안 승격 최소 반복 리포트 수(미매칭 패턴 기준)
-
-        # 불량 모드(Defect Mode) 판정/조합 해석은 코드가 하지 않는다.
-        #   - 코드는 각 Index의 단일 이상(spec-out / Flier / 산포 / 수준 이동 / trend / SPC run)만 산출.
-        #   - 불량 모드 우선순위 판정표는 ANOMALY_KNOWLEDGE.md('불량 모드 판정표')에서 관리하며,
-        #     AI(use_gpt_summary)가 연결된 경우에만 상단 요약에 불량 모드를 해석/표기한다.
-
         # ── 특이맵(spec-out 공간 패턴) 판정 — 규칙 목록 기반, 하드코딩 기본규칙 없음 ──
         #   판정은 **오직 아래 anomaly_pattern_rules(list)로만** 동작한다.
         #   ⚠️ None 이거나 빈 리스트([])면 **특이맵(공간 패턴) 판정을 아예 하지 않는다**
@@ -782,24 +763,6 @@ class Config:
         #     similar_overlap_frac(0.5) : 동일 shot 반복이 없어도 out 좌표의 이 비율 이상이
         #                                 2개 wafer 이상 겹치면 '유사 위치 반복' 코멘트
         self.anomaly_pattern_thresholds = {}
-
-        # ── 측정 순서(Measurement-Order) 기반 판정 ──
-        #   별도 설정 없음 — ANOMALY_KNOWLEDGE.md [RULE]의 조건 함수
-        #   seq_out(n)/seq_mostly_dead(f)/seq_front_heavy 로만 판정한다(룰 관리 일원화).
-        #   측정 순서 = WF MAP 좌상단 기준 chip_x 먼저 증가 → chip_y 증가.
-
-        # ── AI 판정 예시(few-shot) — RUN/EXAMPLE/*.md (없어도 동작) ──
-        #   후행적으로 불량 모드가 확정된 사례를 md 파일로 넣으면 AI Final 판정에 예시로 주입된다.
-        #   파일명이 '_'로 시작하면(_TEMPLATE.md 등) 스킵. 작성법은 README 'AI 판정 예시' 참조.
-        self.ai_examples_dir = os.path.join('RUN', 'EXAMPLE')
-        self.ai_examples_max = 5           # 주입할 예시 파일 최대 개수(파일명 정렬순)
-        self.ai_examples_max_chars = 6000  # 예시 총 길이 상한(프롬프트 크기 보호)
-
-        # ── AI 호출 모드 ──
-        #   'multi'(기본) : Triage → Root-cause → Final 3회 호출(단계별 정제, 약한 모델에 유리)
-        #   'single'      : Final 1회 호출(비용/지연 1/3, 단계간 오류 전파 없음 — 강한 모델 권장)
-        #   Final 응답이 JSON 형식이 아니면 어느 모드든 1회 자동 재시도 후 폴백.
-        self.ai_stage_mode = 'multi'
 
         # ──────────────────────────────────────────────────────
         # PPT 차트 렌더링 설정 (Chart rendering settings for PPT)
@@ -1162,6 +1125,36 @@ class Config:
             return getattr(self, key)
         # 5. 기본값 반환
         return default
+
+    # ── 그룹 뷰(읽기 전용): 평탄 키는 그대로 유지, 관심사별로 묶어 보여준다 ──
+    def detect_config(self):
+        """이상 탐지 임계값 그룹."""
+        keys=('anomaly_lot_dispersion_ratio','anomaly_flier_sigma','anomaly_flier_max_pts',
+              'anomaly_flier_offdir_relax','anomaly_disp_min_spec_frac','anomaly_detector_profile',
+              'anomaly_detector_profiles','anomaly_enabled_detectors','anomaly_level_shift_sigma',
+              'anomaly_trend_window','anomaly_spc_same_side_points','anomaly_median_low_sigma',
+              'anomaly_exclude_items','trend_tkout_agg','trend_ylim_band_pct')
+        return {k:self.get(k) for k in keys}
+
+    def render_config(self):
+        """PPT/HTML 렌더 그룹."""
+        keys=('ppt_chart_dpi','ppt_chart_jpg_quality','ppt_map_jpg_quality','html_chart_dpi',
+              'html_wfmap_dpi','html_inline_img_max_kb','html_img_scale','show_anomaly_trend_chart',
+              'anomaly_trend_chart_top_n','anomaly_wfmap_specout','anomaly_wfmap_max_count')
+        return {k:self.get(k) for k in keys}
+
+    def notify_config(self):
+        """발송/업로드 그룹."""
+        keys=('mail_connect_timeout_sec','mail_read_timeout_sec','mail_max_attempts',
+              'report_max_attempts','use_email_send','use_s3_upload','use_description_page',
+              'use_archive_snapshot')
+        return {k:self.get(k) for k in keys}
+
+    def path_config(self):
+        """경로 그룹."""
+        keys=('base_path','inline_file_path','coordinate_file_path','description_ppt_path',
+              'anomaly_knowledge_path','email_list_path')
+        return {k:self.get(k) for k in keys}
 
 
 # ================================================================
