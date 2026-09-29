@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 880" role="img" aria-labelledby="03-lot-pipeline-title 03-lot-pipeline-desc">
+<title id="03-lot-pipeline-title">한 번의 측정이 리포트가 되기까지</title>
+<desc id="03-lot-pipeline-desc">일반 AUTO 경로 · 수동 트리거는 원천 쿼리를 건너뛰고 기존 DB의 지정 Lot · Step을 사용합니다. 번호는 이해를 돕는 논리 단계입니다. 차트 생성과 분석 호출 일부는 코드 안에서 서로 섞여 있습니다. / Target은 lot_id + step_id로 식별합니다. prime key는 제품 + Lot + Step을 묶는 발행 식별자입니다. / 외부 LLM 없이 코드로 분석합니다. 선택적 DX/S3 업로드는 저장 후 메일 전에 수행합니다.</desc>
+<defs><marker id="03-lot-pipeline-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#64748b"/></marker></defs>
+<rect width="1280" height="100%" fill="#f8fafc"/>
+<g font-family="Segoe UI, Malgun Gothic, sans-serif" fill="#172c43">
+<text x="32" y="44" font-size="28" font-weight="700">한 번의 측정이 리포트가 되기까지</text>
+<text x="32" y="80" font-size="16" fill="#52657a">일반 AUTO 경로 · 수동 트리거는 원천 쿼리를 건너뛰고 기존 DB의 지정 Lot · Step을 사용합니다.</text>
+<path d="M 368 216 L 480 216" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#03-lot-pipeline-arrow)"/>
+<path d="M 800 216 L 912 216" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#03-lot-pipeline-arrow)"/>
+<path d="M 1072 288 L 1072 392" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#03-lot-pipeline-arrow)"/>
+<path d="M 912 472 L 800 472" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#03-lot-pipeline-arrow)"/>
+<path d="M 480 472 L 368 472" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#03-lot-pipeline-arrow)"/>
+<path d="M 208 552 L 208 656" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#03-lot-pipeline-arrow)"/>
+<path d="M 368 728 L 480 728" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#03-lot-pipeline-arrow)"/>
+<g data-node="collect"><rect x="48" y="144" width="320" height="144" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="68" y="172" font-size="12" fill="#52657a">My_Function.py</text>
+<text x="68" y="204" font-size="20" font-weight="700">1. 측정·공정 상태 갱신</text>
+<text x="68" y="236" font-size="16" fill="#42566b">ET / WIP 조회</text>
+<text x="68" y="264" font-size="16" fill="#42566b">일별 Parquet · 로그 적재</text>
+</g>
+<g data-node="select"><rect x="480" y="144" width="320" height="144" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="500" y="172" font-size="12" fill="#52657a">Main.py</text>
+<text x="500" y="204" font-size="20" font-weight="700">2. 발행 대상 선택</text>
+<text x="500" y="236" font-size="16" fill="#42566b">WIP 진행 + 지연시간 확인</text>
+<text x="500" y="264" font-size="16" fill="#42566b">완료 전환 / 재시도 대상 선별</text>
+</g>
+<g data-node="prepare"><rect x="912" y="144" width="320" height="144" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="932" y="172" font-size="12" fill="#52657a">My_Function.py</text>
+<text x="932" y="204" font-size="20" font-weight="700">3. 분석용 데이터 만들기</text>
+<text x="932" y="236" font-size="16" fill="#42566b">REAL 배율 · 피벗 · ADDP</text>
+<text x="932" y="264" font-size="16" fill="#42566b">좌표 결합 · 비교 데이터 구성</text>
+</g>
+<g data-node="analyze"><rect x="912" y="392" width="320" height="160" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="932" y="420" font-size="12" fill="#52657a">anomaly_engine.py</text>
+<text x="932" y="452" font-size="20" font-weight="700">4. 통계 이상 판정</text>
+<text x="932" y="484" font-size="16" fill="#42566b">Spec out · Flier · 산포</text>
+<text x="932" y="512" font-size="16" fill="#42566b">통계 결과로 Finding 생성</text>
+<text x="932" y="540" font-size="16" fill="#42566b">집계 항목은 집계값으로 판정</text>
+</g>
+<g data-node="render"><rect x="480" y="392" width="320" height="160" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="500" y="420" font-size="12" fill="#52657a">My_Function.py + Main.py</text>
+<text x="500" y="452" font-size="20" font-weight="700">5. 표와 차트 생성</text>
+<text x="500" y="484" font-size="16" fill="#42566b">Score Board · Trend · WF Map</text>
+<text x="500" y="512" font-size="16" fill="#42566b">차트 워커 병렬 렌더링</text>
+<text x="500" y="540" font-size="16" fill="#42566b">설정 순서대로 PPT / HTML 조립</text>
+</g>
+<g data-node="save"><rect x="48" y="392" width="320" height="160" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="68" y="420" font-size="12" fill="#52657a">HTML + PPT</text>
+<text x="68" y="452" font-size="20" font-weight="700">6. 저장·원본 보관</text>
+<text x="68" y="484" font-size="16" fill="#42566b">HTML 인라인 이미지 검증</text>
+<text x="68" y="512" font-size="16" fill="#42566b">임시 파일 완성 → 원자적 교체</text>
+<text x="68" y="540" font-size="16" fill="#42566b">발행 파일을 RUN/OPS에 보관</text>
+</g>
+<g data-node="mail"><rect x="48" y="656" width="320" height="144" rx="8" fill="#f3f4f4" stroke="#bcc4cb" stroke-width="1.5"/>
+<text x="68" y="684" font-size="12" fill="#52657a">Main.py</text>
+<text x="68" y="716" font-size="20" font-weight="700">7. 메일 발송</text>
+<text x="68" y="748" font-size="16" fill="#42566b">수신 그룹 해석 → 메일 API</text>
+<text x="68" y="776" font-size="16" fill="#42566b">기존 성공 이력은 재사용</text>
+</g>
+<g data-node="result"><rect x="480" y="656" width="320" height="144" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="500" y="684" font-size="12" fill="#52657a">RUN / OPS</text>
+<text x="500" y="716" font-size="20" font-weight="700">8. 단계별 결과 기록</text>
+<text x="500" y="748" font-size="16" fill="#42566b">생성 / 저장 / 메일을 구분</text>
+<text x="500" y="776" font-size="16" fill="#42566b">Scheduler 및 Watchdog이 확인</text>
+</g>
+<line x1="32" y1="832" x2="1248" y2="832" stroke="#cbd5e1"/>
+<text x="32" y="860" font-size="12" fill="#52657a">실선: 데이터·접근·처리 관계　 ·　 점선: 별도 프로세스 실행　 ·　 파란 테두리: 이 그림의 핵심</text>
+</g></svg>

@@ -1,0 +1,21 @@
+flowchart TB
+  source["ET · WIP 원천<br/>측정값과 공정 진행 정보<br/>AUTO 순회 시 조회"]
+  db["공유 측정 데이터<br/>날짜별 Parquet<br/>ET 로그 · WIP 상태<br/>AUTO가 적재한 데이터를<br/>각 분석 경로가 읽음<br/>Daily Trend / ML은<br/>새 리포트 대상이 없어도<br/>현재 DB를 직접 조회"]
+  auto["Auto Report<br/>이 Lot · Step은 괜찮은가?<br/>Score · Trend · WF Map"]
+  trend["Daily Trend<br/>선택 항목이 어떻게 변하나?<br/>전체 선택 Category Trend"]
+  ml["ML Insight<br/>유의한 변화는 무엇인가?<br/>통계 · IF/LOF · 공간 진단"]
+  ops["공유 운영 기록<br/>실행 · 생성 · 저장 · 메일<br/>heartbeat · 결과 JSON"]
+  watch["Watchdog<br/>자동화가 제대로 돌았나?<br/>미발행 · 실패 · 처리 지연"]
+  out["엔지니어가 받는 결과<br/>Auto Report<br/>HTML + PPT<br/>Daily Trend<br/>HTML + PPT · 전체 항목<br/>ML Insight<br/>HTML + PPT · 탐지 항목<br/>탐지 없음 → 메일 생략<br/>Watchdog<br/>HTML + CSV · 운영 점검"]
+  source -->|"적재"| db
+  db -->|"조회"| auto
+  db -->|"조회"| trend
+  db -->|"조회"| ml
+  auto --> out
+  trend --> out
+  ml --> out
+  ops -->|"점검"| watch
+  watch --> out
+  classDef focus fill:#eaf3f8,stroke:#24658a,stroke-width:2px
+  class auto focus
+  class watch focus

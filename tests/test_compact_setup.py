@@ -1,0 +1,133 @@
+"""Release acceptance checks: fresh/upgrade installation, source editing and spawn, all offline."""
+import importlib.util
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import zipfile
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+ENTRY = {'Main.py', 'Scheduler.py', 'My_config.py'}
+MODULES = {'My_Function.py', 'anomaly_engine.py', 'operator_console.py', 'resource_governor.py'}
+
+
+def run(root, *args):
+    env = dict(os.environ, PYTHONIOENCODING='utf-8')
+    env.pop('PYTHONPATH', None)
+    env.pop('AUTO_REPORT_OPS_ROOT', None)
+    result = subprocess.run([sys.executable, *args], cwd=root, env=env,
+                            capture_output=True, text=True, encoding='utf-8', timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout
+
+
+@pytest.fixture
+def installed(tmp_path):
+    root = tmp_path / 'installed'
+    root.mkdir()
+    shutil.copy2(ROOT / 'setup.py', root / 'setup.py')
+    run(root, 'setup.py')
+    return root
+
+
+def test_compact_install_import_paths_cli_and_spawn(installed, tmp_path):
+    root = installed
+    assert {p.name for p in root.rglob('*.py')} == ENTRY | {'setup.py'}
+    with zipfile.ZipFile(root / 'auto_report_runtime.zip') as archive:
+        assert set(archive.namelist()) == MODULES
+    assert (root / 'AGENTS.md').is_file()
+    assert 'start_manager' not in (root / 'Scheduler.py').read_text(encoding='utf-8')
+    assert 'self.manager' not in (root / 'My_config.py').read_text(encoding='utf-8')
+    assert '--init-db' in run(root, 'Main.py', '--help')
+    assert '--drain' in run(root, 'Scheduler.py', '--help')
+    script = root / 'spawn_check.py'
+    script.write_text('''
+import os
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+import Main
+import My_Function as mf
+import anomaly_engine
+import operator_console
+
+if __name__ == '__main__':
+    root = Path(__file__).resolve().parent
+    assert '.zip' in mf.__file__
+    assert Path(mf.operations_root()) == root / 'RUN' / 'OPS'
+    before = mf.file_fingerprint([mf.__file__, anomaly_engine.__file__])
+    assert before
+    mf.ops_put('smoke', 'test', {'ok': True})
+    assert mf.ops_get('smoke', 'test')['ok']
+    with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context('spawn')) as pool:
+        assert pool.submit(mf.operations_root).result(timeout=40) == str(root / 'RUN' / 'OPS')
+        assert pool.submit(operator_console.plain, '\\x1b[91mOK\\x1b[0m').result(timeout=40) == 'OK'
+    import zipfile
+    with zipfile.ZipFile(root / 'auto_report_runtime.zip', 'a') as archive:
+        archive.writestr('cache-version.txt', 'changed')
+    assert mf.file_fingerprint([mf.__file__, anomaly_engine.__file__]) != before
+''', encoding='utf-8')
+    run(root, str(script))
+
+
+def test_upgrade_retires_owned_files_and_preserves_data(installed):
+    root = installed
+    old = {
+        'Manager.py': 'old manager', 'manager_llm.py': 'old llm',
+        'My_Function.py': 'old helper', 'gen_setup.py': 'old builder',
+        'docs/MANAGER_START.md': 'old docs', 'My_config.py': '# operator settings',
+    }
+    for name, content in old.items():
+        (root / name).write_text(content, encoding='utf-8')
+    for name in ['RUN/DB/keep.parquet', 'RUN/QUEUE/scheduler_state.json',
+                 'reformatter/config.yaml', '.env', 'custom.py']:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('preserve', encoding='utf-8')
+    run(root, 'setup.py')
+    for name, content in old.items():
+        backups = list((root / '.setup-backups').glob('*/' + name + '.bak'))
+        assert len(backups) == 1
+        assert backups[0].read_text(encoding='utf-8') == content
+        if name != 'My_config.py':
+            assert not (root / name).exists()
+    for name in ['RUN/DB/keep.parquet', 'RUN/QUEUE/scheduler_state.json',
+                 'reformatter/config.yaml', '.env', 'custom.py']:
+        assert (root / name).read_text(encoding='utf-8') == 'preserve'
+    run(root, 'setup.py')
+    assert len(list((root / '.setup-backups').glob('*/My_config.py.bak'))) == 1
+
+
+def test_rebuild_without_sources_and_with_edits(installed, tmp_path):
+    root = installed
+    original = (root / 'setup.py').read_bytes()
+    run(root, 'setup.py', '--build')
+    assert (root / 'setup.py').read_bytes() == original
+    assert {p.name for p in root.glob('*.py')} == ENTRY | {'setup.py'}
+    run(root, 'setup.py', '--extract-sources')
+    source = root / 'operator_console.py'
+    source.write_text(source.read_text(encoding='utf-8') + '\nEDITED = True\n', encoding='utf-8')
+    config = (root / 'My_config.py').read_bytes()
+    run(root, 'setup.py', '--extract-sources')
+    assert 'EDITED = True' in source.read_text(encoding='utf-8')
+    assert (root / 'My_config.py').read_bytes() == config
+    assert 'True' in run(root, '-c', 'import Main, operator_console; print(operator_console.EDITED)')
+    run(root, 'setup.py', '--build')
+    target = tmp_path / 'edited-release'
+    run(root, 'setup.py', '--target', str(target))
+    with zipfile.ZipFile(target / 'auto_report_runtime.zip') as archive:
+        assert b'EDITED = True' in archive.read('operator_console.py')
+    assert {p.name for p in target.rglob('*.py')} == ENTRY
+
+
+def test_corrupt_bundle_fails_before_writes(tmp_path):
+    spec = importlib.util.spec_from_file_location('release_setup', ROOT / 'setup.py')
+    setup = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(setup)
+    setup.CHECKSUM = 'invalid'
+    with pytest.raises(ValueError, match='checksum'):
+        setup.install(tmp_path / 'must-not-exist')
+    assert not (tmp_path / 'must-not-exist').exists()

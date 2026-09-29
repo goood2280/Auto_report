@@ -1,0 +1,19 @@
+flowchart TB
+  collect["1. 측정·공정 상태 갱신<br/>ET / WIP 조회<br/>일별 Parquet · 로그 적재"]
+  select["2. 발행 대상 선택<br/>WIP 진행 + 지연시간 확인<br/>완료 전환 / 재시도 대상 선별"]
+  prepare["3. 분석용 데이터 만들기<br/>REAL 배율 · 피벗 · ADDP<br/>좌표 결합 · 비교 데이터 구성"]
+  analyze["4. 통계 이상 판정<br/>Spec out · Flier · 산포<br/>통계 결과로 Finding 생성<br/>집계 항목은 집계값으로 판정"]
+  render["5. 표와 차트 생성<br/>Score Board · Trend · WF Map<br/>차트 워커 병렬 렌더링<br/>설정 순서대로 PPT / HTML 조립"]
+  save["6. 저장·원본 보관<br/>HTML 인라인 이미지 검증<br/>임시 파일 완성 → 원자적 교체<br/>발행 파일을 RUN/OPS에 보관"]
+  mail["7. 메일 발송<br/>수신 그룹 해석 → 메일 API<br/>기존 성공 이력은 재사용"]
+  result["8. 단계별 결과 기록<br/>생성 / 저장 / 메일을 구분<br/>Scheduler 및 Watchdog이 확인"]
+  collect --> select
+  select --> prepare
+  prepare --> analyze
+  analyze --> render
+  render --> save
+  save --> mail
+  mail --> result
+  classDef focus fill:#eaf3f8,stroke:#24658a,stroke-width:2px
+  class select focus
+  class analyze focus

@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 880" role="img" aria-labelledby="02-runtime-title 02-runtime-desc">
+<title id="02-runtime-title">실행은 나뉘고, 기록으로 연결된다</title>
+<desc id="02-runtime-desc">프로세스 구조 · 같은 Scheduler.py와 Main.py가 실행 인자에 따라 다른 역할을 맡습니다. 상시 Scheduler가 활성화된 독립 타이머를 기동합니다. --once / --drain은 자동 기동하지 않습니다. / 그림의 읽기·기록 화살표는 접근 관계입니다. 모든 워커가 모든 저장소를 쓰는 뜻은 아닙니다. / Watchdog은 Scheduler와 별도 프로세스지만 같은 서버에 있습니다. 서버가 꺼지면 감시 메일도 보낼 수 없습니다.</desc>
+<defs><marker id="02-runtime-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#64748b"/></marker></defs>
+<rect width="1280" height="100%" fill="#f8fafc"/>
+<g font-family="Segoe UI, Malgun Gothic, sans-serif" fill="#172c43">
+<text x="32" y="44" font-size="28" font-weight="700">실행은 나뉘고, 기록으로 연결된다</text>
+<text x="32" y="80" font-size="16" fill="#52657a">프로세스 구조 · 같은 Scheduler.py와 Main.py가 실행 인자에 따라 다른 역할을 맡습니다.</text>
+<path d="M 352 200 L 480 200" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="8 6" marker-end="url(#02-runtime-arrow)"/>
+<rect x="368.0" y="156" width="96" height="24" fill="#f8fafc"/><text x="416" y="176" text-anchor="middle" font-size="16" fill="#52657a">별도 실행</text>
+<path d="M 352 384 L 480 384" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="8 6" marker-end="url(#02-runtime-arrow)"/>
+<rect x="368.0" y="340" width="96" height="24" fill="#f8fafc"/><text x="416" y="360" text-anchor="middle" font-size="16" fill="#52657a">별도 실행</text>
+<path d="M 352 560 L 480 560" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="8 6" marker-end="url(#02-runtime-arrow)"/>
+<rect x="368.0" y="516" width="96" height="24" fill="#f8fafc"/><text x="416" y="536" text-anchor="middle" font-size="16" fill="#52657a">별도 실행</text>
+<path d="M 352 736 L 480 736" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="8 6" marker-end="url(#02-runtime-arrow)"/>
+<rect x="368.0" y="692" width="96" height="24" fill="#f8fafc"/><text x="416" y="712" text-anchor="middle" font-size="16" fill="#52657a">별도 실행</text>
+<path d="M 800 200 L 944 200" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#02-runtime-arrow)"/>
+<rect x="824.0" y="156" width="96" height="24" fill="#f8fafc"/><text x="872" y="176" text-anchor="middle" font-size="16" fill="#52657a">읽기·기록</text>
+<path d="M 800 384 L 944 384" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#02-runtime-arrow)"/>
+<rect x="824.0" y="340" width="96" height="24" fill="#f8fafc"/><text x="872" y="360" text-anchor="middle" font-size="16" fill="#52657a">읽기·기록</text>
+<path d="M 800 560 L 944 560" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#02-runtime-arrow)"/>
+<rect x="824.0" y="516" width="96" height="24" fill="#f8fafc"/><text x="872" y="536" text-anchor="middle" font-size="16" fill="#52657a">읽기·기록</text>
+<path d="M 800 736 L 944 736" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#02-runtime-arrow)"/>
+<rect x="824.0" y="692" width="96" height="24" fill="#f8fafc"/><text x="872" y="712" text-anchor="middle" font-size="16" fill="#52657a">읽기·기록</text>
+<g data-node="scheduler"><rect x="48" y="128" width="304" height="144" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="68" y="156" font-size="12" fill="#52657a">Scheduler.py</text>
+<text x="68" y="188" font-size="20" font-weight="700">Scheduler · 제품 순회</text>
+<text x="68" y="220" font-size="16" fill="#42566b">주기별 AUTO / 수동 요청</text>
+<text x="68" y="248" font-size="16" fill="#42566b">그룹 순회 · 큐 중복 검사</text>
+</g>
+<g data-node="main"><rect x="480" y="128" width="320" height="144" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="500" y="156" font-size="12" fill="#52657a">Main.py</text>
+<text x="500" y="188" font-size="20" font-weight="700">Main · Lot 리포트</text>
+<text x="500" y="220" font-size="16" fill="#42566b">제품별 별도 프로세스</text>
+<text x="500" y="248" font-size="16" fill="#42566b">종료 코드 + 결과 JSON 확인</text>
+</g>
+<g data-node="dt"><rect x="48" y="320" width="304" height="128" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="68" y="348" font-size="12" fill="#52657a">Scheduler.py --daily-trend</text>
+<text x="68" y="380" font-size="20" font-weight="700">Daily Trend 타이머</text>
+<text x="68" y="412" font-size="16" fill="#42566b">독립 프로세스 · 조건부 기동</text>
+</g>
+<g data-node="dtworker"><rect x="480" y="320" width="320" height="128" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="500" y="348" font-size="12" fill="#52657a">--daily-trend-report</text>
+<text x="500" y="380" font-size="20" font-weight="700">Main · Daily Trend</text>
+<text x="500" y="412" font-size="16" fill="#42566b">service = daily_trend</text>
+</g>
+<g data-node="mt"><rect x="48" y="496" width="304" height="128" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="68" y="524" font-size="12" fill="#52657a">Scheduler.py --mlmode</text>
+<text x="68" y="556" font-size="20" font-weight="700">ML Insight 타이머</text>
+<text x="68" y="588" font-size="16" fill="#42566b">독립 프로세스 · 조건부 기동</text>
+</g>
+<g data-node="mtworker"><rect x="480" y="496" width="320" height="128" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="500" y="524" font-size="12" fill="#52657a">--daily-trend-report</text>
+<text x="500" y="556" font-size="20" font-weight="700">Main · ML Insight</text>
+<text x="500" y="588" font-size="16" fill="#42566b">service = mlmode</text>
+</g>
+<g data-node="wt"><rect x="48" y="672" width="304" height="128" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="68" y="700" font-size="12" fill="#52657a">Scheduler.py --watchdog</text>
+<text x="68" y="732" font-size="20" font-weight="700">Watchdog 감시 루프</text>
+<text x="68" y="764" font-size="16" fill="#42566b">heartbeat · progress 확인</text>
+</g>
+<g data-node="wtworker"><rect x="480" y="672" width="320" height="128" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="500" y="700" font-size="12" fill="#52657a">--watchdog-report</text>
+<text x="500" y="732" font-size="20" font-weight="700">Main · 운영 보고</text>
+<text x="500" y="764" font-size="16" fill="#42566b">정해진 시각 / 설정된 알림 조건</text>
+</g>
+<g data-node="store"><rect x="944" y="128" width="288" height="672" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="964" y="156" font-size="12" fill="#52657a">PERSISTENCE</text>
+<text x="964" y="188" font-size="20" font-weight="700">공유 파일 · 상태 저장</text>
+<text x="964" y="220" font-size="16" fill="#42566b">RUN/QUEUE</text>
+<text x="964" y="248" font-size="16" fill="#42566b">요청 / 이력 / 순회 위상</text>
+<text x="964" y="276" font-size="16" fill="#42566b"></text>
+<text x="964" y="304" font-size="16" fill="#42566b">RUN/DB</text>
+<text x="964" y="332" font-size="16" fill="#42566b">날짜별 측정 Parquet</text>
+<text x="964" y="360" font-size="16" fill="#42566b"></text>
+<text x="964" y="388" font-size="16" fill="#42566b">RUN/OPS</text>
+<text x="964" y="416" font-size="16" fill="#42566b">operations.sqlite</text>
+<text x="964" y="444" font-size="16" fill="#42566b">실행별 결과 / heartbeat</text>
+<text x="964" y="472" font-size="16" fill="#42566b">발행 원본 / 발송 이력</text>
+<text x="964" y="500" font-size="16" fill="#42566b"></text>
+<text x="964" y="528" font-size="16" fill="#42566b">같은 운영 서버의 로컬 저장</text>
+</g>
+<line x1="32" y1="832" x2="1248" y2="832" stroke="#cbd5e1"/>
+<text x="32" y="860" font-size="12" fill="#52657a">실선: 데이터·접근·처리 관계　 ·　 점선: 별도 프로세스 실행　 ·　 파란 테두리: 이 그림의 핵심</text>
+</g></svg>

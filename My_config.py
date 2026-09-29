@@ -538,16 +538,6 @@ class Config:
         # 전역 설정은 이 파일, 제품별 설정은 config.yaml, 제품 순서는 scheduler.yaml.
         # Excel의 실제 시트명에 맞게 변경하세요(공백과 밑줄은 서로 다릅니다).
         self.service_recipient_group = 'POWER USER'
-        # GUI는 선택 기능. 시작 실패/탭 종료와 무관하게 제품 순회는 지속됩니다.
-        self.manager = dict(enabled=True, host='127.0.0.1', port=8765,
-                            poll_sec=5, root_lot_length=5)
-        # 관리 화면 자연어 명령·로그 요약용 사내 LLM(Gemma4). 선택 기능 — 꺼져 있거나 응답이 없으면
-        # 규칙 해석으로 동작하고, LLM이 고른 제품/Lot/Step도 로그 후보에 있어야만 쓴다(판정은 규칙이 한다).
-        # 비밀값(credential_key)은 이 파일 대신 환경변수 AUTO_REPORT_LLM_KEY로 주는 것을 권장.
-        # api_url·system_name도 환경변수 AUTO_REPORT_LLM_URL / AUTO_REPORT_LLM_SYSTEM 이 있으면 우선.
-        self.manager_llm = dict(enabled=True, provider='gemma4', api_url='', model='Gemma4-260430',
-                                credential_key='', system_name='', user_id='', user_type='',
-                                auth_mode='dep_ticket', timeout_s=60, temperature=0.1)
         # 키 이름 대응: recipients(서비스 수신처) vs email_receiver(제품별) vs mail_vehicle(발신 계정 제품).
         self.watchdog = dict(
             # -- 일정/알림 --
@@ -849,8 +839,8 @@ class Config:
         #   workers = min(코어수, (가용GB - reserve) / per_worker, 상한 8)
         #   예) 4코어/50GB → 4워커, 2코어/10GB → 2워커, 가용 메모리 부족 → 1(직렬 폴백)
         # ──────────────────────────────────────────────────────
-        self.parallel_workers = 0             # 워커 수 강제 지정 (0=환경 보고 자동 결정)
-        self.parallel_max_workers = 8         # 자동 결정 시 상한
+        self.parallel_workers = 0             # 요청 워커 상한 (0=자동); CPU·메모리·슬롯 한도를 항상 준수
+        self.parallel_max_workers = 8         # 자동/수동 요청 모두의 상한
         self.parallel_mem_per_worker_gb = 1.2  # 워커 1개당 예상 메모리(GB) — pandas/matplotlib 상주 + 작업분
         self.parallel_reserve_gb = 3.0        # 메인 프로세스(merged_df/PPT 조립) 몫으로 남겨둘 가용 메모리(GB)
         # 서버 공용 한도: 같은 서버에서 여러 Main(Scheduler·수동 bash)이 동시에 돌아도 워커 합계는
@@ -865,6 +855,7 @@ class Config:
         self.duckdb_memory_fraction = 0.5
         self.duckdb_memory_limit_gb = 0
         self.s3_upload_threads = 2            # S3 전송 백그라운드 스레드(다음 Lot 렌더링과 겹쳐 수행)
+        self.execution_lock_wait_sec = 10800  # 제품 순회·수동 발행·Daily/ML 전체의 공통 실행 잠금 대기(초)
         self.product_lock_wait_sec = 3600     # 같은 제품 작업이 실행 중이면 기다리는 최대 시간(초, 0=즉시 실패)
 
         # ──────────────────────────────────────────────────────

@@ -1,0 +1,2 @@
+# Keep the generated installer byte-for-byte reproducible on Windows checkouts.
+/setup.py text eol=lf

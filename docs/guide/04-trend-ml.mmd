@@ -1,0 +1,17 @@
+flowchart TB
+  db["현재 ET 데이터<br/>날짜별 Parquet → REAL / ADDP<br/>제품 viewing_period로 기간 결정"]
+  join["비교 가능한 항목 구성<br/>CAT2 선택 · Step/프로그램/온도<br/>ML_TABLE의 시간·Split 정보 결합"]
+  meta["외부 준비 ML_TABLE<br/>Lot · Wafer 키로 결합<br/>모호한 중복 키는 제외"]
+  daily["Daily Trend · 전체 보기<br/>선택된 Category의 전체 항목<br/>당일 측정 강조 · Split별 색상<br/>Trend와 Spec 경계를 시각화"]
+  ml["ML Insight · 변화 선별<br/>Split / 시간 / Spike + IF · LOF<br/>장비 차이 · 공간 패턴 진단<br/>FDR 보정 + 효과 크기로 선별"]
+  dailyout["전체 항목 보고<br/>HTML + PPT 분할 발행<br/>항목·진단 목록은 catalog.csv"]
+  mlout["탐지 항목 보고<br/>유의 항목 + 공간 상세 패널<br/>탐지 없음은 no_findings 기록<br/>자료 부족·누락은 별도 진단 확인"]
+  db --> join
+  meta --> join
+  join --> daily
+  join --> ml
+  daily --> dailyout
+  ml -->|"유의한 경우"| mlout
+  classDef focus fill:#eaf3f8,stroke:#24658a,stroke-width:2px
+  class daily focus
+  class ml focus

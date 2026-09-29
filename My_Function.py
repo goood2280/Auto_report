@@ -2348,15 +2348,16 @@ def get_parallel_workers(config=None):
     서버 전체 한도는 resource_governor 가 정한다 — 같은 서버에서 여러 Main(Scheduler·수동 bash)이
     동시에 돌아도 워커 합계가 (코어 − parallel_reserve_cores)를 넘지 않고, S3 전송 등 다른 작업이 쓰는
     CPU·메모리만큼 덜 쓴다. 결정은 parallel_replan_sec(기본 20초)마다 다시 한다(랏 사이에 늘거나 줄어듦).
-    My_config.parallel_workers > 0 이면 그 값을 그대로 쓴다(강제 지정).
+    My_config.parallel_workers > 0 은 요청 상한이며 CPU·메모리·공용 슬롯 제한을 우회하지 않는다.
     """
     cfg = config if config is not None else GLOBAL_CONFIG
     try:
         import resource_governor
         plan = resource_governor.plan_workers(cfg)
     except Exception as exc:
-        print(f"[WARN] 병렬도 조정기 실패 → 워커 2개로 제한: {exc}")
-        return max(1, min(2, os.cpu_count() or 1))
+        print(f"[WARN] 병렬도 조정기 실패 → 직렬 렌더링: {exc}")
+        shutdown_chart_pool()
+        return 1
     _LAST_PLAN.clear(); _LAST_PLAN.update(plan)
     n = plan['workers']
     if n <= 1:
@@ -2414,11 +2415,9 @@ def _shutdown_pool_only():
     global _CHART_POOL, _CHART_POOL_N
     if _CHART_POOL is not None:
         try:
-            _CHART_POOL.shutdown(wait=False, cancel_futures=True)
+            _CHART_POOL.shutdown(wait=True, cancel_futures=True)
         except TypeError:      # Python<3.9: cancel_futures 미지원
-            _CHART_POOL.shutdown(wait=False)
-        except Exception:
-            pass
+            _CHART_POOL.shutdown(wait=True)
         _CHART_POOL = None
         _CHART_POOL_N = 0
 
@@ -4701,7 +4700,8 @@ def save_score_csv(score_board, db, vehicle, lot, step, html_file):
 
 
 def operations_root():
-    return os.path.abspath(os.getenv('AUTO_REPORT_OPS_ROOT') or os.path.join(os.path.dirname(__file__), 'RUN', 'OPS'))
+    import My_config
+    return os.path.abspath(os.getenv('AUTO_REPORT_OPS_ROOT') or os.path.join(os.path.dirname(My_config.__file__), 'RUN', 'OPS'))
 
 
 from contextlib import contextmanager
@@ -4764,8 +4764,16 @@ def file_fingerprint(paths):
     import hashlib
     h = hashlib.sha256()
     for path in sorted(set(map(os.path.abspath, paths))):
-        stat = os.stat(path)
-        h.update(f'{path}|{stat.st_size}|{stat.st_mtime_ns}'.encode())
+        # zipimport의 __file__은 실제 파일이 아니다. ZIP 자체를 해시하여 코드 변경을 반영한다.
+        from pathlib import Path
+        source = Path(path)
+        archive = next((p for p in source.parents if p.suffix == '.zip' and p.is_file()), None)
+        if archive is not None:
+            h.update(path.encode())
+            h.update(archive.read_bytes())
+        else:
+            stat = os.stat(path)
+            h.update(f'{path}|{stat.st_size}|{stat.st_mtime_ns}'.encode())
     return h.hexdigest()
 
 
@@ -4923,7 +4931,8 @@ def _render_item_charts(task):
     identity['cfg']=config
     identity['data']=(pd.util.hash_pandas_object(task['df'],index=True).values.tobytes(),
                       list(task['df'].columns),list(map(str,task['df'].dtypes)))
-    identity['code']=file_fingerprint([__file__,os.path.join(os.path.dirname(__file__),'anomaly_engine.py')])
+    import anomaly_engine
+    identity['code']=file_fingerprint([__file__, anomaly_engine.__file__])
     import matplotlib
     identity['versions']=(pd.__version__,np.__version__,matplotlib.__version__)
     key=hashlib.sha256(pickle.dumps(identity,protocol=4)).hexdigest()
@@ -4976,7 +4985,7 @@ def process_lock(path, wait_sec=0, poll_sec=2.0):
             except OSError:
                 if time.time()>=deadline:raise
                 if not announced:
-                    print(f'[INFO] 같은 제품 작업이 실행 중이라 끝날 때까지 기다립니다(최대 {int(wait_sec)}초): {os.path.basename(path)}',flush=True)
+                    print(f'[INFO] 앞선 작업이 실행 중이라 끝날 때까지 기다립니다(최대 {int(wait_sec)}초): {os.path.basename(path)}',flush=True)
                     announced=True
                 time.sleep(poll_sec)
     except OSError:

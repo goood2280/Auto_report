@@ -1,0 +1,363 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Auto Report · 전체 흐름 이해하기</title><style>*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:80px}body{margin:0;background:#f8fafc;color:#172c43;font-family:"Segoe UI","Malgun Gothic",sans-serif}header,main,footer{max-width:1328px;margin:auto;padding:32px 24px}header{padding-top:56px}h1{font-size:40px;letter-spacing:-1.4px;margin:12px 0 20px}header p{font-size:18px;line-height:1.8;max-width:940px}.eyebrow{font-size:12px!important;letter-spacing:2px;color:#24658a}nav{position:sticky;top:0;background:#f8fafcf5;border-block:1px solid #d4dee7;z-index:2;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;padding:12px}a{color:#24658a;text-underline-offset:4px}nav a{text-decoration:none;padding:8px 16px;border-radius:4px;font-size:14px}nav a:hover,nav a:focus{background:#e1edf5}section{margin:8px 0 64px;scroll-margin-top:80px}.figure{overflow-x:auto}svg{display:block;width:100%;height:auto;min-width:880px}.notes{border-left:3px solid #24658a;padding:8px 24px;margin:16px 32px}.notes p{font-size:15px;line-height:1.75;margin:8px 0}.downloads{margin-left:32px;font-size:13px}table{border-collapse:collapse;width:100%;font-size:15px}td,th{padding:16px;text-align:left;border-bottom:1px solid #d4dee7}th{background:#eef2f6}footer{border-top:1px solid #d4dee7;font-size:13px;line-height:1.8}.intro{border-top:1px solid #d4dee7;padding-top:24px}.mini{font-size:14px;color:#52657a}@media(max-width:700px){h1{font-size:30px}header,main,footer{padding:24px 12px}.notes{margin:12px 4px}nav{position:relative}nav a{padding:4px 8px}}@media print{nav,.downloads{display:none}header{padding-top:0}section{break-before:page;break-inside:avoid;margin:0}svg{min-width:0}.notes{font-size:12px}a{color:inherit}body{background:white}html{scroll-behavior:auto}}</style><header><p><a href="../../README.md">README</a> · 이 파일을 브라우저에서 열어 읽으세요.</p><p class="eyebrow">SYSTEM FIELD GUIDE / 2026.09.30</p><h1>Auto Report, 전체 흐름 이해하기</h1><p>측정 결과를 보고서로 만드는 흐름과, 그 자동화가 잘 돌아가는지 확인하는 흐름.<br>먼저 네 가지 역할을 구분하고, 실행과 데이터 처리를 한 단계씩 확대해 봅니다.</p><p class="mini">업무 역할 도식 · 실행 잠금/큐 설명 보완 · 최신 CLI·복구 규약은 README 기준</p></header><nav aria-label="그림 바로가기"><a href="#01-overview">01 · 전체 흐름</a><a href="#02-runtime">02 · 실행 구조</a><a href="#03-lot-pipeline">03 · 리포트 생성</a><a href="#04-trend-ml">04 · 추세·ML</a><a href="#05-delivery">05 · 발송·복구</a></nav><main><section id="01-overview"><div class="figure"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 960" role="img" aria-labelledby="01-overview-title 01-overview-desc">
+<title id="01-overview-title">데이터 하나, 서로 다른 네 가지 질문</title>
+<desc id="01-overview-desc">업무 흐름도 · 측정 데이터와 운영 기록은 서로 다른 목적으로 읽습니다. 업무 역할을 그린 그림입니다. 실제 프로세스 경계는 다음 그림에서 확인합니다. / 각 실행은 RUN/OPS에 기록합니다. 로그 쓰기 화살표와 선택적 DX/S3 업로드는 전체도에서 생략했습니다. / ML Insight 결과는 기본 Auto Report의 판정 규칙을 자동으로 바꾸지 않습니다.</desc>
+<defs><marker id="01-overview-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#64748b"/></marker></defs>
+<rect width="1280" height="100%" fill="#f8fafc"/>
+<g font-family="Segoe UI, Malgun Gothic, sans-serif" fill="#172c43">
+<text x="32" y="44" font-size="28" font-weight="700">데이터 하나, 서로 다른 네 가지 질문</text>
+<text x="32" y="80" font-size="16" fill="#52657a">업무 흐름도 · 측정 데이터와 운영 기록은 서로 다른 목적으로 읽습니다.</text>
+<path d="M 256 216 L 352 216" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#01-overview-arrow)"/>
+<rect x="280.0" y="172" width="48" height="24" fill="#f8fafc"/><text x="304" y="192" text-anchor="middle" font-size="16" fill="#52657a">적재</text>
+<path d="M 576 216 L 672 216" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#01-overview-arrow)"/>
+<rect x="600.0" y="172" width="48" height="24" fill="#f8fafc"/><text x="624" y="192" text-anchor="middle" font-size="16" fill="#52657a">조회</text>
+<path d="M 576 400 L 672 400" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#01-overview-arrow)"/>
+<rect x="600.0" y="356" width="48" height="24" fill="#f8fafc"/><text x="624" y="376" text-anchor="middle" font-size="16" fill="#52657a">조회</text>
+<path d="M 576 584 L 672 584" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#01-overview-arrow)"/>
+<rect x="600.0" y="540" width="48" height="24" fill="#f8fafc"/><text x="624" y="560" text-anchor="middle" font-size="16" fill="#52657a">조회</text>
+<path d="M 896 216 L 992 216" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#01-overview-arrow)"/>
+<path d="M 896 400 L 992 400" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#01-overview-arrow)"/>
+<path d="M 896 584 L 992 584" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#01-overview-arrow)"/>
+<path d="M 576 784 L 672 784" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#01-overview-arrow)"/>
+<rect x="600.0" y="740" width="48" height="24" fill="#f8fafc"/><text x="624" y="760" text-anchor="middle" font-size="16" fill="#52657a">점검</text>
+<path d="M 896 784 L 992 784" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#01-overview-arrow)"/>
+<g data-node="source"><rect x="32" y="144" width="224" height="144" rx="8" fill="#f3f4f4" stroke="#bcc4cb" stroke-width="1.5"/>
+<text x="52" y="172" font-size="12" fill="#52657a">INPUT</text>
+<text x="52" y="204" font-size="20" font-weight="700">ET · WIP 원천</text>
+<text x="52" y="236" font-size="16" fill="#42566b">측정값과 공정 진행 정보</text>
+<text x="52" y="264" font-size="16" fill="#42566b">AUTO 순회 시 조회</text>
+</g>
+<g data-node="db"><rect x="352" y="144" width="224" height="512" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="372" y="172" font-size="12" fill="#52657a">RUN / DB</text>
+<text x="372" y="204" font-size="20" font-weight="700">공유 측정 데이터</text>
+<text x="372" y="236" font-size="16" fill="#42566b">날짜별 Parquet</text>
+<text x="372" y="264" font-size="16" fill="#42566b">ET 로그 · WIP 상태</text>
+<text x="372" y="292" font-size="16" fill="#42566b"></text>
+<text x="372" y="320" font-size="16" fill="#42566b">AUTO가 적재한 데이터를</text>
+<text x="372" y="348" font-size="16" fill="#42566b">각 분석 경로가 읽음</text>
+<text x="372" y="376" font-size="16" fill="#42566b"></text>
+<text x="372" y="404" font-size="16" fill="#42566b">Daily Trend / ML은</text>
+<text x="372" y="432" font-size="16" fill="#42566b">새 리포트 대상이 없어도</text>
+<text x="372" y="460" font-size="16" fill="#42566b">현재 DB를 직접 조회</text>
+</g>
+<g data-node="auto"><rect x="672" y="144" width="224" height="144" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="692" y="172" font-size="12" fill="#52657a">01 · LOT REPORT</text>
+<text x="692" y="204" font-size="20" font-weight="700">Auto Report</text>
+<text x="692" y="236" font-size="16" fill="#42566b">이 Lot · Step은 괜찮은가?</text>
+<text x="692" y="264" font-size="16" fill="#42566b">Score · Trend · WF Map</text>
+</g>
+<g data-node="trend"><rect x="672" y="328" width="224" height="144" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="692" y="356" font-size="12" fill="#52657a">02 · DAILY REVIEW</text>
+<text x="692" y="388" font-size="20" font-weight="700">Daily Trend</text>
+<text x="692" y="420" font-size="16" fill="#42566b">선택 항목이 어떻게 변하나?</text>
+<text x="692" y="448" font-size="16" fill="#42566b">전체 선택 Category Trend</text>
+</g>
+<g data-node="ml"><rect x="672" y="512" width="224" height="144" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="692" y="540" font-size="12" fill="#52657a">03 · SIGNIFICANT FINDINGS</text>
+<text x="692" y="572" font-size="20" font-weight="700">ML Insight</text>
+<text x="692" y="604" font-size="16" fill="#42566b">유의한 변화는 무엇인가?</text>
+<text x="692" y="632" font-size="16" fill="#42566b">통계 · IF/LOF · 공간 진단</text>
+</g>
+<g data-node="ops"><rect x="352" y="712" width="224" height="144" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="372" y="740" font-size="12" fill="#52657a">RUN / OPS</text>
+<text x="372" y="772" font-size="20" font-weight="700">공유 운영 기록</text>
+<text x="372" y="804" font-size="16" fill="#42566b">실행 · 생성 · 저장 · 메일</text>
+<text x="372" y="832" font-size="16" fill="#42566b">heartbeat · 결과 JSON</text>
+</g>
+<g data-node="watch"><rect x="672" y="712" width="224" height="144" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="692" y="740" font-size="12" fill="#52657a">04 · OPERATION CHECK</text>
+<text x="692" y="772" font-size="20" font-weight="700">Watchdog</text>
+<text x="692" y="804" font-size="16" fill="#42566b">자동화가 제대로 돌았나?</text>
+<text x="692" y="832" font-size="16" fill="#42566b">미발행 · 실패 · 처리 지연</text>
+</g>
+<g data-node="out"><rect x="992" y="144" width="256" height="712" rx="8" fill="#f3f4f4" stroke="#bcc4cb" stroke-width="1.5"/>
+<text x="1012" y="172" font-size="12" fill="#52657a">OUTPUT</text>
+<text x="1012" y="204" font-size="20" font-weight="700">엔지니어가 받는 결과</text>
+<text x="1012" y="236" font-size="16" fill="#42566b">Auto Report</text>
+<text x="1012" y="264" font-size="16" fill="#42566b">HTML + PPT</text>
+<text x="1012" y="420" font-size="16" fill="#42566b">Daily Trend</text>
+<text x="1012" y="448" font-size="16" fill="#42566b">HTML + PPT · 전체 항목</text>
+<text x="1012" y="604" font-size="16" fill="#42566b">ML Insight</text>
+<text x="1012" y="632" font-size="16" fill="#42566b">HTML + PPT · 탐지 항목</text>
+<text x="1012" y="660" font-size="16" fill="#42566b">탐지 없음 → 메일 생략</text>
+<text x="1012" y="788" font-size="16" fill="#42566b">Watchdog</text>
+<text x="1012" y="816" font-size="16" fill="#42566b">HTML + CSV · 운영 점검</text>
+</g>
+<line x1="32" y1="912" x2="1248" y2="912" stroke="#cbd5e1"/>
+<text x="32" y="940" font-size="12" fill="#52657a">실선: 데이터·접근·처리 관계　 ·　 점선: 별도 프로세스 실행　 ·　 파란 테두리: 이 그림의 핵심</text>
+</g></svg></div><div class="notes"><p>업무 역할을 그린 그림입니다. 실제 프로세스 경계는 다음 그림에서 확인합니다.</p><p>각 실행은 RUN/OPS에 기록합니다. 로그 쓰기 화살표와 선택적 DX/S3 업로드는 전체도에서 생략했습니다.</p><p>ML Insight 결과는 기본 Auto Report의 판정 규칙을 자동으로 바꾸지 않습니다.</p></div><p class="downloads"><a href="01-overview.svg">SVG 원본</a> · <a href="01-overview.mmd">Mermaid 원본</a></p></section><section id="02-runtime"><div class="figure"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 880" role="img" aria-labelledby="02-runtime-title 02-runtime-desc">
+<title id="02-runtime-title">실행은 나뉘고, 기록으로 연결된다</title>
+<desc id="02-runtime-desc">프로세스 구조 · 같은 Scheduler.py와 Main.py가 실행 인자에 따라 다른 역할을 맡습니다. 상시 Scheduler가 활성화된 독립 타이머를 기동합니다. --once / --drain은 자동 기동하지 않습니다. / 그림의 읽기·기록 화살표는 접근 관계입니다. 모든 워커가 모든 저장소를 쓰는 뜻은 아닙니다. / Watchdog은 Scheduler와 별도 프로세스지만 같은 서버에 있습니다. 서버가 꺼지면 감시 메일도 보낼 수 없습니다.</desc>
+<defs><marker id="02-runtime-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#64748b"/></marker></defs>
+<rect width="1280" height="100%" fill="#f8fafc"/>
+<g font-family="Segoe UI, Malgun Gothic, sans-serif" fill="#172c43">
+<text x="32" y="44" font-size="28" font-weight="700">실행은 나뉘고, 기록으로 연결된다</text>
+<text x="32" y="80" font-size="16" fill="#52657a">프로세스 구조 · 같은 Scheduler.py와 Main.py가 실행 인자에 따라 다른 역할을 맡습니다.</text>
+<path d="M 352 200 L 480 200" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="8 6" marker-end="url(#02-runtime-arrow)"/>
+<rect x="368.0" y="156" width="96" height="24" fill="#f8fafc"/><text x="416" y="176" text-anchor="middle" font-size="16" fill="#52657a">별도 실행</text>
+<path d="M 352 384 L 480 384" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="8 6" marker-end="url(#02-runtime-arrow)"/>
+<rect x="368.0" y="340" width="96" height="24" fill="#f8fafc"/><text x="416" y="360" text-anchor="middle" font-size="16" fill="#52657a">별도 실행</text>
+<path d="M 352 560 L 480 560" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="8 6" marker-end="url(#02-runtime-arrow)"/>
+<rect x="368.0" y="516" width="96" height="24" fill="#f8fafc"/><text x="416" y="536" text-anchor="middle" font-size="16" fill="#52657a">별도 실행</text>
+<path d="M 352 736 L 480 736" fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="8 6" marker-end="url(#02-runtime-arrow)"/>
+<rect x="368.0" y="692" width="96" height="24" fill="#f8fafc"/><text x="416" y="712" text-anchor="middle" font-size="16" fill="#52657a">별도 실행</text>
+<path d="M 800 200 L 944 200" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#02-runtime-arrow)"/>
+<rect x="824.0" y="156" width="96" height="24" fill="#f8fafc"/><text x="872" y="176" text-anchor="middle" font-size="16" fill="#52657a">읽기·기록</text>
+<path d="M 800 384 L 944 384" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#02-runtime-arrow)"/>
+<rect x="824.0" y="340" width="96" height="24" fill="#f8fafc"/><text x="872" y="360" text-anchor="middle" font-size="16" fill="#52657a">읽기·기록</text>
+<path d="M 800 560 L 944 560" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#02-runtime-arrow)"/>
+<rect x="824.0" y="516" width="96" height="24" fill="#f8fafc"/><text x="872" y="536" text-anchor="middle" font-size="16" fill="#52657a">읽기·기록</text>
+<path d="M 800 736 L 944 736" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#02-runtime-arrow)"/>
+<rect x="824.0" y="692" width="96" height="24" fill="#f8fafc"/><text x="872" y="712" text-anchor="middle" font-size="16" fill="#52657a">읽기·기록</text>
+<g data-node="scheduler"><rect x="48" y="128" width="304" height="144" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="68" y="156" font-size="12" fill="#52657a">Scheduler.py</text>
+<text x="68" y="188" font-size="20" font-weight="700">Scheduler · 제품 순회</text>
+<text x="68" y="220" font-size="16" fill="#42566b">주기별 AUTO / 수동 요청</text>
+<text x="68" y="248" font-size="16" fill="#42566b">그룹 순회 · 큐 중복 검사</text>
+</g>
+<g data-node="main"><rect x="480" y="128" width="320" height="144" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="500" y="156" font-size="12" fill="#52657a">Main.py</text>
+<text x="500" y="188" font-size="20" font-weight="700">Main · Lot 리포트</text>
+<text x="500" y="220" font-size="16" fill="#42566b">제품별 별도 프로세스</text>
+<text x="500" y="248" font-size="16" fill="#42566b">종료 코드 + 결과 JSON 확인</text>
+</g>
+<g data-node="dt"><rect x="48" y="320" width="304" height="128" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="68" y="348" font-size="12" fill="#52657a">Scheduler.py --daily-trend</text>
+<text x="68" y="380" font-size="20" font-weight="700">Daily Trend 타이머</text>
+<text x="68" y="412" font-size="16" fill="#42566b">독립 프로세스 · 조건부 기동</text>
+</g>
+<g data-node="dtworker"><rect x="480" y="320" width="320" height="128" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="500" y="348" font-size="12" fill="#52657a">--daily-trend-report</text>
+<text x="500" y="380" font-size="20" font-weight="700">Main · Daily Trend</text>
+<text x="500" y="412" font-size="16" fill="#42566b">service = daily_trend</text>
+</g>
+<g data-node="mt"><rect x="48" y="496" width="304" height="128" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="68" y="524" font-size="12" fill="#52657a">Scheduler.py --mlmode</text>
+<text x="68" y="556" font-size="20" font-weight="700">ML Insight 타이머</text>
+<text x="68" y="588" font-size="16" fill="#42566b">독립 프로세스 · 조건부 기동</text>
+</g>
+<g data-node="mtworker"><rect x="480" y="496" width="320" height="128" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="500" y="524" font-size="12" fill="#52657a">--daily-trend-report</text>
+<text x="500" y="556" font-size="20" font-weight="700">Main · ML Insight</text>
+<text x="500" y="588" font-size="16" fill="#42566b">service = mlmode</text>
+</g>
+<g data-node="wt"><rect x="48" y="672" width="304" height="128" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="68" y="700" font-size="12" fill="#52657a">Scheduler.py --watchdog</text>
+<text x="68" y="732" font-size="20" font-weight="700">Watchdog 감시 루프</text>
+<text x="68" y="764" font-size="16" fill="#42566b">heartbeat · progress 확인</text>
+</g>
+<g data-node="wtworker"><rect x="480" y="672" width="320" height="128" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="500" y="700" font-size="12" fill="#52657a">--watchdog-report</text>
+<text x="500" y="732" font-size="20" font-weight="700">Main · 운영 보고</text>
+<text x="500" y="764" font-size="16" fill="#42566b">정해진 시각 / 설정된 알림 조건</text>
+</g>
+<g data-node="store"><rect x="944" y="128" width="288" height="672" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="964" y="156" font-size="12" fill="#52657a">PERSISTENCE</text>
+<text x="964" y="188" font-size="20" font-weight="700">공유 파일 · 상태 저장</text>
+<text x="964" y="220" font-size="16" fill="#42566b">RUN/QUEUE</text>
+<text x="964" y="248" font-size="16" fill="#42566b">요청 / 이력 / 순회 위상</text>
+<text x="964" y="276" font-size="16" fill="#42566b"></text>
+<text x="964" y="304" font-size="16" fill="#42566b">RUN/DB</text>
+<text x="964" y="332" font-size="16" fill="#42566b">날짜별 측정 Parquet</text>
+<text x="964" y="360" font-size="16" fill="#42566b"></text>
+<text x="964" y="388" font-size="16" fill="#42566b">RUN/OPS</text>
+<text x="964" y="416" font-size="16" fill="#42566b">operations.sqlite</text>
+<text x="964" y="444" font-size="16" fill="#42566b">실행별 결과 / heartbeat</text>
+<text x="964" y="472" font-size="16" fill="#42566b">발행 원본 / 발송 이력</text>
+<text x="964" y="500" font-size="16" fill="#42566b"></text>
+<text x="964" y="528" font-size="16" fill="#42566b">같은 운영 서버의 로컬 저장</text>
+</g>
+<line x1="32" y1="832" x2="1248" y2="832" stroke="#cbd5e1"/>
+<text x="32" y="860" font-size="12" fill="#52657a">실선: 데이터·접근·처리 관계　 ·　 점선: 별도 프로세스 실행　 ·　 파란 테두리: 이 그림의 핵심</text>
+</g></svg></div><div class="notes"><p>상시 Scheduler가 활성화된 독립 타이머를 기동합니다. --once / --drain은 자동 기동하지 않습니다.</p><p>2026-09-30: OpenCode는 --enqueue로 접수하며 현재 Main 종료 후 제품 사이에서 처리합니다. 일반/수동/적재/Daily/ML Main은 같은 RUN/OPS/locks/executor.lock으로 무거운 작업을 하나씩 실행합니다. Watchdog은 별도 경량 조회입니다. <a href="../../README.md">최신 실행·권한 설명</a> · <a href="../SCHEDULER_TRIGGER_CONTRACT.md">큐·unknown 복구 계약</a></p><p>그림의 읽기·기록 화살표는 접근 관계입니다. 모든 워커가 모든 저장소를 쓰는 뜻은 아닙니다.</p><p>Watchdog은 Scheduler와 별도 프로세스지만 같은 서버에 있습니다. 서버가 꺼지면 감시 메일도 보낼 수 없습니다.</p></div><p class="downloads"><a href="02-runtime.svg">SVG 원본</a> · <a href="02-runtime.mmd">Mermaid 원본</a></p></section><section id="03-lot-pipeline"><div class="figure"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 880" role="img" aria-labelledby="03-lot-pipeline-title 03-lot-pipeline-desc">
+<title id="03-lot-pipeline-title">한 번의 측정이 리포트가 되기까지</title>
+<desc id="03-lot-pipeline-desc">일반 AUTO 경로 · 수동 트리거는 원천 쿼리를 건너뛰고 기존 DB의 지정 Lot · Step을 사용합니다. 번호는 이해를 돕는 논리 단계입니다. 차트 생성과 분석 호출 일부는 코드 안에서 서로 섞여 있습니다. / Target은 lot_id + step_id로 식별합니다. prime key는 제품 + Lot + Step을 묶는 발행 식별자입니다. / 외부 LLM 없이 코드로 분석합니다. 선택적 DX/S3 업로드는 저장 후 메일 전에 수행합니다.</desc>
+<defs><marker id="03-lot-pipeline-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#64748b"/></marker></defs>
+<rect width="1280" height="100%" fill="#f8fafc"/>
+<g font-family="Segoe UI, Malgun Gothic, sans-serif" fill="#172c43">
+<text x="32" y="44" font-size="28" font-weight="700">한 번의 측정이 리포트가 되기까지</text>
+<text x="32" y="80" font-size="16" fill="#52657a">일반 AUTO 경로 · 수동 트리거는 원천 쿼리를 건너뛰고 기존 DB의 지정 Lot · Step을 사용합니다.</text>
+<path d="M 368 216 L 480 216" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#03-lot-pipeline-arrow)"/>
+<path d="M 800 216 L 912 216" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#03-lot-pipeline-arrow)"/>
+<path d="M 1072 288 L 1072 392" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#03-lot-pipeline-arrow)"/>
+<path d="M 912 472 L 800 472" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#03-lot-pipeline-arrow)"/>
+<path d="M 480 472 L 368 472" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#03-lot-pipeline-arrow)"/>
+<path d="M 208 552 L 208 656" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#03-lot-pipeline-arrow)"/>
+<path d="M 368 728 L 480 728" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#03-lot-pipeline-arrow)"/>
+<g data-node="collect"><rect x="48" y="144" width="320" height="144" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="68" y="172" font-size="12" fill="#52657a">My_Function.py</text>
+<text x="68" y="204" font-size="20" font-weight="700">1. 측정·공정 상태 갱신</text>
+<text x="68" y="236" font-size="16" fill="#42566b">ET / WIP 조회</text>
+<text x="68" y="264" font-size="16" fill="#42566b">일별 Parquet · 로그 적재</text>
+</g>
+<g data-node="select"><rect x="480" y="144" width="320" height="144" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="500" y="172" font-size="12" fill="#52657a">Main.py</text>
+<text x="500" y="204" font-size="20" font-weight="700">2. 발행 대상 선택</text>
+<text x="500" y="236" font-size="16" fill="#42566b">WIP 진행 + 지연시간 확인</text>
+<text x="500" y="264" font-size="16" fill="#42566b">완료 전환 / 재시도 대상 선별</text>
+</g>
+<g data-node="prepare"><rect x="912" y="144" width="320" height="144" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="932" y="172" font-size="12" fill="#52657a">My_Function.py</text>
+<text x="932" y="204" font-size="20" font-weight="700">3. 분석용 데이터 만들기</text>
+<text x="932" y="236" font-size="16" fill="#42566b">REAL 배율 · 피벗 · ADDP</text>
+<text x="932" y="264" font-size="16" fill="#42566b">좌표 결합 · 비교 데이터 구성</text>
+</g>
+<g data-node="analyze"><rect x="912" y="392" width="320" height="160" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="932" y="420" font-size="12" fill="#52657a">anomaly_engine.py</text>
+<text x="932" y="452" font-size="20" font-weight="700">4. 통계 이상 판정</text>
+<text x="932" y="484" font-size="16" fill="#42566b">Spec out · Flier · 산포</text>
+<text x="932" y="512" font-size="16" fill="#42566b">통계 결과로 Finding 생성</text>
+<text x="932" y="540" font-size="16" fill="#42566b">집계 항목은 집계값으로 판정</text>
+</g>
+<g data-node="render"><rect x="480" y="392" width="320" height="160" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="500" y="420" font-size="12" fill="#52657a">My_Function.py + Main.py</text>
+<text x="500" y="452" font-size="20" font-weight="700">5. 표와 차트 생성</text>
+<text x="500" y="484" font-size="16" fill="#42566b">Score Board · Trend · WF Map</text>
+<text x="500" y="512" font-size="16" fill="#42566b">차트 워커 병렬 렌더링</text>
+<text x="500" y="540" font-size="16" fill="#42566b">설정 순서대로 PPT / HTML 조립</text>
+</g>
+<g data-node="save"><rect x="48" y="392" width="320" height="160" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="68" y="420" font-size="12" fill="#52657a">HTML + PPT</text>
+<text x="68" y="452" font-size="20" font-weight="700">6. 저장·원본 보관</text>
+<text x="68" y="484" font-size="16" fill="#42566b">HTML 인라인 이미지 검증</text>
+<text x="68" y="512" font-size="16" fill="#42566b">임시 파일 완성 → 원자적 교체</text>
+<text x="68" y="540" font-size="16" fill="#42566b">발행 파일을 RUN/OPS에 보관</text>
+</g>
+<g data-node="mail"><rect x="48" y="656" width="320" height="144" rx="8" fill="#f3f4f4" stroke="#bcc4cb" stroke-width="1.5"/>
+<text x="68" y="684" font-size="12" fill="#52657a">Main.py</text>
+<text x="68" y="716" font-size="20" font-weight="700">7. 메일 발송</text>
+<text x="68" y="748" font-size="16" fill="#42566b">수신 그룹 해석 → 메일 API</text>
+<text x="68" y="776" font-size="16" fill="#42566b">기존 성공 이력은 재사용</text>
+</g>
+<g data-node="result"><rect x="480" y="656" width="320" height="144" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="500" y="684" font-size="12" fill="#52657a">RUN / OPS</text>
+<text x="500" y="716" font-size="20" font-weight="700">8. 단계별 결과 기록</text>
+<text x="500" y="748" font-size="16" fill="#42566b">생성 / 저장 / 메일을 구분</text>
+<text x="500" y="776" font-size="16" fill="#42566b">Scheduler 및 Watchdog이 확인</text>
+</g>
+<line x1="32" y1="832" x2="1248" y2="832" stroke="#cbd5e1"/>
+<text x="32" y="860" font-size="12" fill="#52657a">실선: 데이터·접근·처리 관계　 ·　 점선: 별도 프로세스 실행　 ·　 파란 테두리: 이 그림의 핵심</text>
+</g></svg></div><div class="notes"><p>번호는 이해를 돕는 논리 단계입니다. 차트 생성과 분석 호출 일부는 코드 안에서 서로 섞여 있습니다.</p><p>Target은 lot_id + step_id로 식별합니다. prime key는 제품 + Lot + Step을 묶는 발행 식별자입니다.</p><p>외부 LLM 없이 코드로 분석합니다. 선택적 DX/S3 업로드는 저장 후 메일 전에 수행합니다.</p></div><p class="downloads"><a href="03-lot-pipeline.svg">SVG 원본</a> · <a href="03-lot-pipeline.mmd">Mermaid 원본</a></p></section><section id="04-trend-ml"><div class="figure"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 912" role="img" aria-labelledby="04-trend-ml-title 04-trend-ml-desc">
+<title id="04-trend-ml-title">전체 추세와 유의한 변화를 나눠 본다</title>
+<desc id="04-trend-ml-desc">Daily Trend와 ML Insight는 데이터 준비를 공유하지만, 선택 기준과 목적이 다릅니다. ML_TABLE은 외부에서 준비된 입력입니다. 이 보고 경로가 원천 ML_TABLE을 생성하지 않습니다. / Daily Trend의 시간/Split 매핑은 설정할 때 사용합니다. ML Insight는 장비 등 진단 정보도 읽습니다. / IF/LOF는 과거 데이터로 학습하고 별도 기준 구간 및 새 측정을 비교합니다. 장비 연관성은 원인 확정이 아닙니다. / with_vehicle는 ML 비교 데이터 확장 옵션입니다. 기본 리포트 판정으로 되먹임하지 않습니다.</desc>
+<defs><marker id="04-trend-ml-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#64748b"/></marker></defs>
+<rect width="1280" height="100%" fill="#f8fafc"/>
+<g font-family="Segoe UI, Malgun Gothic, sans-serif" fill="#172c43">
+<text x="32" y="44" font-size="28" font-weight="700">전체 추세와 유의한 변화를 나눠 본다</text>
+<text x="32" y="80" font-size="16" fill="#52657a">Daily Trend와 ML Insight는 데이터 준비를 공유하지만, 선택 기준과 목적이 다릅니다.</text>
+<path d="M 368 200 L 480 200" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#04-trend-ml-arrow)"/>
+<path d="M 912 200 L 800 200" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#04-trend-ml-arrow)"/>
+<path d="M 560 272 L 560.0 320.0 Q 560 328 552.0 328.0 L 408.0 328.0 Q 400 328 400.0 336.0 L 400 392" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#04-trend-ml-arrow)"/>
+<path d="M 720 272 L 720.0 320.0 Q 720 328 728.0 328.0 L 952.0 328.0 Q 960 328 960.0 336.0 L 960 392" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#04-trend-ml-arrow)"/>
+<path d="M 400 552 L 400 680" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#04-trend-ml-arrow)"/>
+<path d="M 960 552 L 960 680" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#04-trend-ml-arrow)"/>
+<rect x="976.0" y="596" width="112" height="24" fill="#f8fafc"/><text x="1032" y="616" text-anchor="middle" font-size="16" fill="#52657a">유의한 경우</text>
+<g data-node="db"><rect x="48" y="128" width="320" height="144" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="68" y="156" font-size="12" fill="#52657a">daily_trend_load</text>
+<text x="68" y="188" font-size="20" font-weight="700">현재 ET 데이터</text>
+<text x="68" y="220" font-size="16" fill="#42566b">날짜별 Parquet → REAL / ADDP</text>
+<text x="68" y="248" font-size="16" fill="#42566b">제품 viewing_period로 기간 결정</text>
+</g>
+<g data-node="join"><rect x="480" y="128" width="320" height="144" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="500" y="156" font-size="12" fill="#52657a">daily_trend_entries / daily_trend_ml</text>
+<text x="500" y="188" font-size="20" font-weight="700">비교 가능한 항목 구성</text>
+<text x="500" y="220" font-size="16" fill="#42566b">CAT2 선택 · Step/프로그램/온도</text>
+<text x="500" y="248" font-size="16" fill="#42566b">ML_TABLE의 시간·Split 정보 결합</text>
+</g>
+<g data-node="meta"><rect x="912" y="128" width="320" height="144" rx="8" fill="#f3f4f4" stroke="#bcc4cb" stroke-width="1.5"/>
+<text x="932" y="156" font-size="12" fill="#52657a">ML_TABLE_&lt;vehicle&gt;.parquet</text>
+<text x="932" y="188" font-size="20" font-weight="700">외부 준비 ML_TABLE</text>
+<text x="932" y="220" font-size="16" fill="#42566b">Lot · Wafer 키로 결합</text>
+<text x="932" y="248" font-size="16" fill="#42566b">모호한 중복 키는 제외</text>
+</g>
+<g data-node="daily"><rect x="224" y="392" width="352" height="160" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="244" y="420" font-size="12" fill="#52657a">정기 리뷰</text>
+<text x="244" y="452" font-size="20" font-weight="700">Daily Trend · 전체 보기</text>
+<text x="244" y="484" font-size="16" fill="#42566b">선택된 Category의 전체 항목</text>
+<text x="244" y="512" font-size="16" fill="#42566b">당일 측정 강조 · Split별 색상</text>
+<text x="244" y="540" font-size="16" fill="#42566b">Trend와 Spec 경계를 시각화</text>
+</g>
+<g data-node="ml"><rect x="736" y="392" width="448" height="160" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="756" y="420" font-size="12" fill="#52657a">통계·모델 분석</text>
+<text x="756" y="452" font-size="20" font-weight="700">ML Insight · 변화 선별</text>
+<text x="756" y="484" font-size="16" fill="#42566b">Split / 시간 / Spike + IF · LOF</text>
+<text x="756" y="512" font-size="16" fill="#42566b">장비 차이 · 공간 패턴 진단</text>
+<text x="756" y="540" font-size="16" fill="#42566b">FDR 보정 + 효과 크기로 선별</text>
+</g>
+<g data-node="dailyout"><rect x="224" y="680" width="352" height="144" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="244" y="708" font-size="12" fill="#52657a">OUTPUT</text>
+<text x="244" y="740" font-size="20" font-weight="700">전체 항목 보고</text>
+<text x="244" y="772" font-size="16" fill="#42566b">HTML + PPT 분할 발행</text>
+<text x="244" y="800" font-size="16" fill="#42566b">항목·진단 목록은 catalog.csv</text>
+</g>
+<g data-node="mlout"><rect x="736" y="680" width="448" height="160" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="756" y="708" font-size="12" fill="#52657a">OUTPUT</text>
+<text x="756" y="740" font-size="20" font-weight="700">탐지 항목 보고</text>
+<text x="756" y="772" font-size="16" fill="#42566b">유의 항목 + 공간 상세 패널</text>
+<text x="756" y="800" font-size="16" fill="#42566b">탐지 없음은 no_findings 기록</text>
+<text x="756" y="828" font-size="16" fill="#42566b">자료 부족·누락은 별도 진단 확인</text>
+</g>
+<line x1="32" y1="864" x2="1248" y2="864" stroke="#cbd5e1"/>
+<text x="32" y="892" font-size="12" fill="#52657a">실선: 데이터·접근·처리 관계　 ·　 점선: 별도 프로세스 실행　 ·　 파란 테두리: 이 그림의 핵심</text>
+</g></svg></div><div class="notes"><p>ML_TABLE은 외부에서 준비된 입력입니다. 이 보고 경로가 원천 ML_TABLE을 생성하지 않습니다.</p><p>Daily Trend의 시간/Split 매핑은 설정할 때 사용합니다. ML Insight는 장비 등 진단 정보도 읽습니다.</p><p>IF/LOF는 과거 데이터로 학습하고 별도 기준 구간 및 새 측정을 비교합니다. 장비 연관성은 원인 확정이 아닙니다.</p><p>with_vehicle는 ML 비교 데이터 확장 옵션입니다. 기본 리포트 판정으로 되먹임하지 않습니다.</p></div><p class="downloads"><a href="04-trend-ml.svg">SVG 원본</a> · <a href="04-trend-ml.mmd">Mermaid 원본</a></p></section><section id="05-delivery"><div class="figure"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 928" role="img" aria-labelledby="05-delivery-title 05-delivery-desc">
+<title id="05-delivery-title">메일 응답을 잃었다면, 성공도 실패도 단정하지 않는다</title>
+<desc id="05-delivery-desc">발송 상태 흐름 · 저장된 원본과 영속 이력이 중복 발송을 줄이는 기준입니다. HTTP 200은 메일 API 성공 응답이며, 수신자의 열람 확인을 뜻하지 않습니다. / HTTP 4xx 등 확인된 요청 거부와 전송 전 파일·설정 오류는 failed입니다. 전송 후 응답을 확정하지 못한 예외와 5xx는 unknown이며 자동 재전송하지 않습니다. / 기본 AUTO는 use_email_send를 확인합니다. Daily Trend / ML / Watchdog은 각 서비스의 발송 조건을 사용합니다. / Watchdog은 관측된 실행 결과를 보고합니다. 기록이 없으면 정상이나 성공으로 추정하지 않습니다.</desc>
+<defs><marker id="05-delivery-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#64748b"/></marker></defs>
+<rect width="1280" height="100%" fill="#f8fafc"/>
+<g font-family="Segoe UI, Malgun Gothic, sans-serif" fill="#172c43">
+<text x="32" y="44" font-size="28" font-weight="700">메일 응답을 잃었다면, 성공도 실패도 단정하지 않는다</text>
+<text x="32" y="80" font-size="16" fill="#52657a">발송 상태 흐름 · 저장된 원본과 영속 이력이 중복 발송을 줄이는 기준입니다.</text>
+<path d="M 368 216 L 480 216" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#05-delivery-arrow)"/>
+<path d="M 800 216 L 912 216" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#05-delivery-arrow)"/>
+<rect x="816.0" y="172" width="80" height="24" fill="#f8fafc"/><text x="856" y="192" text-anchor="middle" font-size="16" fill="#52657a">새 시도</text>
+<path d="M 960 288 L 960.0 336.0 Q 960 344 952.0 344.0 L 216.0 344.0 Q 208 344 208.0 352.0 L 208 432" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#05-delivery-arrow)"/>
+<rect x="272.0" y="300" width="64" height="24" fill="#f8fafc"/><text x="304" y="320" text-anchor="middle" font-size="16" fill="#52657a">200</text>
+<path d="M 1072 288 L 1072.0 368.0 Q 1072 376 1064.0 376.0 L 648.0 376.0 Q 640 376 640.0 384.0 L 640 432" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#05-delivery-arrow)"/>
+<path d="M 1184 288 L 1184 432" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#05-delivery-arrow)"/>
+<path d="M 208 576 L 208.0 648.0 Q 208 656 216.0 656.0 L 552.0 656.0 Q 560 656 560.0 664.0 L 560 712" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#05-delivery-arrow)"/>
+<path d="M 640 576 L 640 712" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#05-delivery-arrow)"/>
+<path d="M 1072 576 L 1072.0 648.0 Q 1072 656 1064.0 656.0 L 728.0 656.0 Q 720 656 720.0 664.0 L 720 712" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#05-delivery-arrow)"/>
+<g data-node="files"><rect x="48" y="144" width="320" height="144" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="68" y="172" font-size="12" fill="#52657a">SAVED ARTIFACTS</text>
+<text x="68" y="204" font-size="20" font-weight="700">발행 원본 확보</text>
+<text x="68" y="236" font-size="16" fill="#42566b">HTML / PPT 또는 운영 CSV</text>
+<text x="68" y="264" font-size="16" fill="#42566b">발행 ID와 수신 대상 기준</text>
+</g>
+<g data-node="history"><rect x="480" y="144" width="320" height="144" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="500" y="172" font-size="12" fill="#52657a">operations.sqlite / mail</text>
+<text x="500" y="204" font-size="20" font-weight="700">이전 발송 상태 확인</text>
+<text x="500" y="236" font-size="16" fill="#42566b">sent → 성공 결과 재사용</text>
+<text x="500" y="264" font-size="16" fill="#42566b">sending / unknown → 확인 필요</text>
+</g>
+<g data-node="send"><rect x="912" y="144" width="320" height="144" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="932" y="172" font-size="12" fill="#52657a">_durable_mail</text>
+<text x="932" y="204" font-size="20" font-weight="700">발송 시작 기록 → API</text>
+<text x="932" y="236" font-size="16" fill="#42566b">sending을 먼저 저장</text>
+<text x="932" y="264" font-size="16" fill="#42566b">그 다음 메일 요청</text>
+</g>
+<g data-node="sent"><rect x="48" y="432" width="320" height="144" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="68" y="460" font-size="12" fill="#52657a">SUCCESS</text>
+<text x="68" y="492" font-size="20" font-weight="700">sent · 성공 응답</text>
+<text x="68" y="524" font-size="16" fill="#42566b">메일 API HTTP 200 확인</text>
+<text x="68" y="552" font-size="16" fill="#42566b">동일 발송은 다시 보내지 않음</text>
+</g>
+<g data-node="retry"><rect x="480" y="432" width="320" height="144" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="500" y="460" font-size="12" fill="#52657a">RETRY CANDIDATE</text>
+<text x="500" y="492" font-size="20" font-weight="700">retryable · 전송 전 실패</text>
+<text x="500" y="524" font-size="16" fill="#42566b">연결 timeout</text>
+<text x="500" y="552" font-size="16" fill="#42566b">설정된 시도 한도 안에서 재시도</text>
+</g>
+<g data-node="unknown"><rect x="912" y="432" width="320" height="144" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="932" y="460" font-size="12" fill="#52657a">NEEDS CONFIRMATION</text>
+<text x="932" y="492" font-size="20" font-weight="700">unknown · 응답 불확실</text>
+<text x="932" y="524" font-size="16" fill="#42566b">응답 timeout / 연결 단절 / 5xx</text>
+<text x="932" y="552" font-size="16" fill="#42566b">자동 재전송 대신 수신 이력 확인</text>
+</g>
+<g data-node="ops"><rect x="480" y="712" width="320" height="128" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="500" y="740" font-size="12" fill="#52657a">OBSERVABILITY</text>
+<text x="500" y="772" font-size="20" font-weight="700">운영 상태에 남김</text>
+<text x="500" y="804" font-size="16" fill="#42566b">발행 결과 · 시도 수 · 단계 시간</text>
+<text x="500" y="832" font-size="16" fill="#42566b">Watchdog이 생성/저장/메일 구분</text>
+</g>
+<line x1="32" y1="880" x2="1248" y2="880" stroke="#cbd5e1"/>
+<text x="32" y="908" font-size="12" fill="#52657a">실선: 데이터·접근·처리 관계　 ·　 점선: 별도 프로세스 실행　 ·　 파란 테두리: 이 그림의 핵심</text>
+</g></svg></div><div class="notes"><p>HTTP 200은 메일 API 성공 응답이며, 수신자의 열람 확인을 뜻하지 않습니다.</p><p>HTTP 4xx 등 확인된 요청 거부와 전송 전 파일·설정 오류는 failed입니다. 전송 후 응답을 확정하지 못한 예외와 5xx는 unknown이며 자동 재전송하지 않습니다.</p><p>기본 AUTO는 use_email_send를 확인합니다. Daily Trend / ML / Watchdog은 각 서비스의 발송 조건을 사용합니다.</p><p>Watchdog은 관측된 실행 결과를 보고합니다. 기록이 없으면 정상이나 성공으로 추정하지 않습니다.</p></div><p class="downloads"><a href="05-delivery.svg">SVG 원본</a> · <a href="05-delivery.mmd">Mermaid 원본</a></p></section><div class="intro"><h2>네 가지 결과를 구분해서 읽기</h2><table><thead><tr><th>경로</th><th>무엇을 보나</th><th>목적</th><th>산출물</th></tr></thead><tbody><tr><td>Auto Report</td><td>지금 완료된 Lot · Step</td><td>개별 품질 리포트</td><td>HTML + PPT</td></tr><tr><td>Daily Trend</td><td>선택 Category 전체 항목</td><td>일일 변화 검토</td><td>HTML + PPT</td></tr><tr><td>ML Insight</td><td>통계·모델이 선별한 항목</td><td>유의한 변화 조사</td><td>HTML + PPT / 탐지 없으면 생략</td></tr><tr><td>Watchdog</td><td>실행 기록·발행 결과</td><td>운영 누락·실패 확인</td><td>HTML + CSV</td></tr></tbody></table><p>그림에 표시된 서비스가 모두 운영 중이라는 뜻은 아닙니다. 일일 서비스는 제품·수신처·활성 설정에 따라 실행됩니다.</p><h2>왜 이 표현 방식을 선택했나</h2><p>C4의 전체/내부 구분, <a href="https://github.com/cathrynlavery/diagram-design">diagram-design</a>의 시각 구성, 편집 가능한 Mermaid를 조합했습니다. <a href="https://mermaid.js.org/syntax/c4.html">Mermaid의 native C4 문법은 실험적</a>이므로 원본에는 표준 flowchart를 사용했습니다.</p><p><a href="auto-report-architecture.md">Mermaid 전체 · 용어 · 코드 근거 문서</a></p></div></main><footer>Auto Report 설치 가이드 · 2026-09-30 실행 잠금·큐 설명 보완. 도식은 업무 역할·프로세스 경계를 표시합니다. 활성 서비스와 수신처는 운영 설정을 확인하세요.<br>HTML은 외부 글꼴·스크립트 없이 열립니다. SVG는 확대해도 선명합니다. 설치 폴더의 docs/guide에서 다시 열 수 있습니다.</footer></html>

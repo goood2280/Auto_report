@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 912" role="img" aria-labelledby="04-trend-ml-title 04-trend-ml-desc">
+<title id="04-trend-ml-title">전체 추세와 유의한 변화를 나눠 본다</title>
+<desc id="04-trend-ml-desc">Daily Trend와 ML Insight는 데이터 준비를 공유하지만, 선택 기준과 목적이 다릅니다. ML_TABLE은 외부에서 준비된 입력입니다. 이 보고 경로가 원천 ML_TABLE을 생성하지 않습니다. / Daily Trend의 시간/Split 매핑은 설정할 때 사용합니다. ML Insight는 장비 등 진단 정보도 읽습니다. / IF/LOF는 과거 데이터로 학습하고 별도 기준 구간 및 새 측정을 비교합니다. 장비 연관성은 원인 확정이 아닙니다. / with_vehicle는 ML 비교 데이터 확장 옵션입니다. 기본 리포트 판정으로 되먹임하지 않습니다.</desc>
+<defs><marker id="04-trend-ml-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#64748b"/></marker></defs>
+<rect width="1280" height="100%" fill="#f8fafc"/>
+<g font-family="Segoe UI, Malgun Gothic, sans-serif" fill="#172c43">
+<text x="32" y="44" font-size="28" font-weight="700">전체 추세와 유의한 변화를 나눠 본다</text>
+<text x="32" y="80" font-size="16" fill="#52657a">Daily Trend와 ML Insight는 데이터 준비를 공유하지만, 선택 기준과 목적이 다릅니다.</text>
+<path d="M 368 200 L 480 200" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#04-trend-ml-arrow)"/>
+<path d="M 912 200 L 800 200" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#04-trend-ml-arrow)"/>
+<path d="M 560 272 L 560.0 320.0 Q 560 328 552.0 328.0 L 408.0 328.0 Q 400 328 400.0 336.0 L 400 392" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#04-trend-ml-arrow)"/>
+<path d="M 720 272 L 720.0 320.0 Q 720 328 728.0 328.0 L 952.0 328.0 Q 960 328 960.0 336.0 L 960 392" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#04-trend-ml-arrow)"/>
+<path d="M 400 552 L 400 680" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#04-trend-ml-arrow)"/>
+<path d="M 960 552 L 960 680" fill="none" stroke="#64748b" stroke-width="2"  marker-end="url(#04-trend-ml-arrow)"/>
+<rect x="976.0" y="596" width="112" height="24" fill="#f8fafc"/><text x="1032" y="616" text-anchor="middle" font-size="16" fill="#52657a">유의한 경우</text>
+<g data-node="db"><rect x="48" y="128" width="320" height="144" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="68" y="156" font-size="12" fill="#52657a">daily_trend_load</text>
+<text x="68" y="188" font-size="20" font-weight="700">현재 ET 데이터</text>
+<text x="68" y="220" font-size="16" fill="#42566b">날짜별 Parquet → REAL / ADDP</text>
+<text x="68" y="248" font-size="16" fill="#42566b">제품 viewing_period로 기간 결정</text>
+</g>
+<g data-node="join"><rect x="480" y="128" width="320" height="144" rx="8" fill="#fff" stroke="#bac7d4" stroke-width="1.5"/>
+<text x="500" y="156" font-size="12" fill="#52657a">daily_trend_entries / daily_trend_ml</text>
+<text x="500" y="188" font-size="20" font-weight="700">비교 가능한 항목 구성</text>
+<text x="500" y="220" font-size="16" fill="#42566b">CAT2 선택 · Step/프로그램/온도</text>
+<text x="500" y="248" font-size="16" fill="#42566b">ML_TABLE의 시간·Split 정보 결합</text>
+</g>
+<g data-node="meta"><rect x="912" y="128" width="320" height="144" rx="8" fill="#f3f4f4" stroke="#bcc4cb" stroke-width="1.5"/>
+<text x="932" y="156" font-size="12" fill="#52657a">ML_TABLE_&lt;vehicle&gt;.parquet</text>
+<text x="932" y="188" font-size="20" font-weight="700">외부 준비 ML_TABLE</text>
+<text x="932" y="220" font-size="16" fill="#42566b">Lot · Wafer 키로 결합</text>
+<text x="932" y="248" font-size="16" fill="#42566b">모호한 중복 키는 제외</text>
+</g>
+<g data-node="daily"><rect x="224" y="392" width="352" height="160" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="244" y="420" font-size="12" fill="#52657a">정기 리뷰</text>
+<text x="244" y="452" font-size="20" font-weight="700">Daily Trend · 전체 보기</text>
+<text x="244" y="484" font-size="16" fill="#42566b">선택된 Category의 전체 항목</text>
+<text x="244" y="512" font-size="16" fill="#42566b">당일 측정 강조 · Split별 색상</text>
+<text x="244" y="540" font-size="16" fill="#42566b">Trend와 Spec 경계를 시각화</text>
+</g>
+<g data-node="ml"><rect x="736" y="392" width="448" height="160" rx="8" fill="#eaf3f8" stroke="#24658a" stroke-width="1.5"/>
+<text x="756" y="420" font-size="12" fill="#52657a">통계·모델 분석</text>
+<text x="756" y="452" font-size="20" font-weight="700">ML Insight · 변화 선별</text>
+<text x="756" y="484" font-size="16" fill="#42566b">Split / 시간 / Spike + IF · LOF</text>
+<text x="756" y="512" font-size="16" fill="#42566b">장비 차이 · 공간 패턴 진단</text>
+<text x="756" y="540" font-size="16" fill="#42566b">FDR 보정 + 효과 크기로 선별</text>
+</g>
+<g data-node="dailyout"><rect x="224" y="680" width="352" height="144" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="244" y="708" font-size="12" fill="#52657a">OUTPUT</text>
+<text x="244" y="740" font-size="20" font-weight="700">전체 항목 보고</text>
+<text x="244" y="772" font-size="16" fill="#42566b">HTML + PPT 분할 발행</text>
+<text x="244" y="800" font-size="16" fill="#42566b">항목·진단 목록은 catalog.csv</text>
+</g>
+<g data-node="mlout"><rect x="736" y="680" width="448" height="160" rx="8" fill="#eef2f6" stroke="#8b9aab" stroke-width="1.5"/>
+<text x="756" y="708" font-size="12" fill="#52657a">OUTPUT</text>
+<text x="756" y="740" font-size="20" font-weight="700">탐지 항목 보고</text>
+<text x="756" y="772" font-size="16" fill="#42566b">유의 항목 + 공간 상세 패널</text>
+<text x="756" y="800" font-size="16" fill="#42566b">탐지 없음은 no_findings 기록</text>
+<text x="756" y="828" font-size="16" fill="#42566b">자료 부족·누락은 별도 진단 확인</text>
+</g>
+<line x1="32" y1="864" x2="1248" y2="864" stroke="#cbd5e1"/>
+<text x="32" y="892" font-size="12" fill="#52657a">실선: 데이터·접근·처리 관계　 ·　 점선: 별도 프로세스 실행　 ·　 파란 테두리: 이 그림의 핵심</text>
+</g></svg>

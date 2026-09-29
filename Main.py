@@ -23,6 +23,10 @@ import pandas as pd
 import requests
 
 # ----- 프로젝트 내부 모듈
+# 기본 설치는 보조 모듈을 ZIP에서 읽는다. 추출한 개발 소스가 있으면 그것이 우선한다.
+_runtime_zip = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'auto_report_runtime.zip')
+if os.path.isfile(_runtime_zip) and _runtime_zip not in sys.path:
+    sys.path.append(_runtime_zip)
 # NOTE: bigdataquery는 Main에서 직접 쓰지 않으므로 import하지 않는다.
 #   (병렬 렌더링 워커가 __main__=Main을 재import할 때 무거운 bigdataquery 재import·안내문
 #    출력이 매번 발생하던 문제 방지 — 실제 쿼리는 My_Function 내부에서 지연 import한다.)
@@ -845,7 +849,7 @@ def _durable_mail(identity, recipients, title, html_path, ppt_path, config):
         record['status']='sent' if code==200 else ('unknown' if code>=500 else 'failed')
         record['reason']=f'HTTP {code}'
         if code!=200:
-            # 메일 API 의 거부 사유(예: 'Attach file count is over 10')를 이력에 남긴다 — 관리 화면이 쉬운 말로 옮긴다.
+            # 메일 API의 거부 사유(예: 'Attach file count is over 10')를 운영 이력에 남긴다.
             try:record['reason']+=' '+re.sub(r'\s+',' ',str(response.text or ''))[:300]
             except Exception:pass
     except requests.exceptions.ConnectTimeout:
@@ -941,7 +945,7 @@ def _main_impl(command=None):
     # config.yaml에서 설정 로드
     GLOBAL_CONFIG.load_from_yaml(vehicle_name)
     explicit_mail = _apply_command_settings(command, GLOBAL_CONFIG)
-    # 관리 화면의 생성 전용 요청은 이 자식 프로세스에만 적용한다.
+    # 큐의 생성 전용 요청은 이 자식 프로세스에만 적용한다.
     if os.getenv('AUTO_REPORT_GENERATE_ONLY') == '1':
         GLOBAL_CONFIG.settings.update(use_email_send=False, use_s3_upload=False)
     if explicit_mail:
@@ -4488,18 +4492,41 @@ def _watchdog_report(request):
     return result
 
 
+def _execution_wait_sec():
+    import math
+    value = float(os.getenv('AUTO_REPORT_EXECUTION_WAIT_SEC',
+                           str(GLOBAL_CONFIG.get('execution_lock_wait_sec', 10800))))
+    if not math.isfinite(value) or value < 0:
+        raise ValueError('execution_lock_wait_sec는 유한한 0 이상의 초여야 합니다')
+    return value
+
+
+def _execute_serially(action):
+    """모든 무거운 작업을 직렬화하고 렌더 워커까지 종료한 뒤 잠금을 반납한다."""
+    path = os.path.join(operations_root(), 'locks', 'executor.lock')
+    with process_lock(path, wait_sec=_execution_wait_sec()):
+        try:
+            return action()
+        finally:
+            # 다른 제품 작업이 시작될 때 이전 작업의 워커·메모리가 남지 않아야 한다.
+            try:
+                _drain_uploads(block=True)
+            finally:
+                shutdown_chart_pool()
+
+
 def main():
     global _RUN
     argument=sys.argv[1] if len(sys.argv)>1 else ''
     if argument=='--mlmode-evaluate':
         destination=os.path.join(operations_root(),'mlmode_evaluation',datetime.now().strftime('%Y%m%d-%H%M%S'))
-        report=mlmode_evaluate(dict(GLOBAL_CONFIG.mlmode),destination)
+        report=_execute_serially(lambda: mlmode_evaluate(dict(GLOBAL_CONFIG.mlmode),destination))
         print(f"[INFO] ML Lab 가상 데이터 검증 완료: {destination} / {report['ensemble']}")
         return 0
     if argument=='--daily-trend-report':
         import json
         with open(sys.argv[2],encoding='utf-8') as stream:request=json.load(stream)
-        result=_daily_trend_report(request)
+        result=_execute_serially(lambda: _daily_trend_report(request))
         return 0 if result['status'] in ('sent','preview','no_findings','insufficient_data','disabled','skipped') else 1
     if argument=='--watchdog-report':
         import json
@@ -4509,22 +4536,23 @@ def main():
     command = _parse_command(sys.argv[1:])
     argument = command['argument']
     _RUN=OperationRun(argument)
-    try:
+    def execute():
         _,vehicle,_,_,_=_parse_trigger(argument)
         lock_name=re.sub(r'[^A-Za-z0-9_.-]','_',vehicle)
-        # 같은 제품을 다른 bash·Scheduler 가 돌리는 중이면 실패하지 않고 끝날 때까지 기다린다.
         wait=float(getattr(GLOBAL_CONFIG,'product_lock_wait_sec',3600) or 0)
         with process_lock(os.path.join(operations_root(),'locks',lock_name+'.lock'),wait_sec=wait):
+            _RUN.stage('startup')
             _main_impl(command)
             _drain_uploads(block=True)
             return _RUN.finish()
+    try:
+        _RUN.stage('waiting_execution')
+        return _execute_serially(execute)
     except BaseException as exc:
         try:_drain_uploads(block=True)
         except Exception:pass
         _RUN.finish(exc)
         raise
-    finally:
-        shutdown_chart_pool()
 
 
 if __name__ == "__main__":

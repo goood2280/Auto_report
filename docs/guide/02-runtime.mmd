@@ -1,0 +1,21 @@
+flowchart TB
+  scheduler["Scheduler · 제품 순회<br/>주기별 AUTO / 수동 요청<br/>그룹 순회 · 큐 중복 검사"]
+  main["Main · Lot 리포트<br/>제품별 별도 프로세스<br/>종료 코드 + 결과 JSON 확인"]
+  dt["Daily Trend 타이머<br/>독립 프로세스 · 조건부 기동"]
+  dtworker["Main · Daily Trend<br/>service = daily_trend"]
+  mt["ML Insight 타이머<br/>독립 프로세스 · 조건부 기동"]
+  mtworker["Main · ML Insight<br/>service = mlmode"]
+  wt["Watchdog 감시 루프<br/>heartbeat · progress 확인"]
+  wtworker["Main · 운영 보고<br/>정해진 시각 / 설정된 알림 조건"]
+  store["공유 파일 · 상태 저장<br/>RUN/QUEUE<br/>요청 / 이력 / 순회 위상<br/>RUN/DB<br/>날짜별 측정 Parquet<br/>RUN/OPS<br/>operations.sqlite<br/>실행별 결과 / heartbeat<br/>발행 원본 / 발송 이력<br/>같은 운영 서버의 로컬 저장"]
+  scheduler -.->|"별도 실행"| main
+  dt -.->|"별도 실행"| dtworker
+  mt -.->|"별도 실행"| mtworker
+  wt -.->|"별도 실행"| wtworker
+  main -->|"읽기·기록"| store
+  dtworker -->|"읽기·기록"| store
+  mtworker -->|"읽기·기록"| store
+  wtworker -->|"읽기·기록"| store
+  classDef focus fill:#eaf3f8,stroke:#24658a,stroke-width:2px
+  class scheduler focus
+  class wt focus
