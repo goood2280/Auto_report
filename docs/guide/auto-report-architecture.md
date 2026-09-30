@@ -64,7 +64,7 @@ flowchart TB
 
 - 상시 Scheduler가 활성화된 독립 타이머를 기동합니다. --once / --drain은 자동 기동하지 않습니다.
 - OpenCode는 --enqueue로 inbox에 접수합니다. 현재 Main을 선점하지 않고 제품 사이에서 처리하며 pending→active→결과를 영속 기록합니다.
-- 일반/수동/적재/Daily/ML Main은 같은 RUN/OPS/locks/executor.lock을 기다립니다. 별도 타이머는 동시 대형 분석을 뜻하지 않습니다. Watchdog은 가벼운 조회로 분리합니다.
+- 일반/수동 보고서/Daily/ML Main은 같은 RUN/OPS/locks/executor.lock을 기다립니다. DB setting 전용 TRIGGER/--init-db는 executor를 우회하며 제품 잠금과 공용 자원 한도를 유지합니다. Watchdog은 가벼운 조회로 분리합니다.
 - 최신 대기 예산·복구·unknown·권한 경계는 [README](../../README.md)와 [큐 계약](../SCHEDULER_TRIGGER_CONTRACT.md)을 확인합니다.
 - 그림의 읽기·기록 화살표는 접근 관계입니다. 모든 워커가 모든 저장소를 쓰는 뜻은 아닙니다.
 - Watchdog은 Scheduler와 별도 프로세스지만 같은 서버에 있습니다. 서버가 꺼지면 감시 메일도 보낼 수 없습니다.

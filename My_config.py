@@ -855,7 +855,9 @@ class Config:
         self.duckdb_memory_fraction = 0.5
         self.duckdb_memory_limit_gb = 0
         self.s3_upload_threads = 2            # S3 전송 백그라운드 스레드(다음 Lot 렌더링과 겹쳐 수행)
-        self.execution_lock_wait_sec = 10800  # 제품 순회·수동 발행·Daily/ML 전체의 공통 실행 잠금 대기(초)
+        self.db_setting_days = 200            # DB setting 적재 기간(오늘 포함); --days로 이번 실행만 변경
+        self.db_setting_parallel = 1          # 병렬 ET 조회 요청 상한; --parallel로 변경, 공용 자원 한도 적용
+        self.execution_lock_wait_sec = 10800  # 제품 순회·수동 발행·Daily/ML의 공통 잠금(DB setting 전용 CLI 제외)
         self.product_lock_wait_sec = 3600     # 같은 제품 작업이 실행 중이면 기다리는 최대 시간(초, 0=즉시 실패)
 
         # ──────────────────────────────────────────────────────

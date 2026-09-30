@@ -162,7 +162,8 @@ def test_init_db_command_uses_200_day_full_refresh_without_delivery(tmp_path, mo
     assert main._apply_command_settings(command, cfg) is None
     assert cfg.settings == dict(vehicle='TEST', SplitTimeSpan=3, QueryTimeSpan=200, now_minus=0,
                                 test_mode=False, report_making=False, use_email_send=False,
-                                use_s3_upload=False, DB_Setting_mode=True, et_force_full_refresh=True)
+                                use_s3_upload=False, DB_Setting_mode=True, et_force_full_refresh=True,
+                                db_setting_parallel=1)
 
 
 def test_init_forces_200_days_despite_previous_incremental_refresh(tmp_path, monkeypatch):

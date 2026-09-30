@@ -367,11 +367,16 @@ def _img_datauri(raw, max_kb=None):
 
 
 def _parse_trigger(argument):
-    """TRIGGER[_MODE[_mail]]_<vehicle>_<lot>_<step>; leading underscore optional."""
+    """Report TRIGGER or DB_SETTING_<vehicle>; leading underscore optional."""
     value = argument[1:] if argument.startswith('_') else argument
     if not value.startswith('TRIGGER_'):
         return None, argument, None, None, None
     value = value[len('TRIGGER_'):]
+    if value.startswith('DB_SETTING_'):
+        vehicle = value[len('DB_SETTING_'):].strip()
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', vehicle):
+            raise ValueError('DB setting 형식: _TRIGGER_DB_SETTING_<vehicle> --days N --parallel N')
+        return 'DB_SETTING', vehicle, None, None, None
     mode = 'TRIGGER'
     for candidate in ('FORCE', 'NORMAL', 'ALL', 'SINGLE'):
         if value.startswith(candidate + '_'):
@@ -884,19 +889,38 @@ def _parse_command(arguments):
     import argparse
     parser = argparse.ArgumentParser(description='Auto Report: DB 초기 적재 및 지정 수신처 발행')
     action = parser.add_mutually_exclusive_group()
-    action.add_argument('--init-db', metavar='VEHICLE', help='최근 200일 DB 적재 (리포트/메일 없음)')
+    action.add_argument('--init-db', metavar='VEHICLE', help='DB setting 적재 (기본 200일, 리포트/메일 없음)')
     action.add_argument('--send-user', metavar='USER', help='엑셀을 읽지 않고 USER@samsung.com 한 명에게만 발송')
     parser.add_argument('--prime-key', help='발행 대상 vehicle_lot_step')
     parser.add_argument('--single', action='store_true', help='viewing_period 없이 대상 lot/step ET만 조회')
+    def positive_int(value):
+        number = int(value)
+        if number < 1:
+            raise argparse.ArgumentTypeError('1 이상의 정수를 지정하세요')
+        return number
+    parser.add_argument('--days', type=positive_int, help='DB setting 적재 일수 (오늘 포함, 기본 db_setting_days=200)')
+    parser.add_argument('--parallel', type=positive_int, help='DB setting 병렬 조회 수 상한 (기본 db_setting_parallel=1)')
     parser.add_argument('legacy', nargs='?', help='기존 vehicle 또는 _TRIGGER 명령')
     args = parser.parse_args(arguments)
-    if args.init_db is not None:
-        if args.legacy or args.prime_key or args.single:
+    db_trigger = None
+    if args.legacy and args.legacy.lstrip('_').startswith('TRIGGER_DB_SETTING_'):
+        try:
+            _, db_trigger, _, _, _ = _parse_trigger(args.legacy)
+        except ValueError as exc:
+            parser.error(str(exc))
+    if args.init_db is not None or db_trigger is not None:
+        if (args.init_db is not None and args.legacy) or args.prime_key or args.single or args.send_user:
             parser.error('--init-db는 제품명만 지정합니다')
-        vehicle = args.init_db.strip()
-        if not vehicle or _parse_trigger(vehicle)[0] is not None:
+        vehicle = (args.init_db if args.init_db is not None else db_trigger).strip()
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', vehicle) or _parse_trigger(vehicle)[0] is not None:
             parser.error('--init-db에는 TRIGGER 대신 제품명을 지정합니다')
-        return dict(argument=vehicle, kind='init_db', recipient=None)
+        command = dict(argument=vehicle, kind='init_db', recipient=None)
+        for key in ('days', 'parallel'):
+            if getattr(args, key) is not None:
+                command[key] = getattr(args, key)
+        return command
+    if args.days is not None or args.parallel is not None:
+        parser.error('--days/--parallel은 DB setting 적재에서만 사용합니다')
     if args.send_user is not None:
         if args.legacy or not args.prime_key:
             parser.error('지정 발송에는 --prime-key vehicle_lot_step이 필요합니다')
@@ -917,12 +941,18 @@ def _parse_command(arguments):
 def _apply_command_settings(command, config):
     """YAML은 변경하지 않고 이번 실행의 적재·발송 설정만 적용한다."""
     if command['kind'] == 'init_db':
-        config.settings.update(DB_Setting_mode=True, QueryTimeSpan=200, now_minus=0,
+        days = command.get('days', config.get('db_setting_days', 200))
+        parallel = command.get('parallel', config.get('db_setting_parallel', 1))
+        if any(type(value) is not int or value < 1 for value in (days, parallel)):
+            raise ValueError('db_setting_days/db_setting_parallel은 1 이상의 정수여야 합니다')
+        config.settings.update(DB_Setting_mode=True, QueryTimeSpan=days, now_minus=0,
+                               db_setting_parallel=parallel,
                                test_mode=False, report_making=False, use_email_send=False,
                                use_s3_upload=False, et_force_full_refresh=True)
         if config.get('SplitTimeSpan') is None:
             config.settings['SplitTimeSpan'] = 7
-        print('[INFO] DB 초기 적재: 오늘 포함 최근 200일, 전체 조회, 리포트/메일/S3 비활성')
+        print(f'[INFO] DB setting: 오늘 포함 최근 {days}일, 병렬 요청 상한 {parallel}, '
+              '전체 조회, 리포트/메일/S3 비활성, executor 잠금 우회')
         return None
     if command['kind'] != 'person':
         return None
@@ -950,6 +980,16 @@ def _main_impl(command=None):
         GLOBAL_CONFIG.settings.update(use_email_send=False, use_s3_upload=False)
     if explicit_mail:
         trigger_mail = explicit_mail
+
+    if command['kind'] == 'init_db':
+        # 적재 전용 경로: WIP/발행 상태/렌더링을 건드리지 않는다.
+        _LOG_PATH = GLOBAL_CONFIG.get('unified_log') or GLOBAL_CONFIG.get('loop_log')
+        builtins.print = _run_log_print
+        _RUN.data['vehicle'] = GLOBAL_CONFIG.get('vehicle')
+        _RUN.stage('et_query')
+        _RUN.data['db_setting'] = etdata_query()
+        print_status('DB setting 적재', 'ok', '날짜별 원시 DB와 ET 로그 반영 완료')
+        return
 
     # =============================================== Config get ==================================================================
 
@@ -4546,6 +4586,9 @@ def main():
             _drain_uploads(block=True)
             return _RUN.finish()
     try:
+        if command['kind'] == 'init_db':
+            _RUN.stage('waiting_product')
+            return execute()
         _RUN.stage('waiting_execution')
         return _execute_serially(execute)
     except BaseException as exc:

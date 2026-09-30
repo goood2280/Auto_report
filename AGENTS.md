@@ -26,7 +26,7 @@
 |---|---|
 | “어떤 로그 있어?”, “왜 실패했어?”, “진행 중이야?” | 상태·대상 로그·읽기 전용 운영 이력 조회. 발행/적재/재시작 없음 |
 | “이 Lot 재발행해줘”, “파일만 만들어줘” | 제품/Lot/Step/분석 범위/발송 의도 확인 → Scheduler 큐 1건 접수 → 결과 추적 |
-| “새 제품 DB 쌓아줘” | 요청 기간 확인 → `kind=init_db` 큐. 기존 CLI는 최근 200일 초기 적재임을 설명 |
+| “새 제품 DB 쌓아줘” | 요청 기간·병렬 수 확인 → `kind=init_db` 큐 또는 승인한 DB setting 전용 CLI. 기본 200일·직렬 조회 |
 | “이 기능 고쳐줘” | 소스 차이 확인 → 최소 변경 → 관련 오프라인 검증 → 번들 재생성 → 임시 설치 검증 |
 
 - 운영 작업은 명령을 안내하는 데서 끝내지 않고 승인된 대상·범위 안에서 실제 수행한다.
@@ -43,10 +43,16 @@
 
 ## 3. Scheduler가 실행 중이면 큐로 접수
 
-**LLM은 Scheduler 뒤에 새 Main/TRIGGER 프로세스를 병렬로 띄우지 않는다.**
+**보고서 Main/TRIGGER는 Scheduler 큐로 접수한다.**
 `--enqueue`는 요청 파일만 접수한다. 현재 Main 종료 후 Scheduler가 정규 제품 작업 사이에서
 요청을 1건씩 실행한다. 일일 Daily Trend/ML도 Main의 공통 실행 잠금을 기다린다.
 상시 Scheduler는 설치 폴더당 하나만 유지한다.
+
+DB setting 전용 적재는 예외다. 사용자에게 승인된 제품·기간·병렬 수로
+`python Main.py "_TRIGGER_DB_SETTING_<vehicle>" --days N --parallel N` 또는
+`python Main.py --init-db <vehicle> --days N --parallel N`을 별도 실행할 수 있다.
+executor 잠금은 건너뛰지만 같은 제품 잠금은 유지하며 공용 자원 슬롯·메모리 한도를 지킨다.
+코드 수정 요청만으로 운영 적재를 시작하지 않는다. 큐의 적재 요청은 기존 순차 소비를 유지한다.
 
 ```python
 import json, subprocess, sys, uuid
@@ -72,8 +78,9 @@ subprocess.run([sys.executable, 'Scheduler.py', '--request-status',
   `generate_only`와 병용하지 않으며 분석 mode는 `TRIGGER`/`SINGLE`만 가능하다.
 - 명시적 재발행은 **새 req_id + `force=true`**. force는 대상 중복 방지만 우회하며
   같은 req_id, 잠금, 수신처 검증은 우회하지 않는다. `mode=FORCE`는 분석 기간 확장이다.
-- DB 초기 적재는 `{'req_id': 고유값, 'kind': 'init_db', 'vehicle': 실제제품}`.
+- DB 초기 적재는 `{'req_id': 고유값, 'kind': 'init_db', 'vehicle': 실제제품, 'days': 일수, 'parallel': 병렬상한}`.
   Lot/Step은 넣지 않는다. 종류가 `trigger.allowed_kinds`에 있어야 한다.
+  `mode=DB_SETTING`도 init_db로 정규화하며, 생략한 일수/병렬 수는 제품 설정(기본 200/1)을 따른다.
 - `SINGLE`은 선택 Lot/Step ET만 분석한다. 비용을 줄이려고 원래 보고서의 비교범위를 임의로 바꾸지 않는다.
   여러 대상은 같은 개수면 순서대로 짝, 한쪽 1개면 공통 적용, 최대 100개다. 모든 조합 확장은 없다.
 - req_id는 영숫자로 시작하고 영숫자·`.`·`_`·`-`만 사용, 최대 128자다. 기존 요청 파일을 덮어쓰지 않는다.
@@ -139,8 +146,10 @@ YAML과 운영 데이터는 보존하며 폐기된 AI 모듈/캐시·확인된 A
 
 ## 7. 변경 시 유지할 핵심 불변식
 
-- Scheduler→Main은 subprocess. 무거운 일반/수동/적재/Daily/ML 작업은 공통 executor 잠금으로 직렬화,
-  제품 잠금은 안쪽에 유지한다. 모든 경로에서 워커 종료·업로드 완료까지 잠금을 잡는다.
+- Scheduler→Main은 subprocess. 무거운 일반/수동 보고서/Daily/ML 작업은 공통 executor 잠금으로 직렬화한다.
+  DB setting 전용 CLI/--init-db는 executor를 우회하되 제품 잠금을 유지한다.
+  날짜 Parquet는 중복 행 제거 후 원자적 교체, ET 로그는 잠금 안에서 prime_key별 병합한다.
+  모든 경로에서 워커 종료·업로드 완료까지 필요한 잠금을 잡는다.
 - 큐는 pending에서 제거한 요청을 active로 **영속 저장 후** 실행한다. req_id/history·대상·대기 중복 검사,
   재시작 시 active 회수, 결과 불명 시 unknown을 유지한다. 메일의 정확히 한 번 전달을 주장하지 않는다.
 - 수신 그룹 허용목록, 전달 환경변수, `generate_only` 토글을 유지한다. 성공 수신처 중복 발송과 unknown 재전송 금지.

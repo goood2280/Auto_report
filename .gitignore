@@ -35,6 +35,7 @@
 !/.gitattributes
 !/tests/test_compact_setup.py
 !/tests/test_daily_services.py
+!/tests/test_db_setting.py
 !/tests/test_execution_gate.py
 !/tests/test_installer_retired_cleanup.py
 !/tests/test_ml_insight.py

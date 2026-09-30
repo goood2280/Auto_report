@@ -48,6 +48,7 @@ flowchart LR
 | **REAL / ADDP** | 원천 측정 항목 / 원천 값을 계산해 만드는 파생 항목. ADDP 예: 차이·비율·MA_Window |
 | **WIP / Inline** | Lot의 공정 진행 현황 / 공정 중 계측값. 발행 대상 확인과 비교 자료에 사용 |
 | **TRIGGER** | 기존 DB로 지정 Lot·Step 보고서를 생성하는 수동 명령. Scheduler 큐에서 순차 실행 |
+| **DB_SETTING** | 오늘 포함 적재 일수·병렬 조회 수를 지정하는 원시 DB 적재 전용 TRIGGER. 공통 executor 잠금 없이 실행, 같은 제품은 제품 잠금 유지 |
 | **ML_TABLE** | 외부에서 준비하는 Lot·Wafer별 공정/장비/계측 인자 표. Daily/ML 분석에 결합 |
 
 ## 시작하기
@@ -156,7 +157,8 @@ Git 체크아웃은 편집 소스·빌더·문서·테스트를 갖춘 개발용
 
 ## 운영과 재발행
 
-**상시 Scheduler가 실행 중이면 직접 Main/TRIGGER를 추가 실행하지 않고 큐에 접수한다.**
+**상시 Scheduler가 실행 중이면 보고서 Main/TRIGGER는 큐에 접수한다.** DB setting 전용 명령은
+공통 executor 잠금을 사용하지 않으므로 별도 실행할 수 있다. 같은 제품의 쓰기는 제품 잠금을 기다린다.
 Scheduler는 현재 Main이 끝난 뒤 정규 제품 사이에서 수동 요청을 1건씩 처리한다.
 일일 Daily/ML도 같은 실행 잠금을 기다린다.
 
@@ -214,8 +216,10 @@ SQLite는 파일 존재 확인 후 `mode=ro`의 SELECT로 조회한다.
 
 ### 동시 실행을 제어하는 장치
 
-- 일반/적재/수동/Daily/ML Main은 같은 `RUN/OPS/locks/executor.lock`으로 무거운 작업을 직렬화한다.
+- 일반/수동 보고서/Daily/ML Main은 같은 `RUN/OPS/locks/executor.lock`으로 무거운 작업을 직렬화한다.
   제품 잠금은 안쪽에 유지하며 업로드·차트 워커 종료까지 실행 잠금을 잡는다.
+- DB setting 전용 TRIGGER와 `--init-db`는 executor 잠금을 건너뛴다. 제품 잠금·날짜별 저장 잠금·ET 로그 잠금은
+  유지하고, 병렬 조회 프로세스가 모두 종료된 뒤 제품 잠금과 공용 자원 슬롯을 반납한다.
 - `execution_lock_wait_sec` 기본 10800초. Scheduler 자식 timeout은 작업 예산 + 잠금 대기 예산이다.
 - `trigger.max_pending=200`, `max_per_check=20`이 기본이다. 앞선 요청·현재 제품·일일 작업에 따라 대기한다.
 - Scheduler OS 잠금은 중복 소비기를 막으며 `--force`로 살아 있는 잠금을 우회할 수 없다.
@@ -478,7 +482,8 @@ PPT: 요약 1장 → 항목마다 ① **항목 페이지** ② **ML_TABLE 인자
 | Main 독립 실행 또는 큐에서 조립하는 명령 | 의미 |
 |---|---|
 | `python Main.py vehicle_A` | 신규 측정 완료 Lot의 자동 발행 |
-| `python Main.py --init-db vehicle_A` | 최근 200일 초기 적재, 리포트·메일·S3 없음 |
+| `python Main.py --init-db vehicle_A [--days 30] [--parallel 4]` | DB setting 적재, 기본 200일·직렬 조회, 리포트·메일·S3 없음 |
+| `python Main.py "_TRIGGER_DB_SETTING_vehicle_A" --days 30 --parallel 4` | 오늘 포함 최근 30일 적재, 병렬 조회 최대 4개, executor 잠금 우회 |
 | `python Main.py "_TRIGGER_vehicle_A_L001.1_S1"` | 기본 조회기간의 지정 대상 |
 | `python Main.py "_TRIGGER_SINGLE_vehicle_A_L001.1_S1"` | 기간 제한 없이 선택 Lot/Step ET만 |
 | `python Main.py "_TRIGGER_NORMAL_vehicle_A_L001.1_S1"` | 좌표 파일의 13pt shot만 |
@@ -488,6 +493,16 @@ PPT: 요약 1장 → 항목마다 ① **항목 페이지** ② **ML_TABLE 인자
 
 파일만 생성하는 Main `--generate-only` 옵션은 없다. 큐의 `generate_only=true`를 사용한다.
 여러 Lot/Step은 쉼표 목록, 같은 개수면 순서대로 짝, 한쪽 1개면 공통 적용, 최대 100개다.
+
+DB setting은 Lot/Step 없이 제품만 지정한다. `--days`와 `--parallel`은 1 이상의 정수이며,
+생략하면 제품 YAML의 `db_setting_days`/`db_setting_parallel`(코드 기본값 200/1)을 사용한다.
+`SplitTimeSpan`(없으면 7일) 단위로 겹치지 않는 날짜 구간을 만들고 요청한 병렬 수 상한 안에서 조회한다.
+실제 병렬 수는 `resource_governor`의 공용 슬롯·CPU·메모리·`parallel_max_workers` 한도를 따르며 로그에 표시한다.
+WIP 조회·보고서·발송 상태 갱신·메일·S3는 수행하지 않는다. 적재 실패는 실패 종료로 전달한다.
+
+Scheduler 큐도 `{"kind":"init_db","vehicle":"vehicle_A","days":30,"parallel":4}` 또는
+`{"mode":"DB_SETTING","vehicle":"vehicle_A","days":30,"parallel":4}`를 받는다.
+큐에 넣은 적재는 기존 순서대로 현재 Main 완료 후 실행한다. 즉시 별도 적재하려면 위 전용 CLI를 사용한다.
 
 </details>
 
@@ -518,7 +533,8 @@ PPT: 요약 1장 → 항목마다 ① **항목 페이지** ② **ML_TABLE 인자
 <summary>데이터·렌더링·재시도·출력 폴더</summary>
 
 - **데이터**: ET 를 `RUN/DB/<제품>_daily/date=YYYY-MM-DD/data.parquet` 날짜 파티션으로 적재, DuckDB `hive_partitioning` 으로 필요한 기간만 읽습니다. DuckDB threads·memory_limit 은 `resource_governor` 가 겁니다.
-- **동시 작업**: Main 공통 executor 잠금으로 제품 순회·수동·DB 적재·Daily/ML의 무거운 처리를 직렬화합니다. 자식 timeout 예산에 잠금 대기 예산을 포함합니다.
+- **동시 작업**: Main 공통 executor 잠금으로 제품 순회·수동 보고서·Daily/ML의 무거운 처리를 직렬화합니다. DB setting 전용 CLI는 executor를 우회하며 같은 제품의 쓰기는 제품 잠금으로 보호합니다.
+- **원시 DB 중복 방지**: 조회 구간은 날짜 경계를 공유하지 않습니다. 조회 결과의 완전히 같은 행을 제거하고 결과가 있는 날짜의 `date=YYYY-MM-DD/data.parquet`를 원자적으로 교체합니다. 같은 날짜 재적재는 append하지 않으며 다른 shot·항목·온도·재측정 행은 유지합니다. 조회 범위 밖 날짜와 빈 조회의 기존 파티션은 보존합니다. ET 로그는 잠금 안에서 prime_key별로 합쳐 한 행만 유지합니다.
 - **병렬 렌더**: `resource_governor.plan_workers`가 공용 OS 슬롯과 실측 CPU·메모리 여유로 워커를 제한합니다(spawn). `parallel_workers` 요청도 코어 예비분·메모리·`parallel_max_workers`·실제 확보 슬롯 안에서만 적용합니다. 결과는 REPORT ORDER로 조립합니다.
 - **PPT 용량**: 차트는 팔레트 PNG/JPEG 중 작은 쪽, WF MAP 은 원본 해상도 팔레트 PNG. 저장 직전 `fit_ppt_budget` 이 메일 한도 안으로 Description 화질을 정하고, 그래도 넘으면 큰 차트부터 줄입니다.
 - **원자적 저장**: CSV/Parquet/HTML/PPT 는 임시 파일 완성 후 교체. 발행 파일은 `RUN/OPS/artifacts` 에 보관해 메일 재시도에 재사용.

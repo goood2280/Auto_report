@@ -59,7 +59,7 @@ _RE_TOKEN = re.compile(r'^[A-Za-z0-9.-]{1,40}$')
 _RE_USER = re.compile(r'^[A-Za-z0-9._-]{1,64}$')        # Main.py samsung_email 의 사용자 ID 규칙과 같다
 _RE_REQUEST_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
 REQUEST_KINDS = ('report', 'init_db', 'send_user')        # 큐 요청 종류 (기본 report)
-QUEUE_MODES = ('TRIGGER', 'NORMAL', 'SINGLE', 'FORCE', 'ALL')
+QUEUE_MODES = ('TRIGGER', 'NORMAL', 'SINGLE', 'FORCE', 'ALL', 'DB_SETTING')
 
 _STOP = threading.Event()        # SIGINT/SIGTERM 수신 플래그
 _CURRENT_PROC = None             # 현재 실행 중인 Main.py 프로세스(정지 시 정리용)
@@ -627,11 +627,21 @@ def _norm_request(raw, source):
     kind = str(raw.get('kind') or 'report').strip().lower()
     if kind not in REQUEST_KINDS:
         return None, f"kind는 {'/'.join(REQUEST_KINDS)}만 허용됩니다"
+    if str(raw.get('mode') or '').upper() == 'DB_SETTING':
+        if kind == 'send_user':
+            return None, 'DB setting 적재는 개인 발송과 함께 사용할 수 없습니다'
+        kind = 'init_db'
     vehicle = str(raw.get('vehicle') or '').strip()
     if kind == 'init_db':
-        # DB 설치(최근 200일 적재) = Main.py --init-db <vehicle>. Lot/Step 없이 제품 단위로만 실행한다.
+        # DB setting은 Lot/Step 없이 제품·기간·병렬 조회 상한만 지정한다.
         if not _RE_VEHICLE.match(vehicle):
             return None, f'vehicle 형식 오류: {vehicle!r}'
+        options = {}
+        for key in ('days', 'parallel'):
+            if key in raw:
+                if type(raw[key]) is not int or raw[key] < 1:
+                    return None, f'{key}는 1 이상의 정수여야 합니다'
+                options[key] = raw[key]
         return {
             'req_id': str(raw.get('req_id') or '').strip(), 'kind': 'init_db',
             'mode': 'INIT_DB', 'generate_only': True,
@@ -640,7 +650,10 @@ def _norm_request(raw, source):
             'requested_at': str(raw.get('requested_at') or '').strip(),
             'note': str(raw.get('note') or '').strip(), 'force': bool(raw.get('force', False)),
             'source': source, 'attempts': 0, 'next_attempt_ts': 0,
+            **options,
         }, ''
+    if 'days' in raw or 'parallel' in raw:
+        return None, 'days/parallel은 DB setting 적재에서만 사용합니다'
     lot_id = str(raw.get('lot_id') or raw.get('lot') or '').strip()
     step_id = str(raw.get('step_id') or raw.get('step') or '').strip()
     key = str(raw.get('key') or '').strip()
@@ -749,11 +762,15 @@ def _pairs(lot, step, limit=100):
 
 
 def main_arguments(req, recv):
-    """대기열 요청 1건 → Main.py 인자 목록. Main.py 의 기존 명령 규약만 조립한다(새 규약 없음)."""
+    """대기열 요청 1건 → Main.py의 보고서/DB setting 명령 인자 목록."""
     vehicle, lot, step = req['vehicle'], req.get('lot_id', ''), req.get('step_id', '')
     kind, mode = req.get('kind', 'report'), req.get('mode', 'TRIGGER')
     if kind == 'init_db':
-        return ['--init-db', vehicle]
+        args = ['--init-db', vehicle]
+        for key in ('days', 'parallel'):
+            if key in req:
+                args.extend(['--' + key, str(req[key])])
+        return args
     if kind == 'send_user':
         return ['--send-user', req['send_user'], '--prime-key', f'{vehicle}_{lot}_{step}'] + (
             ['--single'] if mode == 'SINGLE' else [])
@@ -989,7 +1006,7 @@ def run_main(cfg, arg, label, email_receiver=None):
     else:
         env.pop('AUTO_REPORT_EMAIL_RECEIVER', None)
 
-    purpose = ('DB 설치(최근 200일 적재, 리포트·메일 없음)' if args[0] == '--init-db' else
+    purpose = ('DB setting 적재(기간·병렬 수 지정, 리포트·메일 없음)' if args[0] == '--init-db' else
                '선택 Lot 수동 처리' if args[0].startswith('_TRIGGER') or args[0] == '--send-user' else
                'DC 데이터 갱신 및 자동 발행')
     log(f"제품 작업 시작 | {label} | {purpose}")

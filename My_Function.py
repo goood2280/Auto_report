@@ -4356,164 +4356,209 @@ def getData_with_retry(params, custom_columns=None, user_name=None,
         _time.sleep(_w)
 
 
+def _et_date_ranges(start, end, split_days):
+    """Inclusive calendar-day ranges with no shared boundary day."""
+    if type(split_days) is not int or split_days < 1:
+        raise ValueError('SplitTimeSpan은 1일 이상의 정수여야 합니다')
+    ranges = []
+    while start <= end:
+        stop = min(end, start + timedelta(days=split_days - 1))
+        ranges.append((start.isoformat(), stop.isoformat()))
+        start = stop + timedelta(days=1)
+    return ranges
+
+
+def _merge_et_lot_log(frame, settings):
+    """Merge one chunk under an OS lock, retaining one record per prime_key."""
+    import ast
+    path = settings['et_log_path']
+    columns = ['prime_key', 'wafer_id', 'step_seq', 'total_site_cnt', 'tkout_time']
+    if frame.empty:
+        incoming = pd.DataFrame(columns=columns)
+    else:
+        lot_log = frame.copy()
+        lot_log['prime_key'] = (settings['vehicle'] + '_' + lot_log['fab_lot_id'].astype(str)
+                                + '_' + lot_log['step_id'].astype(str))
+        for column in ('wafer_id', 'total_site_cnt'):
+            lot_log[column] = lot_log[column].astype(int)
+        incoming = lot_log.groupby('prime_key').agg({
+            'wafer_id': lambda values: values.unique().tolist(),
+            'step_seq': lambda values: values.unique().tolist(),
+            'total_site_cnt': lambda values: values.unique().tolist(),
+            'tkout_time': 'max',
+        }).reset_index()
+    with process_lock(path + '.lock', wait_sec=settings['lock_wait_sec']):
+        if os.path.exists(path):
+            existing = pd.read_csv(path, dtype={'prime_key': str})
+            if incoming.empty:
+                return
+            for column in ('wafer_id', 'step_seq', 'total_site_cnt'):
+                existing[column] = existing[column].map(ast.literal_eval)
+        else:
+            existing = pd.DataFrame(columns=columns)
+        combined = pd.concat([existing, incoming], ignore_index=True)
+        if combined.empty:
+            final = combined
+        else:
+            combined['tkout_time'] = pd.to_datetime(combined['tkout_time'], errors='raise')
+            final = combined.groupby('prime_key').agg({
+                'wafer_id': lambda values: sorted(set(sum(values, []))),
+                'step_seq': lambda values: sorted(set(sum(values, []))),
+                'total_site_cnt': lambda values: sorted(set(sum(values, []))),
+                'tkout_time': 'max',
+            }).reset_index()
+        atomic_output(path, lambda temp: final.to_csv(temp, index=False))
+
+
+def _et_query_chunk(task):
+    """Spawn-safe query + storage; never return a raw frame to the parent."""
+    settings, params = task['settings'], task['params']
+    frame = getData_with_retry(params, custom_columns=settings['et_custom_columns'],
+                               user_name=settings['user_name'])
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError('ET 조회 결과는 DataFrame이어야 합니다')
+    if frame.empty:
+        _merge_et_lot_log(frame, settings)
+        return dict(dateFrom=params['dateFrom'], dateTo=params['dateTo'], rows=0,
+                    duplicates=0, partitions=0)
+    frame = frame.copy()
+    frame['tkout_time'] = pd.to_datetime(frame['tkout_time'], errors='raise')
+    if frame['tkout_time'].isna().any():
+        raise ValueError('ET 조회 결과의 tkout_time에 빈 날짜가 있습니다')
+    # A source returning boundary spillover must not overwrite another chunk's day.
+    dates = frame['tkout_time'].dt.date
+    in_range = dates.between(pd.Timestamp(params['dateFrom']).date(),
+                            pd.Timestamp(params['dateTo']).date())
+    if not in_range.all():
+        print(f"[WARN] ET {params['dateFrom']} ~ {params['dateTo']}: 조회 범위 밖 {(~in_range).sum()}행 제외")
+        frame = frame.loc[in_range].copy()
+    for column in ('et_value', 'temperature', 'wafer_id', 'total_site_cnt'):
+        frame[column] = pd.to_numeric(frame[column], errors='coerce')
+    frame['et_value'] = frame['et_value'].abs()
+    before = len(frame)
+    # Full-row identity preserves distinct shots, items, temperatures and retests.
+    frame = frame.drop_duplicates().reset_index(drop=True)
+    duplicates = before - len(frame)
+    partitions = 0
+    for date_value, group in frame.groupby(frame['tkout_time'].dt.date):
+        partition_dir = os.path.join(settings['DB_et_daily'], f'date={date_value}')
+        path = os.path.join(partition_dir, 'data.parquet')
+        # A complete day snapshot replaces the same filename; repeated loads never append.
+        with process_lock(path + '.lock', wait_sec=settings['lock_wait_sec']):
+            atomic_output(path, lambda temp: group.to_parquet(temp, index=False))
+        partitions += 1
+    _merge_et_lot_log(frame, settings)
+    return dict(dateFrom=params['dateFrom'], dateTo=params['dateTo'], rows=len(frame),
+                duplicates=duplicates, partitions=partitions)
+
+
+def _et_query_workers(requested, chunk_count):
+    """Use the same server-wide CPU/memory/slot budget as report workers."""
+    if type(requested) is not int or requested < 1:
+        raise ValueError('db_setting_parallel은 1 이상의 정수여야 합니다')
+    if min(requested, chunk_count) <= 1:
+        return 1
+    import resource_governor
+    settings = {key: GLOBAL_CONFIG.get(key, default) for key, default in (
+        ('parallel_max_workers', 8), ('parallel_reserve_cores', 1),
+        ('parallel_mem_per_worker_gb', 1.2), ('parallel_reserve_gb', 3.0),
+    )}
+    settings['parallel_workers'] = min(requested, chunk_count)
+    try:
+        plan = resource_governor.plan_workers(settings, force=True)
+        print(f"[PERF] DB setting 병렬 조회 {plan['workers']}개 / 요청 {requested}개: {plan['reason']}")
+        return plan['workers']
+    except Exception as exc:
+        resource_governor.release_all()
+        print(f'[WARN] DB 조회 자원 조정 실패: {exc}; 직렬 조회')
+        return 1
+
+
 def etdata_query():
-    """ET(Electrical Test) 측정 데이터를 빅데이터 서버에서 쿼리하여 일별 Hive-파티셔닝 parquet로 저장.
-
-    GLOBAL_CONFIG에서 읽어오는 주요 설정:
-        - vehicle: 대상 차종(마스크) 이름
-        - DB_et_daily: 일별 파켓 저장 루트 경로
-        - QueryTimeSpan: 전체 쿼리 기간 (일)
-        - SplitTimeSpan: 쿼리 분할 단위 (일)
-        - process_id, line_id: 공정/라인 필터
-        - et_custom_columns, user_name: 쿼리 파라미터
-        - et_log_path: Lot 로그 CSV 경로
-
-    저장 구조 (Hive Partitioning):
-        ``{DB_et_daily}/date={YYYY-MM-DD}/data.parquet``
-    """
-    try : 
-
-        item_et = pd.read_csv(f'reformatter/{GLOBAL_CONFIG.get("vehicle")}_reformatter.csv') 
-
-        # 경로 생성 (DB_et_daily만 — LOTWF 디렉토리는 더 이상 사용하지 않음)
-        if not os.path.exists(GLOBAL_CONFIG.get("DB_et_daily")):
-            os.makedirs(GLOBAL_CONFIG.get("DB_et_daily"))
-
-        sub_datetime_now = datetime.now()
-        if GLOBAL_CONFIG.get("now_minus") :
-            sub_to_date_time = sub_datetime_now - timedelta(days = GLOBAL_CONFIG.get("now_minus"))
-            sub_from_date_time = sub_datetime_now - timedelta(days = GLOBAL_CONFIG.get("QueryTimeSpan"))
-        else :
-            sub_to_date_time = sub_datetime_now 
-            sub_from_date_time = sub_datetime_now - timedelta(days = GLOBAL_CONFIG.get("QueryTimeSpan"))
-        import hashlib,json
-        signature=hashlib.sha256((item_et.to_csv(index=False)+str(GLOBAL_CONFIG.get('et_custom_columns'))+
-                                 str(GLOBAL_CONFIG.get('process_id'))+str(GLOBAL_CONFIG.get('line_id'))+
-                                 str(GLOBAL_CONFIG.get('DB_et_daily'))+str(GLOBAL_CONFIG.get('setting_stepseq'))+
-                                 str(GLOBAL_CONFIG.get('QueryTimeSpan'))+str(GLOBAL_CONFIG.get('now_minus'))).encode()).hexdigest()
-        refresh=ops_get('et_refresh',GLOBAL_CONFIG.get('vehicle'),{})
-        full=(GLOBAL_CONFIG.get('et_force_full_refresh', False)
-              or refresh.get('signature')!=signature or time.time()-refresh.get('full_at',0)>=GLOBAL_CONFIG.get('et_full_refresh_days',7)*86400)
+    """Load disjoint ET day snapshots; DB setting can use bounded spawn workers."""
+    import hashlib
+    import resource_governor
+    try:
+        item_et = pd.read_csv(f'reformatter/{GLOBAL_CONFIG.get("vehicle")}_reformatter.csv')
+        now = datetime.now()
+        end = now - timedelta(days=GLOBAL_CONFIG.get('now_minus', 0) or 0)
+        start = now - timedelta(days=GLOBAL_CONFIG.get('QueryTimeSpan'))
+        signature = hashlib.sha256((item_et.to_csv(index=False)
+            + str(GLOBAL_CONFIG.get('et_custom_columns')) + str(GLOBAL_CONFIG.get('process_id'))
+            + str(GLOBAL_CONFIG.get('line_id')) + str(GLOBAL_CONFIG.get('DB_et_daily'))
+            + str(GLOBAL_CONFIG.get('setting_stepseq')) + str(GLOBAL_CONFIG.get('QueryTimeSpan'))
+            + str(GLOBAL_CONFIG.get('now_minus'))).encode()).hexdigest()
+        refresh = ops_get('et_refresh', GLOBAL_CONFIG.get('vehicle'), {})
+        full = (GLOBAL_CONFIG.get('et_force_full_refresh', False)
+                or refresh.get('signature') != signature
+                or time.time() - refresh.get('full_at', 0) >= GLOBAL_CONFIG.get('et_full_refresh_days', 7) * 86400)
         if not full and refresh.get('success_at'):
-            incremental=datetime.fromtimestamp(refresh['success_at'])-timedelta(days=GLOBAL_CONFIG.get('et_refresh_days',2)+1)
-            sub_from_date_time=max(sub_from_date_time,incremental)
-            print(f'[PERF] ET incremental refresh from {sub_from_date_time.date()}')
-        dateTo = sub_to_date_time.strftime('%Y-%m-%d')
-        dateFrom = sub_from_date_time.strftime('%Y-%m-%d')
-
-        date_format = "%Y-%m-%d"
-        start_date = datetime.strptime(dateFrom, date_format)
-        end_date = datetime.strptime(dateTo, date_format)
-        interval = timedelta(days=GLOBAL_CONFIG.get("SplitTimeSpan"))
-        if interval.days <= 0:
-            raise ValueError('SplitTimeSpan은 1일 이상이어야 합니다')
-
-        date_list = []
-        current_date = start_date
-        while current_date < end_date:
-            date_list.append(current_date.strftime(date_format))
-            current_date += interval
-
-        if not date_list or date_list[-1] != dateTo:
-            date_list.append(end_date.strftime(date_format))
-
-        paired_date_list = [[date_list[i], date_list[i+1]] for i in range(len(date_list)-1)]
-        print(f"[Date Ranges] {paired_date_list}")
-        # 모든 기간에 같은 REAL 항목을 조회한다. ADDP는 리포트 생성 단계에서 계산한다.
+            incremental = datetime.fromtimestamp(refresh['success_at']) - timedelta(
+                days=GLOBAL_CONFIG.get('et_refresh_days', 2) + 1)
+            start = max(start, incremental)
+            print(f'[PERF] ET incremental refresh from {start.date()}')
+        ranges = _et_date_ranges(start.date() + timedelta(days=1), end.date(),
+                                 GLOBAL_CONFIG.get('SplitTimeSpan', 7))
+        print(f'[Date Ranges] {ranges}')
         item_ids = item_et.loc[item_et['CATEGORY'].eq('REAL'), 'ITEMID'].tolist()
+        settings = {key: GLOBAL_CONFIG.get(key) for key in (
+            'vehicle', 'DB_et_daily', 'et_log_path', 'et_custom_columns', 'user_name')}
+        settings['lock_wait_sec'] = GLOBAL_CONFIG.get('product_lock_wait_sec', 3600)
+        tasks = [dict(settings=settings, params={
+            'table_name': 'eds.f_et_test', 'dateFrom': first, 'dateTo': last,
+            'process_id': GLOBAL_CONFIG.get('process_id'), 'line_id': GLOBAL_CONFIG.get('line_id'),
+            'item_id': item_ids,
+            'not_like_conditions': {'subitem_id': ['Q%', 'AVG', 'MAX', 'MIN', 'RANGE', 'STD']},
+            'like_conditions': {'step_seq': GLOBAL_CONFIG.get('setting_stepseq')},
+        }) for first, last in ranges]
+        requested = GLOBAL_CONFIG.get('db_setting_parallel', 1) if GLOBAL_CONFIG.get('DB_Setting_mode') else 1
+        workers = _et_query_workers(requested, len(tasks))
+        summary = dict(chunks=0, rows=0, duplicates=0, partitions=0, workers=workers,
+                       dateFrom=ranges[0][0] if ranges else None, dateTo=ranges[-1][1] if ranges else None)
 
-        for paired_dates in paired_date_list :
-            dateFrom = (datetime.strptime(paired_dates[0], date_format) + timedelta(days=1)).strftime(date_format)
-            dateTo = paired_dates[1]
-            print("\n" + "="*60)
-            print(f"[Query Setting] {GLOBAL_CONFIG.get('SplitTimeSpan')}일치 Query")
-            print(f"[Query Period] {dateFrom} ~ {dateTo}")
+        def completed(result):
+            summary['chunks'] += 1
+            for key in ('rows', 'duplicates', 'partitions'):
+                summary[key] += result[key]
+            print(f"[ET Query Complete] {settings['vehicle']} {result['dateFrom']} ~ {result['dateTo']}: "
+                  f"{result['rows']}행 / {result['partitions']}일 저장 / 중복 {result['duplicates']}행 제거 "
+                  f"({summary['chunks']}/{len(tasks)})")
 
-            start_time = time.time()
-
-            print(f"[Query Start] {GLOBAL_CONFIG.get('vehicle')} {GLOBAL_CONFIG.get('SplitTimeSpan')}일치 Query 시작")
-            params = {
-                        'table_name': 'eds.f_et_test',
-                        'dateFrom': dateFrom, 
-                        'dateTo': dateTo, 
-                        'process_id' : GLOBAL_CONFIG.get("process_id"),
-                        'line_id': GLOBAL_CONFIG.get("line_id"),
-                        'item_id': item_ids,
-                        'not_like_conditions': {'subitem_id' : ['Q%','AVG','MAX','MIN','RANGE','STD']}, #불필요 통계치
-                        'like_conditions': {'step_seq' : GLOBAL_CONFIG.get("setting_stepseq")}
-                        }
-
-            Query_Table_tmp = getData_with_retry(params, custom_columns=GLOBAL_CONFIG.get("et_custom_columns"), user_name=GLOBAL_CONFIG.get("user_name"))
-
-            print(f"[Query Complete] {GLOBAL_CONFIG.get('vehicle')} {dateFrom} ~ {dateTo} 데이터 추출 완료")
-
-            Query_Table_tmp['tkout_time'] = pd.to_datetime(Query_Table_tmp['tkout_time'])
-            Query_Table_tmp['et_value'] = pd.to_numeric(Query_Table_tmp['et_value'], errors='coerce')
-            Query_Table_tmp['temperature'] = pd.to_numeric(Query_Table_tmp['temperature'], errors='coerce')
-            Query_Table_tmp['et_value'] = Query_Table_tmp['et_value'].abs() #전체 absolute 적용
-            daily_groups = Query_Table_tmp.groupby(Query_Table_tmp['tkout_time'].dt.date)
-
-            #et_log 파일생성
-            if os.path.exists(GLOBAL_CONFIG.get("et_log_path")):
-                existing_lot_log = pd.read_csv(GLOBAL_CONFIG.get("et_log_path"))
-                #형변환
-                existing_lot_log['wafer_id'] = existing_lot_log['wafer_id'] .apply(eval)
-                existing_lot_log['step_seq'] = existing_lot_log['step_seq'] .apply(eval)
-                existing_lot_log['total_site_cnt'] = existing_lot_log['total_site_cnt'] .apply(eval)
+        try:
+            if workers == 1:
+                for task in tasks:
+                    completed(_et_query_chunk(task))
             else:
-                existing_lot_log = pd.DataFrame()
-
-            lot_log = Query_Table_tmp.copy()
-            lot_log['mask'] = GLOBAL_CONFIG.get("vehicle")
-            lot_log['lot_id6'] = lot_log['lot_id'].str.split('_').str[0]
-            Query_Table_tmp['wafer_id'] = pd.to_numeric(Query_Table_tmp['wafer_id'], errors='coerce')
-            Query_Table_tmp['total_site_cnt'] = pd.to_numeric(Query_Table_tmp['total_site_cnt'], errors='coerce')
-            lot_log['wafer_id'] = lot_log['wafer_id'].astype(int)
-            lot_log['total_site_cnt'] = lot_log['total_site_cnt'].astype(int)
-            lot_log['tkout_time'] = lot_log['tkout_time'].astype(str)
-            lot_log['tkout_time'] = pd.to_datetime(lot_log['tkout_time'], errors='coerce')
-            lot_log['prime_key'] = lot_log['mask'].astype(str) + '_' + lot_log['fab_lot_id'].astype(str) + '_' + lot_log['step_id'].astype(str)
-
-            lot_log_unique = lot_log.groupby('prime_key').agg({
-                'wafer_id': lambda x: x.unique().tolist(),  
-                'step_seq': lambda x: x.unique().tolist(),  
-                'total_site_cnt': lambda x: x.unique().tolist(),  
-                'tkout_time': 'max'  
-            }).reset_index()
-
-            combined_lot_log = pd.DataFrame()
-            final_lot_log = pd.DataFrame()
-            combined_lot_log = pd.concat([existing_lot_log, lot_log_unique])
-            combined_lot_log['tkout_time'] = pd.to_datetime(combined_lot_log['tkout_time'], errors='coerce')
-            final_lot_log = combined_lot_log.groupby('prime_key').agg({
-                'wafer_id': lambda x: list(sorted(set(sum(x, [])))),
-                'step_seq': lambda x: list(sorted(set(sum(x, [])))),
-                'total_site_cnt': lambda x: list(sorted(set(sum(x, [])))),
-                'tkout_time': 'max' 
-            }).reset_index()
-
-            # Hive 파티셔닝 구조로 일별 parquet 저장
-            # 저장 경로: {DB_et_daily}/date={YYYY-MM-DD}/data.parquet
-            DB_et_daily = GLOBAL_CONFIG.get("DB_et_daily")
-            for date_val, group in daily_groups:
-                partition_dir = os.path.join(DB_et_daily, f'date={date_val}')
-                os.makedirs(partition_dir, exist_ok=True)
-                atomic_output(os.path.join(partition_dir, 'data.parquet'), lambda temp: group.to_parquet(temp, index=False))
-
-            atomic_output(GLOBAL_CONFIG.get("et_log_path"), lambda temp: final_lot_log.to_csv(temp, index=False))
-
-            end_time = time.time()
-            elapsed_time = end_time - start_time
-
-            print(f"[ET Query Complete] {GLOBAL_CONFIG.get('vehicle')} ET Query 완료 (소요시간: {elapsed_time:.2f}초)")
-            print("="*60 + "\n") 
-
-        ops_put('et_refresh',GLOBAL_CONFIG.get('vehicle'),dict(signature=signature,success_at=time.time(),full_at=time.time() if full else refresh.get('full_at',time.time())))
-
-    except Exception as e:
-        print(f"[ERROR] etdata_query 실패: {e}")
+                import multiprocessing
+                from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+                pool = ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context('spawn'))
+                pending = set()
+                remaining = iter(tasks)
+                try:
+                    for _ in range(workers):
+                        pending.add(pool.submit(_et_query_chunk, next(remaining)))
+                    while pending:
+                        done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                        # Check the entire finished batch before submitting another query.
+                        results = [future.result() for future in done]
+                        for result in results:
+                            completed(result)
+                            task = next(remaining, None)
+                            if task is not None:
+                                pending.add(pool.submit(_et_query_chunk, task))
+                finally:
+                    pool.shutdown(wait=True, cancel_futures=True)
+        finally:
+            if requested > 1:
+                resource_governor.release_all()
+        ops_put('et_refresh', settings['vehicle'], dict(signature=signature, success_at=time.time(),
+                full_at=time.time() if full else refresh.get('full_at', time.time())))
+        return summary
+    except Exception as exc:
+        print(f'[ERROR] etdata_query 실패: {exc}')
         traceback.print_exc()
         raise
+
 
 def _filter_inline_by_vehicle(inline_df, vehicle):
     """INLINE 설정 시트에서 현재 리포트 대상 vehicle 행만 남긴다.

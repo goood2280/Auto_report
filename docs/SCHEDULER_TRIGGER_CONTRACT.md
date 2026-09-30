@@ -13,9 +13,14 @@ OpenCode / flow → --enqueue 또는 inbox JSON
   → 현재 Main 완료 후 수동 작업 1건씩 실행
   → done / failed / unknown 이력
 
-Scheduler 제품 순회 · 수동 요청 · Daily/ML Main
+Scheduler 제품 순회 · 수동 보고서 · Daily/ML Main
   → 같은 RUN/OPS/locks/executor.lock
   → 무거운 분석 하나씩, 업로드·워커 종료 후 잠금 해제
+
+DB setting 전용 TRIGGER / --init-db
+  → executor 잠금 우회, 제품 잠금 유지
+  → 겹치지 않는 날짜 구간 병렬 조회(spawn, 공용 자원 한도)
+  → 날짜 snapshot 원자적 교체 + 잠금 안에서 ET 로그 병합
 ```
 
 - 이미 실행 중인 Main을 선점하지 않는다. 사이클 시작, 각 제품 시작 전, 유휴 poll 때 큐를 확인한다.
@@ -64,6 +69,8 @@ CLI 공개는 같은 폴더의 임시 파일을 hard link로 연결하므로 inb
 | `lot_id`, `step_id` | report/send_user 대상. 각 토큰 영숫자·`.`·`-`, 1–40자. `_` 불가. 쉼표 목록 지원 |
 | `key` | vehicle/Lot/Step 대신 `제품_Lot_Step`. 오른쪽 두 `_`로 분리 |
 | `mode` | `TRIGGER`(기본), `SINGLE`, `NORMAL`, `FORCE`, `ALL` |
+| `mode=DB_SETTING` | `kind=init_db`로 정규화. Lot/Step 없이 제품의 원시 DB만 적재 |
+| `days`, `parallel` | init_db/DB_SETTING 전용, 1 이상의 JSON 정수. 생략하면 제품 db_setting_days/db_setting_parallel(기본 200/1) |
 | `generate_only` | JSON boolean. 기본 false. true면 메일·S3 OFF, 보고서 파일 생성 |
 | `force` | JSON boolean. 기본 false. 대상 완료 중복만 우회. req_id/대기 중복·잠금·입력 검증은 유지 |
 | `email_receiver` | 메일링 Excel 그룹명 배열(호환: 쉼표 문자열). 생략 시 trigger 기본 그룹. 실제 발송에서는 비어 있거나 허용목록 밖이면 실패, 다른 그룹으로 폴백하지 않음 |
@@ -88,9 +95,13 @@ CLI 공개는 같은 폴더의 임시 파일을 hard link로 연결하므로 inb
   `generate_only=false`, 새 req_id + `force=true`.
 - 개인 발송: `kind=send_user`, `send_user=user.id`, mode TRIGGER/SINGLE.
   generate_only와 함께 쓰지 않는다. 그룹 발송 완료 대상으로 기록하지 않는다.
-- DB 초기 적재: `{"req_id":"opencode-...","kind":"init_db","vehicle":"vehicle_A"}`.
-  `Main.py --init-db vehicle_A`로 최근 200일을 적재하며 리포트·메일·S3는 OFF.
+- DB 초기 적재: `{"req_id":"opencode-...","kind":"init_db","vehicle":"vehicle_A","days":30,"parallel":4}`.
+  `Main.py --init-db vehicle_A --days 30 --parallel 4`로 오늘 포함 30일, 병렬 조회 최대 4개를 요청하며 리포트·메일·S3는 OFF.
   Lot/Step은 필요 없고 그룹 발송 완료 대상으로 기록하지 않는다.
+  `mode=DB_SETTING`도 같은 요청이다. 실제 조회 수는 공용 CPU·메모리·슬롯 한도를 따른다.
+  큐의 순차 소비는 유지한다. 별도 실행을 승인한 적재는
+  `Main.py "_TRIGGER_DB_SETTING_vehicle_A" --days 30 --parallel 4`로 executor를 기다리지 않고 시작할 수 있다.
+  같은 제품 잠금은 유지하므로 그 제품의 다른 Main이 실행 중이면 기다린다.
 
 ### 외부 파일 생산자
 
