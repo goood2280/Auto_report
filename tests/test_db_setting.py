@@ -148,6 +148,23 @@ def row(date, **changes):
                 step_seq='P1', item_id='I', chip_x_pos=0, chip_y_pos=0, **changes)
 
 
+@pytest.mark.parametrize('timestamp_values', [False, True], ids=['categorical-string', 'categorical-timestamp'])
+def test_lot_log_uses_chronological_max_for_unordered_categorical_time(db, timestamp_values):
+    root, settings = db
+    times = ['2026-09-30 09:00:00', '2026-09-30 08:00:00']
+    if timestamp_values:
+        times = [pd.Timestamp(value) for value in times]
+    frame = pd.DataFrame([row(times[0]), dict(row(times[1]), wafer_id=2)])
+    frame['tkout_time'] = pd.Categorical(times, categories=times, ordered=False)
+    frame['step_seq'] = pd.Categorical(['P1', 'P2'], categories=['P2', 'P1', 'UNUSED'], ordered=False)
+    mf._merge_et_lot_log(frame, dict(settings, lock_wait_sec=0))
+    log = pd.read_csv(root / 'et.csv')
+    assert log.prime_key.tolist() == ['TEST_L001.1_S1']
+    assert pd.Timestamp(log.tkout_time.iloc[0]) == pd.Timestamp('2026-09-30 09:00:00')
+    assert log.wafer_id.iloc[0] == '[1, 2]'
+    assert log.step_seq.iloc[0] == "['P1', 'P2']"
+
+
 def test_reloading_overlap_replaces_days_and_removes_only_duplicate_rows(db, monkeypatch):
     root, settings = db
     calls = []
@@ -270,7 +287,11 @@ def getData(params, **kwargs):
     events = Path('query_events'); events.mkdir(exist_ok=True)
     (events / (params['dateFrom'] + '.json')).write_text(json.dumps(
         dict(pid=os.getpid(), started=started, ended=time.monotonic())))
-    return pd.DataFrame(rows)
+    frame = pd.DataFrame(rows)
+    # Corporate query responses can dictionary-encode timestamps as unordered categories.
+    frame['tkout_time'] = pd.Categorical(frame['tkout_time'], ordered=False)
+    frame['step_seq'] = pd.Categorical(frame['step_seq'], ordered=False)
+    return frame
 ''', encoding='utf-8')
     (root / 'check_db.py').write_text('''
 import ast, json
@@ -303,6 +324,7 @@ if __name__ == '__main__':
         files = list((root / 'daily').glob('date=*/data.parquet'))
         assert len(files) == 7
         assert all(len(pd.read_parquet(path)) == 1 for path in files)
+        assert all(pd.api.types.is_datetime64_any_dtype(pd.read_parquet(path)['tkout_time']) for path in files)
     events = [json.loads(path.read_text()) for path in (root / 'query_events').glob('*.json')]
     assert len({event['pid'] for event in events}) >= 2
     assert any(a['started'] < b['ended'] and b['started'] < a['ended']

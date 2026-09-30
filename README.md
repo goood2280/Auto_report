@@ -132,6 +132,9 @@ flowchart TD
 일반 제품 실행은 **설정 → ET 증분 적재/측정 완료 확인 → 발행 대상 선택 → 필요한 데이터 조회 →
 SCALE FACTOR·ADDP·Pivot·좌표 연결 → 차트·통계 판정 → HTML/PPT/Score 저장 → 선택 발송** 순서다.
 수동 TRIGGER는 기존 DB를 읽고 mode에 따라 비교범위를 정한다.
+보고서 TRIGGER(`TRIGGER`/`SINGLE`/`NORMAL`/`FORCE`/`ALL`, 개인 발송 포함)는 제품 YAML 값과 관계없이
+이번 실행에 `DB_Setting_mode=False`, `ptype_lot_turnoff=False`, `report_making=True`를 적용한다.
+YAML 파일은 변경하지 않으며, 생성 전용 요청과 메일·S3 발송 설정은 별도로 적용한다.
 
 | 소스 | 책임 |
 |---|---|
@@ -535,6 +538,7 @@ Scheduler 큐도 `{"kind":"init_db","vehicle":"vehicle_A","days":30,"parallel":4
 - **데이터**: ET 를 `RUN/DB/<제품>_daily/date=YYYY-MM-DD/data.parquet` 날짜 파티션으로 적재, DuckDB `hive_partitioning` 으로 필요한 기간만 읽습니다. DuckDB threads·memory_limit 은 `resource_governor` 가 겁니다.
 - **동시 작업**: Main 공통 executor 잠금으로 제품 순회·수동 보고서·Daily/ML의 무거운 처리를 직렬화합니다. DB setting 전용 CLI는 executor를 우회하며 같은 제품의 쓰기는 제품 잠금으로 보호합니다.
 - **원시 DB 중복 방지**: 조회 구간은 날짜 경계를 공유하지 않습니다. 조회 결과의 완전히 같은 행을 제거하고 결과가 있는 날짜의 `date=YYYY-MM-DD/data.parquet`를 원자적으로 교체합니다. 같은 날짜 재적재는 append하지 않으며 다른 shot·항목·온도·재측정 행은 유지합니다. 조회 범위 밖 날짜와 빈 조회의 기존 파티션은 보존합니다. ET 로그는 잠금 안에서 prime_key별로 합쳐 한 행만 유지합니다.
+- **ET 날짜 타입**: 조회 결과의 Categorical 날짜는 저장·비교·ET 로그 집계 전에 datetime으로 정규화합니다. 최종 측정 시각은 범주 순서가 아닌 실제 시간의 최댓값입니다.
 - **병렬 렌더**: `resource_governor.plan_workers`가 공용 OS 슬롯과 실측 CPU·메모리 여유로 워커를 제한합니다(spawn). `parallel_workers` 요청도 코어 예비분·메모리·`parallel_max_workers`·실제 확보 슬롯 안에서만 적용합니다. 결과는 REPORT ORDER로 조립합니다.
 - **PPT 용량**: 차트는 팔레트 PNG/JPEG 중 작은 쪽, WF MAP 은 원본 해상도 팔레트 PNG. 저장 직전 `fit_ppt_budget` 이 메일 한도 안으로 Description 화질을 정하고, 그래도 넘으면 큰 차트부터 줄입니다.
 - **원자적 저장**: CSV/Parquet/HTML/PPT 는 임시 파일 완성 후 교체. 발행 파일은 `RUN/OPS/artifacts` 에 보관해 메일 재시도에 재사용.

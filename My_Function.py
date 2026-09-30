@@ -4368,6 +4368,13 @@ def _et_date_ranges(start, end, split_days):
     return ranges
 
 
+def _et_timestamps(values):
+    """Normalize dictionary-encoded dates before chronological comparisons/aggregation."""
+    if isinstance(values.dtype, pd.CategoricalDtype):
+        values = values.astype(object)
+    return pd.to_datetime(values, errors='raise')
+
+
 def _merge_et_lot_log(frame, settings):
     """Merge one chunk under an OS lock, retaining one record per prime_key."""
     import ast
@@ -4377,6 +4384,10 @@ def _merge_et_lot_log(frame, settings):
         incoming = pd.DataFrame(columns=columns)
     else:
         lot_log = frame.copy()
+        lot_log['tkout_time'] = _et_timestamps(lot_log['tkout_time'])
+        # A list aggregation must not be cast back into a scalar Categorical dtype.
+        if isinstance(lot_log['step_seq'].dtype, pd.CategoricalDtype):
+            lot_log['step_seq'] = lot_log['step_seq'].astype(object)
         lot_log['prime_key'] = (settings['vehicle'] + '_' + lot_log['fab_lot_id'].astype(str)
                                 + '_' + lot_log['step_id'].astype(str))
         for column in ('wafer_id', 'total_site_cnt'):
@@ -4400,7 +4411,7 @@ def _merge_et_lot_log(frame, settings):
         if combined.empty:
             final = combined
         else:
-            combined['tkout_time'] = pd.to_datetime(combined['tkout_time'], errors='raise')
+            combined['tkout_time'] = _et_timestamps(combined['tkout_time'])
             final = combined.groupby('prime_key').agg({
                 'wafer_id': lambda values: sorted(set(sum(values, []))),
                 'step_seq': lambda values: sorted(set(sum(values, []))),
@@ -4422,7 +4433,7 @@ def _et_query_chunk(task):
         return dict(dateFrom=params['dateFrom'], dateTo=params['dateTo'], rows=0,
                     duplicates=0, partitions=0)
     frame = frame.copy()
-    frame['tkout_time'] = pd.to_datetime(frame['tkout_time'], errors='raise')
+    frame['tkout_time'] = _et_timestamps(frame['tkout_time'])
     if frame['tkout_time'].isna().any():
         raise ValueError('ET 조회 결과의 tkout_time에 빈 날짜가 있습니다')
     # A source returning boundary spillover must not overwrite another chunk's day.

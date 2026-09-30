@@ -954,6 +954,11 @@ def _apply_command_settings(command, config):
         print(f'[INFO] DB setting: 오늘 포함 최근 {days}일, 병렬 요청 상한 {parallel}, '
               '전체 조회, 리포트/메일/S3 비활성, executor 잠금 우회')
         return None
+    if _parse_trigger(command['argument'])[0] in ('TRIGGER', 'SINGLE', 'NORMAL', 'FORCE', 'ALL'):
+        # 명시한 Lot/Step 강제발행은 제품의 자동 적재/P-Type 제외 설정보다 우선한다.
+        config.settings.update(DB_Setting_mode=False, ptype_lot_turnoff=False, report_making=True)
+        if command['kind'] != 'person':
+            print('[INFO] 보고서 TRIGGER: DB_Setting_mode=False, ptype_lot_turnoff=False, report_making=True')
     if command['kind'] != 'person':
         return None
     # parser가 user 부분에 고정 도메인을 붙였으며, 여기서도 완성 주소를 재검증한다.

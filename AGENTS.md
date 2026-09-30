@@ -82,6 +82,8 @@ subprocess.run([sys.executable, 'Scheduler.py', '--request-status',
   Lot/Step은 넣지 않는다. 종류가 `trigger.allowed_kinds`에 있어야 한다.
   `mode=DB_SETTING`도 init_db로 정규화하며, 생략한 일수/병렬 수는 제품 설정(기본 200/1)을 따른다.
 - `SINGLE`은 선택 Lot/Step ET만 분석한다. 비용을 줄이려고 원래 보고서의 비교범위를 임의로 바꾸지 않는다.
+  보고서 TRIGGER는 제품 YAML보다 우선하여 이번 실행에 DB_Setting_mode/ptype_lot_turnoff를 False,
+  report_making을 True로 적용한다. DB setting 적재 전용 명령의 DB_Setting_mode=True는 유지한다.
   여러 대상은 같은 개수면 순서대로 짝, 한쪽 1개면 공통 적용, 최대 100개다. 모든 조합 확장은 없다.
 - req_id는 영숫자로 시작하고 영숫자·`.`·`_`·`-`만 사용, 최대 128자다. 기존 요청 파일을 덮어쓰지 않는다.
   직접 접수는 완성한 `.json.tmp`를 같은 inbox에서 `.json`으로 원자적으로 공개한다.

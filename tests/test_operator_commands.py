@@ -49,6 +49,7 @@ def test_person_overrides_default_groups_and_disabled_delivery(identity, monkeyp
     assert cfg.settings['use_email_send'] is True
     assert cfg.settings['report_making'] is True
     assert cfg.settings['DB_Setting_mode'] is False
+    assert cfg.settings['ptype_lot_turnoff'] is False
     assert cfg.settings['use_s3_upload'] is False
     monkeypatch.setattr(main, 'GLOBAL_CONFIG', cfg)
     calls = []
@@ -136,6 +137,35 @@ def test_trigger_parser_modes(tmp_path, monkeypatch, mode):
         expected_mail = None
 
     assert main._parse_trigger(value) == (mode, 'vehicle_A', '00001.1', '001', expected_mail)
+
+
+@pytest.mark.parametrize('mode', ['TRIGGER', 'FORCE', 'NORMAL', 'ALL', 'SINGLE'])
+def test_report_trigger_overrides_db_and_ptype_flags_without_changing_yaml(tmp_path, monkeypatch, mode):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / 'reformatter').mkdir()
+    (tmp_path / 'reformatter/vehicle_A_reformatter.csv').touch()
+    yaml = tmp_path / 'reformatter/config.yaml'
+    yaml.write_text('DB_Setting_mode: true\nptype_lot_turnoff: true\nreport_making: false\n', encoding='utf-8')
+    original = yaml.read_bytes()
+    if mode in ('FORCE', 'ALL'):
+        argument = f'_TRIGGER_{mode}_OPS_vehicle_A_A488GA.1_S1'
+    else:
+        argument = '_TRIGGER_' + (mode + '_' if mode != 'TRIGGER' else '') + 'vehicle_A_A488GA.1_S1'
+    cfg = config(DB_Setting_mode=True, ptype_lot_turnoff=True, report_making=False,
+                 use_email_send=False, use_s3_upload=False)
+    assert main._apply_command_settings(main._parse_command([argument]), cfg) is None
+    assert cfg.get('DB_Setting_mode') is False
+    assert cfg.get('ptype_lot_turnoff') is False
+    assert cfg.get('report_making') is True
+    assert cfg.get('use_email_send') is False and cfg.get('use_s3_upload') is False
+    assert yaml.read_bytes() == original
+
+
+def test_regular_product_keeps_db_and_ptype_settings():
+    cfg = config(DB_Setting_mode=True, ptype_lot_turnoff=True, report_making=False)
+    before = dict(cfg.settings)
+    assert main._apply_command_settings(main._parse_command(['vehicle_A']), cfg) is None
+    assert cfg.settings == before
 
 
 @pytest.mark.parametrize('value', [

@@ -50,6 +50,9 @@
   일수/병렬 조회 수는 CLI 또는 제품 기본값을 사용한다. spawn 조회 프로세스 종료 후 공용 슬롯을 반납한다.
   날짜 구간은 겹치지 않게 분할하고, 완전히 같은 원시 행을 제거한 날짜 파일을 원자적으로 교체한다(append 금지).
   ET 로그 병합은 별도 OS 잠금 안에서 prime_key별 1행을 유지하며, 조회·저장 실패는 실패 종료로 전달한다.
+  Categorical 날짜는 저장/집계 전에 datetime으로 정규화하며, 범주 순서를 부여해 max를 우회하지 않는다.
+- 보고서 TRIGGER는 이번 실행의 DB_Setting_mode/ptype_lot_turnoff=False, report_making=True를 강제한다.
+  YAML 파일은 수정하지 않으며 DB setting 적재 명령과 메일·S3 생성 전용 제약은 유지한다.
 - 큐 요청은 pending에서 꺼낼 때 active claim을 먼저 저장한다. 재시작 시 결과가 불명확하면
   `unknown`으로 남기고 자동 재발송하지 않는다. 상태 저장 실패를 무시하고 Main을 실행하지 않는다.
 - 순회 주기·그룹은 `reformatter/scheduler.yaml`(없으면 첫 실행 시 기본값으로 자동 생성)에서만 바꾼다.

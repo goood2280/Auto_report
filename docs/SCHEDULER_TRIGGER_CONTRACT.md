@@ -90,6 +90,8 @@ CLI 공개는 같은 폴더의 임시 파일을 hard link로 연결하므로 inb
 여러 Lot/Step은 같은 개수면 순서대로 짝, 한쪽 1개면 공통 적용한다.
 `L1,L2` + `S1,S2` → L1-S1, L2-S2. 모든 조합 확장은 없다. 중복 제거 후 최대 100쌍이다.
 원래 보고서와 같은 재발행을 원하면 비용만 보고 SINGLE로 바꾸지 않는다.
+보고서 TRIGGER는 제품 YAML의 DB_Setting_mode/ptype_lot_turnoff가 True여도 이번 실행에 False로 덮어쓰고,
+report_making=True를 적용한다. YAML 원본은 보존한다. generate_only=true는 여전히 메일·S3를 끈다.
 
 - 그룹 재발송: 검증·승인한 그룹을 `email_receiver`로 지정,
   `generate_only=false`, 새 req_id + `force=true`.
