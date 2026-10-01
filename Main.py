@@ -36,6 +36,8 @@ from My_config import GLOBAL_CONFIG
 from anomaly_engine import analyze_commonality, render_findings_html, item_excluded
 from operator_console import STAGES, color
 
+_CODE_VERSION = None
+
 # 측정값 기반 통계 판정
 
 warnings.filterwarnings("ignore", message="DataFrame is highly fragmented")
@@ -625,7 +627,7 @@ class OperationRun:
         self.started = time.time()
         self.stage_started = time.perf_counter()
         self.data = dict(id=self.id, argument=argument, started=self.started, status='running',
-                         vehicle='', stage='startup', timings={}, reports=[], issues=[])
+                         vehicle='', stage='startup', timings={}, reports=[], issues=[], code_version=_CODE_VERSION)
         self.current = None
         self.persist()
 
@@ -666,7 +668,7 @@ class OperationRun:
         self.current=dict(id=identity,prime_key=pk,vehicle=vehicle,lot=lot,step=step,mode=mode or 'AUTO',
                           tkout_time=revision,started=time.time(),run_id=self.id,attempts=old.get('attempts',0)+1,
                           generated=False,saved=False,email='pending',upload='pending',status='running',
-                          reason='',timings={},paths={})
+                          reason='',timings={},paths={},code_version=_CODE_VERSION)
         self.data['reports'].append(identity);self.save_report();self.stage('report_prepare')
         return self.current
 
@@ -4077,11 +4079,14 @@ def _daily_trend_pack(entries, settings, title):
 
 def _daily_trend_report(request):
     import hashlib,json
+    from report_items import load_catalog, select_formatter
     settings=dict(request['settings']);products=settings.get('products') or []
     if request.get('send') and not settings.get('recipients'):
         return dict(status='disabled',reason='지정 수신처 없음; 발행 생략')
     service=request.get('service','daily_trend')
     if service not in ('daily_trend','mlmode'):raise ValueError('Unknown report service')
+    items_path=settings.get('items_file') or os.path.join(GLOBAL_CONFIG.base_path,'reformatter','report_items.yaml')
+    settings['_report_items_catalog']=load_catalog(items_path)
     if not products:raise ValueError('daily_trend.products에 선택 제품을 지정하세요')
     if any(not re.fullmatch(r'[A-Za-z0-9_.-]+',str(p)) for p in products):raise ValueError('잘못된 제품 키')
     identity=request['id']+'-'+hashlib.sha256(json.dumps(settings,sort_keys=True).encode()).hexdigest()[:12]
@@ -4090,7 +4095,7 @@ def _daily_trend_report(request):
     settings['report_now']=pd.Timestamp.fromtimestamp(request['now'])
     settings['highlight_since']=pd.Timestamp(settings.get('highlight_since') or (settings['report_now']-pd.Timedelta(days=1)))
     # Separate checkpoint per service/source selection, unaffected by daily date or recipients.
-    checkpoint_key=service+'|'+hashlib.sha256(json.dumps([products,settings.get('with_vehicle',{})],sort_keys=True).encode()).hexdigest()
+    checkpoint_key=service+'|'+hashlib.sha256(json.dumps([products,settings.get('with_vehicle',{}),settings['_report_items_catalog'].get(service,{})],sort_keys=True).encode()).hexdigest()
     checkpoint=ops_get('trend_publication_checkpoints',checkpoint_key,{})
     settings['_published_observations']=set(checkpoint['observations']) if 'observations' in checkpoint else None
     settings['_candidate_observations']=set()
@@ -4098,7 +4103,8 @@ def _daily_trend_report(request):
     manifest_path=os.path.join(dest,'manifest.json')
     # 소스 지문: ML_TABLE 변경·기간 변경 시 동결 산출물을 재사용하지 않고 재빌드한다.
     def _source_fingerprint():
-        fp={'highlight_since':str(settings.get('highlight_since')), 'products':list(products)}
+        fp={'highlight_since':str(settings.get('highlight_since')), 'products':list(products),
+            'report_items':settings['_report_items_catalog'].get(service,{})}
         for _v in dict.fromkeys(products):
             _p=os.path.join(settings.get('ml_table_dir') or 'RUN/DB', f'ML_TABLE_{_v}.parquet')
             try:_st=os.stat(_p);fp[_v]=dict(mtime=_st.st_mtime, size=_st.st_size)
@@ -4137,11 +4143,9 @@ def _daily_trend_report(request):
             coordinate_path=GLOBAL_CONFIG.get('coordinate_file_path')
             if coordinate_path and os.path.exists(coordinate_path):
                 set_chip_layout(pd.read_excel(coordinate_path,sheet_name='Zone_Define'))
-            if 'CAT2' not in formatter:formatter['CAT2']=''
-            if service=='mlmode':formatter['CAT2']=formatter['CAT2'].fillna('').replace(r'^\s*$','Uncategorized',regex=True)
-            selected=formatter.loc[formatter['CAT2'].notna() & formatter['CAT2'].astype(str).str.strip().ne('')]
+            selected,_=select_formatter(formatter,vehicle,service,settings['_report_items_catalog'])
             if selected.empty:
-                coverage.append(dict(vehicle=vehicle,status='no_category',items=0));continue
+                coverage.append(dict(vehicle=vehicle,status='no_items',items=0));continue
             frame=daily_trend_load(vehicle,formatter,int(GLOBAL_CONFIG.get('viewing_period',30))+2)
             product_entries=daily_trend_entries(frame,formatter,vehicle,settings,pd.Timestamp.fromtimestamp(request['now']))
             if service=='daily_trend':
@@ -4256,7 +4260,7 @@ def _daily_trend_report(request):
                         factors=[{k:v for k,v in r.items() if k!='plot'} for r in e.get('_factors',{}).get('rows',[])],
                         factor_skipped=e.get('_factors',{}).get('skipped',[])) for e in entries]
             atomic_bytes(os.path.join(dest,'influence.json'),json.dumps(audit,ensure_ascii=False,indent=2,default=str).encode('utf-8'))
-        manifest=dict(id=identity,parts=parts,notice=notice,summary_artifact=summary_artifact,coverage=coverage,items=len(entries),detail_panels=len(plot_entries)-len(entries),created=request['now'],analysis=analysis,
+        manifest=dict(id=identity,parts=parts,notice=notice,summary_artifact=summary_artifact,coverage=coverage,items=len(entries),detail_panels=len(plot_entries)-len(entries),created=request['now'],analysis=analysis,code_version=_CODE_VERSION,
                       checkpoint_key=checkpoint_key,observations=sorted(settings['_candidate_observations']),source_fingerprint=_current_fp)
         atomic_bytes(manifest_path,json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
     if manifest.get('notice'):
@@ -4560,7 +4564,7 @@ def _execute_serially(action):
                 shutdown_chart_pool()
 
 
-def main():
+def _main_cli():
     global _RUN
     argument=sys.argv[1] if len(sys.argv)>1 else ''
     if argument=='--mlmode-evaluate':
@@ -4601,6 +4605,19 @@ def main():
         except Exception:pass
         _RUN.finish(exc)
         raise
+
+
+def main():
+    global _CODE_VERSION
+    if '--help' in sys.argv[1:] or '-h' in sys.argv[1:]:
+        return _main_cli()
+    from runtime_versions import runtime_lease, snapshot
+    root = os.path.dirname(os.path.abspath(__file__))
+    with runtime_lease(root):
+        version = snapshot(root)
+        _CODE_VERSION = version['id']
+        print(f"[VERSION] Auto Report {_CODE_VERSION} / {version.get('created_at', '')} / {version.get('label', '')}", flush=True)
+        return _main_cli()
 
 
 if __name__ == "__main__":

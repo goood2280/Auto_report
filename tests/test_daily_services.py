@@ -105,6 +105,40 @@ def test_daily_delivery_is_frozen_and_partial_missing_product_skips(tmp_path,mon
     assert calls[0][0]==calls[-1][0] and str(calls[0][4]).endswith('.pptx')
     assert mf.ops_list('trend_publication_checkpoints')
 
+def test_catalog_edit_changes_artifacts_and_publication_checkpoint(tmp_path,monkeypatch):
+    """The same daily ID must not reuse a report made for a different item selection."""
+    import yaml
+    ml_file(tmp_path)
+    path=tmp_path/'report_items.yaml'
+    monkeypatch.setattr(main.pd,'read_csv',lambda *a,**k:formatter())
+    monkeypatch.setattr(main,'daily_trend_load',lambda *a:frame())
+    monkeypatch.setattr(main,'_daily_trend_chart',lambda *a:b'unused mocked chart')
+    monkeypatch.setattr(main,'_daily_trend_pack',lambda entries,*a:[('<html>preview</html>',b'ppt',len(entries))])
+    cfg=dict(products=['TEST'],items_file=str(path),ml_table_dir=str(tmp_path),recipients=[])
+    req=dict(id='same-daily-id',service='daily_trend',settings=cfg,now=NOW.timestamp(),send=False)
+    path.write_text(yaml.safe_dump({'version':1,'daily_trend':{'TEST':{'CURRENT':{}}}}),encoding='utf-8')
+    first=main._daily_trend_report(req)
+    assert first['items']==1
+    path.write_text(yaml.safe_dump({'version':1,'daily_trend':{'TEST':{'CURRENT':{},'STABLE':{}}}}),encoding='utf-8')
+    second=main._daily_trend_report(req)
+    assert second['items']==2
+    assert second['id']!=first['id'] and second['manifest']!=first['manifest']
+    assert second['checkpoint_key']!=first['checkpoint_key']
+    assert second['source_fingerprint']['report_items']!=first['source_fingerprint']['report_items']
+    assert not mf.ops_list('trend_publication_checkpoints')
+
+@pytest.mark.parametrize('service',['daily_trend','mlmode'])
+def test_explicit_empty_catalog_skips_before_loading_measurements(tmp_path,monkeypatch,service):
+    import yaml
+    ml_file(tmp_path)
+    path=tmp_path/'report_items.yaml'
+    path.write_text(yaml.safe_dump({'version':1,service:{'TEST':{}}}),encoding='utf-8')
+    monkeypatch.setattr(main.pd,'read_csv',lambda *a,**k:formatter())
+    monkeypatch.setattr(main,'daily_trend_load',lambda *a:pytest.fail('No selected items; must not load DB'))
+    result=main._daily_trend_report(dict(id='empty',service=service,
+        settings=dict(products=['TEST'],items_file=str(path),ml_table_dir=str(tmp_path)),now=NOW.timestamp(),send=False))
+    assert result['status']=='skipped' and result['coverage'][0]['status']=='no_items'
+
 def test_summary_links_html_and_ppt_and_size_limits(tmp_path):
     cfg=settings(tmp_path)
     entries=mf.daily_auto_findings(mf.daily_trend_entries(frame(),formatter(),'TEST',cfg,NOW),formatter())

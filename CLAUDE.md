@@ -69,7 +69,9 @@
 - 큐 파일 규약은 `docs/SCHEDULER_TRIGGER_CONTRACT.md`.
 
 ## 6. 배포 방식
-- 기본 설치는 Main.py·Scheduler.py·My_config.py 3개와 보조 소스 ZIP을 풉니다.
+- 새 Python 파일(`*.py`)을 추가하지 않는다. 기능 로직 변경은 `Main.py`/`My_Function.py` 수정을 우선한다.
+  `Scheduler.py`/`My_config.py`/`anomaly_engine.py` 등 기존 파일은 해당 영역의 변경이 필요할 때만 고친다.
+- 기본 설치는 Main.py·Scheduler.py·My_config.py·report_review.py 4개와 보조 소스 ZIP을 풉니다.
 - 보조 모듈 수정 시 `python setup.py --extract-sources`; 기존 파일은 보존합니다.
 - 수정 후 `python gen_setup.py` 또는 `python setup.py --build`로 setup.py를 재생성합니다.
 - ZIP import의 `__file__`은 가상 경로입니다. 운영 DB 경로는 설치 폴더 기준으로 유지하고,
@@ -77,6 +79,9 @@
 - setup.py는 생성물로 직접 수정하지 않습니다. 새 파일은 gen_setup.py 목록에 명시합니다.
 - Gemma4 연결과 VS Code 웹 관리 화면은 2026-09-29 사용자 요청으로 제거되었습니다.
   웹 전용 자연어 도우미·기준값 조정도 복원하지 않습니다. OpenCode는 기존 CLI를 사용합니다.
+- 항목 추가/삭제의 자연어 해석은 외부 OpenCode가 하고 `reformatter/report_items.yaml`에 저장합니다.
+  Daily/ML 전용 reformatter 열을 읽지 않습니다. 기존 Auto Report ALIAS와 숫자 REPORT ORDER만 후보로 사용합니다.
+  수정·샘플·승인 반영 절차는 `docs/REPORT_REVIEW.md`를 따릅니다.
 
 ## 9. 메일 본문 그림 수 (Attach file count is over 10)
 - 사내 메일 API 는 본문 data:image 도 첨부로 떼어 셀 수 있다 — **그림 + 첨부 ≤ `mail_attach_limit`(10)**.

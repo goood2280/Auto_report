@@ -1,2 +1,10 @@
+# Linux(bash) 운영 기준: 텍스트는 항상 LF로 통일한다. Windows 체크아웃에서도 LF를 유지한다.
+* text=auto eol=lf
+*.pptx binary
+*.xlsx binary
+*.zip binary
+*.png binary
+*.jpg binary
+*.parquet binary
 # Keep the generated installer byte-for-byte reproducible on Windows checkouts.
 /setup.py text eol=lf

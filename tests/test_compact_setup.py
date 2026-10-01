@@ -10,8 +10,8 @@ import zipfile
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-ENTRY = {'Main.py', 'Scheduler.py', 'My_config.py'}
-MODULES = {'My_Function.py', 'anomaly_engine.py', 'operator_console.py', 'resource_governor.py'}
+ENTRY = {'Main.py', 'Scheduler.py', 'My_config.py', 'report_review.py'}
+MODULES = {'My_Function.py', 'anomaly_engine.py', 'operator_console.py', 'resource_governor.py', 'report_items.py', 'runtime_versions.py'}
 
 
 def run(root, *args):
@@ -22,6 +22,10 @@ def run(root, *args):
                             capture_output=True, text=True, encoding='utf-8', timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     return result.stdout
+
+
+def installed_python_files(root):
+    return {p.name for p in root.rglob('*.py') if '.runtime-versions' not in p.parts}
 
 
 @pytest.fixture
@@ -35,7 +39,7 @@ def installed(tmp_path):
 
 def test_compact_install_import_paths_cli_and_spawn(installed, tmp_path):
     root = installed
-    assert {p.name for p in root.rglob('*.py')} == ENTRY | {'setup.py'}
+    assert installed_python_files(root) == ENTRY | {'setup.py'}
     with zipfile.ZipFile(root / 'auto_report_runtime.zip') as archive:
         assert set(archive.namelist()) == MODULES
     assert (root / 'AGENTS.md').is_file()
@@ -43,6 +47,7 @@ def test_compact_install_import_paths_cli_and_spawn(installed, tmp_path):
     assert 'self.manager' not in (root / 'My_config.py').read_text(encoding='utf-8')
     assert '--init-db' in run(root, 'Main.py', '--help')
     assert '--drain' in run(root, 'Scheduler.py', '--help')
+    assert 'prepare' in run(root, 'report_review.py', '--help')
     script = root / 'spawn_check.py'
     script.write_text('''
 import os
@@ -108,6 +113,8 @@ def test_rebuild_without_sources_and_with_edits(installed, tmp_path):
     assert (root / 'setup.py').read_bytes() == original
     assert {p.name for p in root.glob('*.py')} == ENTRY | {'setup.py'}
     run(root, 'setup.py', '--extract-sources')
+    assert (root / 'tests' / 'test_report_items.py').is_file()
+    assert (root / 'tests' / 'test_report_review.py').is_file()
     source = root / 'operator_console.py'
     source.write_text(source.read_text(encoding='utf-8') + '\nEDITED = True\n', encoding='utf-8')
     config = (root / 'My_config.py').read_bytes()
@@ -120,7 +127,7 @@ def test_rebuild_without_sources_and_with_edits(installed, tmp_path):
     run(root, 'setup.py', '--target', str(target))
     with zipfile.ZipFile(target / 'auto_report_runtime.zip') as archive:
         assert b'EDITED = True' in archive.read('operator_console.py')
-    assert {p.name for p in target.rglob('*.py')} == ENTRY
+    assert installed_python_files(target) == ENTRY
 
 
 def test_corrupt_bundle_fails_before_writes(tmp_path):
@@ -131,3 +138,32 @@ def test_corrupt_bundle_fails_before_writes(tmp_path):
     with pytest.raises(ValueError, match='checksum'):
         setup.install(tmp_path / 'must-not-exist')
     assert not (tmp_path / 'must-not-exist').exists()
+
+
+def test_code_upgrade_keeps_current_config_and_records_reversible_version(installed):
+    import json
+    import py_compile
+    root = installed
+    original = json.loads(run(root, 'report_review.py', 'current-version'))['id']
+    (root / 'Main.py').write_text((root / 'Main.py').read_text(encoding='utf-8') + '\n# local code edit\n', encoding='utf-8')
+    edited_main = (root / 'Main.py').read_bytes()
+    config = root / 'My_config.py'
+    config.write_text(config.read_text(encoding='utf-8') + '\nLOCAL_SETTING = 17\n', encoding='utf-8')
+    config_bytes = config.read_bytes()
+    modified = json.loads(run(root, 'report_review.py', 'save-version', '--label', 'local change'))['id']
+    assert original != modified
+    py_compile.compile(str(root / 'Main.py'), doraise=True)
+    py_compile.compile(str(config), doraise=True)
+    main_cache = Path(importlib.util.cache_from_source(str(root / 'Main.py')))
+    config_cache = Path(importlib.util.cache_from_source(str(config)))
+    config_bytecode = config_cache.read_bytes()
+    assert main_cache.exists()
+    run(root, 'setup.py', '--preserve-config')
+    assert not main_cache.exists()
+    assert config_cache.read_bytes() == config_bytecode
+    assert config.read_bytes() == config_bytes
+    assert json.loads(run(root, 'report_review.py', 'current-version'))['id'] == original
+    run(root, 'report_review.py', 'rollback', '--version', modified)
+    assert (root / 'Main.py').read_bytes() == edited_main
+    assert config.read_bytes() == config_bytes
+    assert json.loads(run(root, 'report_review.py', 'current-version'))['id'] == modified

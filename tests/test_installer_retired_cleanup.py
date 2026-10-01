@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
-def installer(tmp_path):
+def installer(tmp_path, monkeypatch):
+    monkeypatch.setenv('AUTO_REPORT_VERSION_STORE', str(tmp_path / 'versions'))
     spec = importlib.util.spec_from_file_location('isolated_builder', ROOT / 'gen_setup.py')
     builder = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(builder)
@@ -19,6 +20,7 @@ def installer(tmp_path):
     exec(compile(builder.INSTALLER, '<installer>', 'exec'), scope)
     bundle = {name: '# isolated test source\n' for name in builder.ENTRY_FILES + builder.RUNTIME_FILES}
     bundle['gen_setup.py'] = '# isolated builder\n'
+    bundle['runtime_versions.py'] = (ROOT / 'runtime_versions.py').read_text(encoding='utf-8')
     scope['read_bundle'] = lambda: dict(bundle)
     return scope
 
@@ -46,15 +48,19 @@ def test_upgrade_removes_ai_outputs_and_bytecode_but_preserves_operational_files
         'RUN/QUEUE/trigger_queue.jsonl', 'RUN/QUEUE/scheduler_state.json',
         'RUN/log/vehicle_et_log.csv', 'RUN/Report/report.html',
         'reformatter/config.yaml', 'reformatter/scheduler.yaml', '.env',
-        '__pycache__/My_Function.cpython-310.pyc', '__pycache__/anomaly_engine.cpython-314.pyc',
+        '__pycache__/custom_module.cpython-310.pyc',
         'RUN/AI/operator-note.txt', 'RUN/AI/ai_input_L1_S1.json.bak',
         'RUN/AI/rule_digest_custom.txt', 'RUN/AI/ai_input_nested.json/keep.txt',
     ]
     for name in retired + protected:
         put(root, name)
+    invalidated = ['__pycache__/My_Function.cpython-310.pyc', '__pycache__/anomaly_engine.cpython-314.pyc']
+    for name in invalidated:
+        put(root, name)
     put(root, 'gpt_oss_client.py', '# retired local mock\n')
     installer['install'](root)
     assert all(not (root / name).exists() for name in retired)
+    assert all(not (root / name).exists() for name in invalidated)
     assert all((root / name).read_text(encoding='utf-8') == 'preserve' for name in protected)
     assert not (root / 'gpt_oss_client.py').exists()
     backup = list((root / '.setup-backups').glob('*/gpt_oss_client.py.bak'))

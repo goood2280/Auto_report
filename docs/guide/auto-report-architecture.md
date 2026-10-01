@@ -125,6 +125,9 @@ flowchart TB
 
 - ML_TABLE은 외부에서 준비된 입력입니다. 이 보고 경로가 원천 ML_TABLE을 생성하지 않습니다.
 - Daily Trend의 시간/Split 매핑은 설정할 때 사용합니다. ML Insight는 장비 등 진단 정보도 읽습니다.
+- 제품별 측정 항목·시간/Split 매핑은 `reformatter/report_items.yaml`의 서비스별 dict가 정본입니다.
+  기존 Auto Report ALIAS/REPORT ORDER만 선택하며 전용 reformatter 열은 읽지 않습니다.
+  OpenCode의 후보 수정·샘플·승인 반영은 [검토 절차](../REPORT_REVIEW.md)를 따릅니다.
 - IF/LOF는 과거 데이터로 학습하고 별도 기준 구간 및 새 측정을 비교합니다. 장비 연관성은 원인 확정이 아닙니다.
 - with_vehicle는 ML 비교 데이터 확장 옵션입니다. 기본 리포트 판정으로 되먹임하지 않습니다.
 

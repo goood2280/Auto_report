@@ -1572,7 +1572,7 @@ def cmd_request_status(cfg, state, req_id):
     return 0
 
 
-def main():
+def _scheduler_cli():
     global _LOG_PATH, _ACTIVE_CONFIG
 
     ap = argparse.ArgumentParser(description='Auto Report 제품 순회 스케줄러 + 트리거 큐 소비기')
@@ -1597,6 +1597,10 @@ def main():
     args = ap.parse_args()
 
     _LOG_PATH = None if (args.status or args.request_status) else os.path.join(BASE_DIR, 'RUN', 'log', 'scheduler_log.txt')
+    if not (args.status or args.request_status or args.enqueue):
+        from runtime_versions import snapshot
+        version = snapshot(BASE_DIR)
+        log(f"현재 코드 버전: {version['id']} / {version.get('created_at', '')} / {version.get('label', '')}", 'OK')
     cfg = load_config(args.config,create_if_missing=not (args.status or args.request_status),strict_services=False)
     _ACTIVE_CONFIG=cfg
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -1668,6 +1672,15 @@ def main():
         state.save()
         log('스케줄러 종료')
     return 0
+
+
+def main():
+    # Read-only status/help and inbox submission do not start a runtime lease or create history.
+    if any(arg in sys.argv[1:] for arg in ('--status', '--request-status', '--enqueue', '--help', '-h')):
+        return _scheduler_cli()
+    from runtime_versions import runtime_lease
+    with runtime_lease(BASE_DIR):
+        return _scheduler_cli()
 
 
 if __name__ == '__main__':

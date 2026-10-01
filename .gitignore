@@ -12,12 +12,16 @@
 !/anomaly_engine.py
 !/operator_console.py
 !/resource_governor.py
+!/report_items.py
+!/report_review.py
+!/runtime_versions.py
 !/gen_setup.py
 !/AGENTS.md
 !/CLAUDE.md
 !/ANOMALY_KNOWLEDGE.md
 !/README.md
 !/docs/SCHEDULER_TRIGGER_CONTRACT.md
+!/docs/REPORT_REVIEW.md
 !/docs/guide/index.html
 !/docs/guide/auto-report-architecture.md
 !/docs/guide/01-overview.svg
@@ -44,3 +48,6 @@
 !/tests/test_report_size.py
 !/tests/test_scheduler_queue.py
 !/tests/test_score_single.py
+!/tests/test_report_items.py
+!/tests/test_report_review.py
+!/tests/test_runtime_versions.py

@@ -8,18 +8,26 @@ from pathlib import Path
 import textwrap
 import zipfile
 
-RUNTIME_FILES = ['My_Function.py', 'anomaly_engine.py', 'operator_console.py', 'resource_governor.py']
-ENTRY_FILES = ['Main.py', 'Scheduler.py', 'My_config.py']
+RUNTIME_FILES = ['My_Function.py', 'anomaly_engine.py', 'operator_console.py', 'resource_governor.py', 'report_items.py', 'runtime_versions.py']
+ENTRY_FILES = ['Main.py', 'Scheduler.py', 'My_config.py', 'report_review.py']
+TEST_FILES = [
+    'tests/test_compact_setup.py', 'tests/test_daily_services.py', 'tests/test_db_setting.py',
+    'tests/test_execution_gate.py', 'tests/test_installer_retired_cleanup.py', 'tests/test_ml_insight.py',
+    'tests/test_operator_commands.py', 'tests/test_parallel_multi.py', 'tests/test_report_size.py',
+    'tests/test_scheduler_queue.py', 'tests/test_score_single.py', 'tests/test_report_items.py',
+    'tests/test_report_review.py', 'tests/test_runtime_versions.py',
+]
 BUNDLE_FILES = ENTRY_FILES + RUNTIME_FILES + [
     'gen_setup.py', 'AGENTS.md', 'CLAUDE.md', 'ANOMALY_KNOWLEDGE.md', 'README.md',
     'docs/SCHEDULER_TRIGGER_CONTRACT.md',
+    'docs/REPORT_REVIEW.md',
     'docs/guide/index.html', 'docs/guide/auto-report-architecture.md',
     'docs/guide/01-overview.svg', 'docs/guide/01-overview.mmd',
     'docs/guide/02-runtime.svg', 'docs/guide/02-runtime.mmd',
     'docs/guide/03-lot-pipeline.svg', 'docs/guide/03-lot-pipeline.mmd',
     'docs/guide/04-trend-ml.svg', 'docs/guide/04-trend-ml.mmd',
     'docs/guide/05-delivery.svg', 'docs/guide/05-delivery.mmd',
-]
+] + TEST_FILES
 RETIRED_FILES = [
     'Manager.py', 'manager.html', 'manager-reader.js', 'manager-app.js', 'manager-tune.js',
     'manager_llm.py', 'manager_assistant.py', 'manager_explain.py', 'ml_threshold_tuner.py',
@@ -106,7 +114,7 @@ def _cleanup_retired_artifacts(root):
     return removed
 
 
-def install(target_dir=None, sources=False):
+def _install_payload(target_dir=None, sources=False, preserve_config=False):
     bundle = read_bundle()
     root = Path(target_dir or Path(__file__).resolve().parent).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -119,7 +127,9 @@ def install(target_dir=None, sources=False):
             out.writestr(item, bundle[name].encode('utf-8'))
     _write(root / 'auto_report_runtime.zip', archive.getvalue(), backup_root, root)
     for name, content in bundle.items():
-        if name in RUNTIME_FILES or name == 'gen_setup.py':
+        if name in RUNTIME_FILES or name == 'gen_setup.py' or name.startswith('tests/'):
+            continue
+        if name == 'My_config.py' and preserve_config and (root / name).is_file():
             continue
         _write(root / name, content.encode('utf-8'), backup_root, root)
     # Exact owned filenames only. Preserve removed/loose sources as .bak; keep config YAML and operational data.
@@ -134,13 +144,31 @@ def install(target_dir=None, sources=False):
     if sources:
         extract_sources(root)
     print('[setup] Installed:', root)
-    print('[setup] Python entry files: Main.py, Scheduler.py, My_config.py (3; setup.py excluded)')
+    print('[setup] Python entry files: Main.py, Scheduler.py, My_config.py, report_review.py (4; setup.py excluded)')
     print('[setup] Runtime source: auto_report_runtime.zip; instructions: AGENTS.md')
     if backup_root.exists():
         print('[setup] Previous files:', backup_root)
     if removed:
         print('[setup] Retired AI artifacts removed:', removed)
     print('[setup] Restart existing processes to load this release.')
+
+
+def install(target_dir=None, sources=False, preserve_config=False):
+    bundle = read_bundle()
+    root = Path(target_dir or Path(__file__).resolve().parent).resolve()
+    scope = {'__name__': '_auto_report_versions', '__file__': str(root / 'runtime_versions.py')}
+    exec(compile(bundle['runtime_versions.py'], scope['__file__'], 'exec'), scope)
+    kept_config = preserve_config and (root / 'My_config.py').is_file()
+    with scope['runtime_lease'](root, exclusive=True):
+        if (root / 'Main.py').is_file():
+            scope['snapshot'](root, label='설치 전 코드')
+        _install_payload(root, sources=sources, preserve_config=preserve_config)
+        modules = RUNTIME_FILES + ['Main.py', 'Scheduler.py', 'report_review.py']
+        if not kept_config:
+            modules.append('My_config.py')
+        scope['_discard_runtime_bytecode'](root, modules)
+        version = scope['snapshot'](root, label='설치된 코드')
+    print('[setup] Code version:', version['id'])
 
 
 def extract_sources(target_dir=None):
@@ -153,11 +181,12 @@ def extract_sources(target_dir=None):
         with zipfile.ZipFile(runtime) as archive:
             for name in RUNTIME_FILES:
                 bundle[name] = archive.read(name).decode('utf-8')
-    for name in RUNTIME_FILES + ['gen_setup.py']:
+    for name in RUNTIME_FILES + ['gen_setup.py'] + sorted(n for n in bundle if n.startswith('tests/')):
         path = root / name
         if path.exists():
             print('[keep]', name)
             continue
+        path.parent.mkdir(parents=True, exist_ok=True)
         with path.open('w', encoding='utf-8', newline='\n') as stream:
             stream.write(bundle[name])
         print('[source]', name)
@@ -168,7 +197,8 @@ def rebuild(target_dir=None):
     bundle = read_bundle()
     path = root / 'gen_setup.py'
     source = path.read_text(encoding='utf-8') if path.exists() else bundle['gen_setup.py']
-    scope = {'__name__': '_auto_report_builder', '__file__': str(path), '_EMBEDDED_BUILDER': source}
+    scope = {'__name__': '_auto_report_builder', '__file__': str(path), '_EMBEDDED_BUILDER': source,
+             '_EMBEDDED_BUNDLE': bundle}
     exec(compile(source, str(path), 'exec'), scope)
     scope['main']()
 
@@ -176,6 +206,7 @@ def rebuild(target_dir=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Auto Report compact installer / source tools')
     parser.add_argument('--target', help='Install/source/build directory (default: setup.py directory)')
+    parser.add_argument('--preserve-config', action='store_true', help='Keep current My_config.py when installing code updates')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--extract-sources', action='store_true', help='Extract optional editable helper sources only')
     mode.add_argument('--build', action='store_true', help='Rebuild setup.py from installed files + runtime ZIP')
@@ -186,7 +217,7 @@ if __name__ == '__main__':
     elif args.build:
         rebuild(args.target)
     else:
-        install(args.target, sources=args.sources)
+        install(args.target, sources=args.sources, preserve_config=args.preserve_config)
 '''
 
 
@@ -202,6 +233,8 @@ def main():
                 bundle[name] = archive.read(name).decode('utf-8')
         elif name == 'gen_setup.py' and '_EMBEDDED_BUILDER' in globals():
             bundle[name] = _EMBEDDED_BUILDER
+        elif name in globals().get('_EMBEDDED_BUNDLE', {}):
+            bundle[name] = _EMBEDDED_BUNDLE[name]
         else:
             raise FileNotFoundError(path)
     for name, content in bundle.items():

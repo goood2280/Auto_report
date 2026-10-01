@@ -7,14 +7,23 @@
 ## 1. 먼저 읽을 것과 구조
 
 - 기능·설정·데이터 흐름은 `README.md`. 큐 작업에는 `docs/SCHEDULER_TRIGGER_CONTRACT.md`를 읽는다.
+- **코드 개선·Daily/ML 항목 추가/삭제·테스트 샘플 요청은 먼저 `docs/REPORT_REVIEW.md`를 읽는다.**
+  설치 폴더에서 `report_review.py prepare`로 후보를 만든다. 후보 수정 → 관련 check → 미리보기 →
+  파일 record → 지정한 사람에게 send-sample → 검토 후 promotion-plan → 승인한 운영 반영 순서다.
+  운영 중인 소스를 먼저 고치거나 샘플 검토 전에 설치하지 않는다.
 - 코드 변경 전에는 `CLAUDE.md`의 상세 불변식을 읽는다. 파일명이 언급되었다고 자동으로 로드된 것으로 간주하지 않는다.
 - `Main.py`: 제품 조회·DB 적재·Lot/Step 분석·HTML/PPT·메일, Daily Trend/ML/Watchdog 보고서.
 - `Scheduler.py`: 정규 제품 순회, 수동 큐 소비, 일일 서비스 타이머, 상태·요청 조회 CLI.
   Main을 import해서 호출하지 않고 **별도 subprocess**로 실행한다.
 - `My_config.py`: 전역 기본값과 제품 YAML 로더. `reformatter/config.yaml`: 제품별 값.
   `reformatter/scheduler.yaml`: 순회 그룹·주기·큐. 새 키는 코드 기본값도 있어야 한다.
-- 기본 설치는 진입점·설정 Python 3개와 `auto_report_runtime.zip`이다. ZIP에는
-  `My_Function.py`, `anomaly_engine.py`, `operator_console.py`, `resource_governor.py`의 소스가 들어 있다.
+- `reformatter/report_items.yaml`: Daily/ML별 제품→ALIAS→옵션 dict 정본(로컬 설정, 설치 보존).
+  자연어 요청은 OpenCode가 해석하고 `report_review.py items-list|items-add|items-remove`로 갱신한다.
+  숫자 REPORT ORDER가 있는 기존 Auto Report ALIAS만 사용한다. Daily/ML 전용 CSV 열을 추가하지 않는다.
+  시간축·분류도 dict의 `time_column`/`split_columns`로 관리한다. 기존 CSV `tkout_time`/`split_check`는 읽지 않는다.
+  파일/제품/서비스 미지정=기존 보고서 항목 전체, 명시적 제품 `{}`=0개. 첫 변경은 전체에서 요청한 차이만 적용한다.
+- 기본 설치는 진입점·설정 Python 4개(`report_review.py` 포함)와 `auto_report_runtime.zip`이다. ZIP에는
+  `My_Function.py`, `anomaly_engine.py`, `operator_console.py`, `resource_governor.py`, `report_items.py`, `runtime_versions.py`의 소스가 들어 있다.
 - `setup.py`는 `gen_setup.py`가 만드는 배포물이다. 압축 DATA를 직접 수정하지 않는다.
 - Gemma/GPT 어댑터, Manager 웹 화면, 자연어 규칙·기준값 조정은 제거된 기능이다.
   Auto Report 안에 LLM SDK·모델 서버·LLM 키 설정·`RUN/AI` 출력을 다시 추가하지 않는다.
@@ -27,7 +36,7 @@
 | “어떤 로그 있어?”, “왜 실패했어?”, “진행 중이야?” | 상태·대상 로그·읽기 전용 운영 이력 조회. 발행/적재/재시작 없음 |
 | “이 Lot 재발행해줘”, “파일만 만들어줘” | 제품/Lot/Step/분석 범위/발송 의도 확인 → Scheduler 큐 1건 접수 → 결과 추적 |
 | “새 제품 DB 쌓아줘” | 요청 기간·병렬 수 확인 → `kind=init_db` 큐 또는 승인한 DB setting 전용 CLI. 기본 200일·직렬 조회 |
-| “이 기능 고쳐줘” | 소스 차이 확인 → 최소 변경 → 관련 오프라인 검증 → 번들 재생성 → 임시 설치 검증 |
+| “이 기능 고쳐줘”, “이 제품 Daily/ML에 항목 넣어줘/빼줘” | REPORT_REVIEW 절차로 후보 생성·dict/소스 변경·check·샘플 → 검토 후 승인한 운영 반영 |
 
 - 운영 작업은 명령을 안내하는 데서 끝내지 않고 승인된 대상·범위 안에서 실제 수행한다.
   이미 확인된 대상·수신처는 다시 허락받지 않는다. 모호한 값은 설정/이력을 먼저 확인하고 필요한 것만 질문한다.
@@ -124,21 +133,42 @@ subprocess.run([sys.executable, 'Scheduler.py', '--request-status',
 - `AGENTS.md`는 행동 지침이지 접근 통제 장치가 아니다. 운영 에이전트와 모든 하위 에이전트는
   운영 코드 편집 금지, 조회/큐 접수만 허용하는 OpenCode 권한·OS 계정으로 실행한다.
   범용 shell/Python 쓰기 권한이 있으면 edit 금지만으로 코드를 보호할 수 없다.
-  개발은 별도 체크아웃에서 한다. 실제 권한 설정은 설치된 OpenCode/플러그인 버전 스키마를 확인한다.
+  명시적인 개선 요청은 별도 후보에서 개발하며, 검토·승인한 배포만 운영본에 적용한다.
+  실제 권한 설정은 설치된 OpenCode/플러그인 버전 스키마를 확인한다.
 
 ## 6. 코드 변경·배포 절차
 
 1. `git status --short`, 대상 diff를 읽고 기존 사용자 변경을 보존한다. 운영 요청 때문에 광범위하게 리팩터링하지 않는다.
-2. 보조 소스가 없을 때 `python setup.py --extract-sources`. ZIP 모듈 4개와 `gen_setup.py`만 추출하며
+2. 보조 소스가 없을 때 후보에서 `python setup.py --extract-sources`. ZIP 모듈 6개·`gen_setup.py`·오프라인 테스트를 추출하며
    기존 파일과 설정은 보존한다. 느슨한 `.py`가 ZIP보다 우선하므로 실제 import 소스를 확인한다.
 3. 필요한 함수·설정만 고친다. 동시 작업자는 서로 다른 파일을 맡고 운영 명령 실행은 한 담당자만 한다.
+   새 Python 파일(`*.py`)을 추가하지 않는다. 기능 로직 변경은 `Main.py`/`My_Function.py` 수정을 우선한다.
+   `Scheduler.py`/`My_config.py`/`anomaly_engine.py`/`resource_governor.py` 등 기존 파일은
+   해당 영역(큐·설정·판정·자원)의 변경이 필요할 때만 고친다.
 4. 해당 기능의 오프라인 테스트를 실행한다. 사내 조회/메일/S3는 모의 처리한다.
-   기본 설치에는 tests가 없으므로 없는 검증을 통과했다고 보고하지 않는다.
+   기본 설치에는 tests가 없으므로 후보에서 추출한다. 없는 검증을 통과했다고 보고하지 않는다.
 5. `python gen_setup.py` 또는 `python setup.py --build`로 setup.py를 재생성한다.
    현재 진입점·설정·문서·추출 소스(없으면 ZIP)를 읽으며 설치/운영 작업은 실행하지 않는다.
-6. 임시 폴더에 `python setup.py --target <임시폴더>`로 새 설치해 Python 3개, ZIP import,
+6. 임시 폴더에 `python setup.py --target <임시폴더>`로 새 설치해 Python 4개, ZIP import,
    CLI, 운영 경로, spawn 워커를 확인한다. 운영 폴더에 검증용 재설치를 하지 않는다.
 7. 변경·검증·번들 갱신·운영 미검증 범위를 보고한다. commit/push/운영 배포는 요청 범위에서만 한다.
+
+샘플은 사용자가 지정한 ID에만 등록 파일을 발송한다. 코드 수정 요청은 발송/운영 반영 승인이 아니다.
+record 이후 소스·설정·파일 변경은 check/record를 다시 수행한다. `promotion-plan`은 배포가 아닌 검토 자료다.
+설치와 YAML 반영은 원본 변화·실행 중인 Scheduler/Main/독립 타이머를 확인한 뒤 승인한 내용만 적용한다.
+후보 DB/큐/OPS/메일 이력은 운영본으로 가져가지 않는다. report_items YAML은 setup이 보존하므로 명시적으로 반영·백업한다.
+
+### 로컬 코드 버전·복원
+
+먼저 `docs/REPORT_REVIEW.md` 6절을 읽는다. `report_review.py current-version|versions`는 읽기 전용이다.
+Scheduler/Main 시작 배너와 실행 결과의 `code_version`을 대조한다. 버전은 실제 소스 내용의 ID이며
+`My_config.py`/YAML 변경은 코드 버전을 바꾸지 않는다. 코드 snapshot과 이력은 로컬 `.runtime-versions`에만 둔다.
+사용자가 정확한 저장 버전 복원을 요청하면 정상 종료·독립 타이머·Main 잠금 확인 후
+`report_review.py rollback --version <ID>`를 실행한다. 이미 지정한 버전을 다시 승인받지 않는다.
+실행 중에는 lease/기존 역할·제품 잠금이 복원을 막는다. 강제 종료·잠금 삭제로 우회하지 않는다.
+**복원은 Main.py/My_Function.py 등 실행 코드와 ZIP만, My_config.py·YAML·CSV·.env·RUN은 현재 그대로 유지한다.**
+업데이트는 `setup.py --target <운영> --preserve-config`를 기본으로 사용한다. 승인한 설정 diff는 별도 반영한다.
+복원 뒤 current-version·재시작 로그·관련 테스트를 확인하고 현재 설정과 옛 코드의 호환성 제한을 보고한다.
 
 재설치는 `My_config.py`를 포함한 소스·문서를 덮어쓴다. 운영 설정은 먼저 비교·보존한다.
 이전 파일은 `.setup-backups/<고유값>/*.bak`로 보존하고, 오래된 보조 소스가 새 ZIP을 가리지 않게 이동한다.

@@ -6,7 +6,7 @@
 
 정규 작업은 Scheduler가 제품별로 순회하고, 수동 재발행은 같은 Scheduler 큐로 접수한다.
 사내 OpenCode / oh-my-opencode는 요청 해석·로그 조회·큐 접수에 사용할 수 있다.
-보고서 판정은 Python 통계 코드가 수행한다. 아래 설명은 2026-09-30 코드 기준이다.
+보고서 판정은 Python 통계 코드가 수행한다. 아래 설명은 2026-10-01 코드 기준이다.
 
 ## 어떤 결과를 얻는가
 
@@ -84,6 +84,7 @@ cd auto_report_run
 | `reformatter/config.yaml` | 제품별 조회 조건·기간·수신 그룹·발송/업로드 토글 |
 | `reformatter/<vehicle>_reformatter.csv` | REAL/ADDP·SPEC·방향·CAT1/CAT2·REPORT ORDER·PPT_ONLY |
 | `reformatter/scheduler.yaml` | 실제 제품 순회 그룹·주기·큐 설정. 없으면 운영 실행 시 예제 seed 생성 |
+| `reformatter/report_items.yaml` | Daily/ML 제품별 기존 항목 선택·시간축·분류 dict. OpenCode 추가/삭제, 설치 보존 |
 | 메일링 Excel | `HOL_Auto_Report_Mailing_List.xlsx`, 그룹별 시트와 `KNOX_ID` 열. 메일 사용 시 |
 | `RUN/DB/ML_TABLE_<vehicle>.parquet` | Daily/ML의 wafer 단위 인자 표 |
 | Inline/좌표 Excel · 설명 PPT | 설정된 분석 보조 입력 |
@@ -145,12 +146,15 @@ YAML 파일은 변경하지 않으며, 생성 전용 요청과 메일·S3 발송
 | [anomaly_engine.py](anomaly_engine.py) | 규격 이탈·Flier·산포·공간 패턴 판정 |
 | [resource_governor.py](resource_governor.py) | CPU/메모리 실측, 공용 렌더 슬롯, DuckDB 예산 |
 | [operator_console.py](operator_console.py) | 단계명·콘솔 출력 |
+| [report_items.py](report_items.py) | 기존 Auto Report ALIAS 검증·제품별 항목 dict·원자적 추가/삭제 |
+| [report_review.py](report_review.py) | 후보 생성·검증·샘플 파일 등록·개인 발송·운영 반영 계획 |
+| [runtime_versions.py](runtime_versions.py) | 로컬 코드 버전·시작 배너·공유 실행 lease·설정 보존 복원 |
 | [gen_setup.py](gen_setup.py) → [setup.py](setup.py) | 편집 소스·문서를 압축 설치 번들로 생성 |
 
-기본 설치는 Main.py·Scheduler.py·My_config.py **3개**와 보조 모듈 4개의 UTF-8 소스 ZIP
+기본 설치는 Main.py·Scheduler.py·My_config.py·report_review.py **4개**와 보조 모듈 6개의 UTF-8 소스 ZIP
 (`auto_report_runtime.zip`), 문서를 푼다. setup.py는 설치 도구다.
 Git 체크아웃은 편집 소스·빌더·문서·테스트를 갖춘 개발용 구조다. `python gen_setup.py`로 setup.py를 재생성할 수 있다.
-설치본은 위 3개 진입점과 ZIP으로 운영하는 구성이다. 소스를 수정할 때만 `--extract-sources`로 보조 모듈을 꺼낸다.
+설치본은 위 4개 진입점과 ZIP으로 운영하는 구성이다. `--extract-sources`로 보조 모듈·빌더·테스트를 꺼낸다.
 개별 보조 `.py`가 있으면 ZIP보다 먼저 import되므로 실제 실행 소스를 확인한다.
 
 운영 이력은 `RUN/OPS/operations.sqlite`의 `records(kind,id,updated,payload)`에 저장한다.
@@ -244,13 +248,15 @@ OpenCode는 실제 설치 폴더의 [AGENTS.md](AGENTS.md)를 적용한다.
 | “어떤 로그 있어?”, “왜 실패했어?” | 대상 로그·상태·읽기 전용 이력 조회 |
 | “파일만 만들어줘”, “다시 발송해줘” | 대상·범위·발송 의도 확인 → 기존 큐 접수 → 결과 추적 |
 | 운영 에이전트 | 코드 읽기·조회·검증된 접수. 모든 oh-my-opencode 하위 에이전트에도 같은 범위 |
-| 개발 에이전트 | 별도 체크아웃의 소스 수정·모의 테스트·번들 재생성·임시 설치 |
+| 개발 에이전트 | 설치 폴더에서 후보 생성 후 후보 소스/dict 수정·모의 테스트·샘플·반영 계획 |
 | 배포 계정 | 검토한 번들 설치·계획된 재시작 |
 
 **AGENTS는 지침이고, 코드 보호는 OpenCode 권한과 OS 파일 권한으로 강제한다.**
 운영 계정은 소스·setup·config·큐 state/history를 읽기 전용으로 두고 필요한 inbox 접수만 쓰도록 한다.
 `edit=deny`만으로 범용 shell/Python의 파일 쓰기가 막히지 않으므로 실행 명령도 좁게 허용한다.
 개발/운영 환경을 분리하고 하위 에이전트가 더 넓은 권한으로 실행되지 않는지 검증한다.
+명시적인 개선 요청은 [OpenCode 검토·반영 절차](docs/REPORT_REVIEW.md)로 진행한다.
+운영본을 열어 요청해도 `report_review.py prepare`가 만든 후보에서 수정한다.
 정확한 문법은 설치된 OpenCode와 [플러그인](https://github.com/code-yeongyu/oh-my-openagent)의 버전·스키마를 확인한다.
 
 LLM 주소·키·모델 SDK는 Auto Report에 넣지 않는다.
@@ -259,6 +265,12 @@ LLM 주소·키·모델 SDK는 Auto Report에 넣지 않는다.
 사내 원천 데이터·DB·보고서·메일링 Excel·자격은 사용자 지시 없이 외부 Git/LLM/공유 서비스에 전송하지 않는다.
 
 ## 개발과 배포
+
+**일상적인 OpenCode 개선·제품별 항목 변경은 [수정 → 테스트 → 샘플 → 운영 반영](docs/REPORT_REVIEW.md)을 따른다.**
+“vehicle_A Daily Trend에 VTH_N 추가하고 LEAKAGE 빼줘”처럼 요청하면 기존 ALIAS를 검증하고
+`reformatter/report_items.yaml` dict를 갱신한다. Daily/ML 전용 reformatter 열은 필요하지 않다.
+일정·제품·수신처는 기존 설정을 유지하며, 선택한 항목에도 최근 측정 조건·ML 선별이 적용된다.
+검토한 HTML/PPT를 지정한 사내 ID에 TEST 메일로 보내고 확인 후 승인한 번들·YAML만 운영본에 반영한다.
 
 코드 변경 전 [AGENTS.md](AGENTS.md)와 [CLAUDE.md](CLAUDE.md)의 불변식,
 현재 git 상태와 대상 diff를 읽고 기존 사용자 변경을 보존한다.
@@ -270,16 +282,24 @@ python setup.py --build
 python setup.py --target <임시검증폴더>
 ```
 
-- 설치본에서 `--extract-sources`는 보조 모듈 4개와 gen_setup.py를 꺼내고 기존 파일을 보존한다.
+- 설치본에서 `--extract-sources`는 보조 모듈 6개·gen_setup.py·오프라인 테스트를 꺼내고 기존 파일을 보존한다.
 - 수정·관련 오프라인 테스트 후 `--build` 또는 `python gen_setup.py`로 setup.py를 재생성한다.
   현재 진입점·설정·문서·추출 소스(없으면 ZIP)를 읽는다. setup.py 압축 DATA는 직접 편집하지 않는다.
-- 테스트는 개발 체크아웃에서 실행한다. 기본 설치에는 tests가 없으며 실제 사내 조회·메일·S3는 모의 처리한다.
-- 임시 새 설치에서 Python 3개·ZIP import·CLI·운영 경로·spawn을 확인한다.
+- 테스트는 후보/개발 체크아웃에서 실행한다. 기본 설치의 tests는 후보에서 추출하며 사내 조회·메일·S3는 모의 처리한다.
+- 임시 새 설치에서 Python 4개·ZIP import·CLI·운영 경로·spawn을 확인한다.
   운영 폴더에 검증용 재설치를 하지 않는다.
 - 새 YAML 키는 기존 운영 YAML에도 동작하도록 코드 기본값을 둔다.
   새 파일은 `.gitignore`의 허용 목록·추적 여부와 번들 목록을 확인하고 `git add -A` 대신 검토한 파일만 명시한다.
 - 번들 재생성·Git push만으로 실행 중인 서버가 업데이트되지는 않는다.
   운영 작업과 독립 서비스 상태를 확인한 뒤 새 번들 설치·재시작을 진행한다.
+
+현재 코드 버전은 Scheduler/Main 시작 로그와 실행 결과의 `code_version`에 표시된다.
+`python report_review.py versions`로 로컬 이력을 보고, 정상 종료 후
+`python report_review.py rollback --version <코드ID>`로 실행 코드만 복원한다.
+**Main.py·My_Function.py 등 코드가 돌아가며 My_config.py와 YAML·CSV·DB·큐·메일 이력은 현재 그대로 유지된다.**
+설치 폴더 `.runtime-versions`에 실제 소스/ZIP의 코드 내용으로 버전을 저장하며 외부 Git은 사용하지 않는다.
+업데이트도 `setup.py --target <운영폴더> --preserve-config`로 현재 설정을 유지한다.
+검증·샘플·저장 범위·실행 중 복원 차단의 상세는 [검토 절차 6절](docs/REPORT_REVIEW.md#6-로컬-코드-버전과-이전-버전-복원)을 따른다.
 
 ## 기술 참고
 
@@ -300,6 +320,8 @@ python setup.py --target <임시검증폴더>
 
 ### Daily Trend
 최근 24시간 `(시작, 종료]`에 측정된 항목을 카테고리별 3열 격자로(노란 띠 = last 24h, 검정 테두리 점 = 24시간 측정). 상단 **이상·주의 요약**은 Auto Report 와 같은 판정 함수를 쓰며 항목명을 누르면 해당 차트로 이동합니다. PPT 도 요약 → 카테고리별 Trend(요약에서 슬라이드 링크).
+제품별 후보 항목은 `reformatter/report_items.yaml`의 `daily_trend` dict에서 선택한다.
+미지정은 기존 Auto Report의 숫자 REPORT ORDER 항목 전체다. 시간축·분류도 같은 dict로 관리한다.
 
 ### Watchdog
 정상/정지 의심/명시적 종료/장기 처리 지연, 신규·갱신 측정, prime key 별 생성·저장·메일 상태와 미발행 사유, 단계별 시간. 첨부는 UTF-8 BOM CSV.
@@ -307,7 +329,8 @@ python setup.py --target <임시검증폴더>
 ### ML Insight
 
 ### 대상 선정
-`candidate_source`: `daily`(Daily Trend 가 이상·주의로 본 항목만) / `ml`(모든 항목을 ML 기법으로 선별) / `either`(기본, 둘 중 하나).
+`report_items.yaml`의 `mlmode` dict로 제품별 후보 항목을 고른 뒤 `candidate_source`를 적용한다:
+`daily`(Auto Report의 Daily 판정이 이상·주의로 본 항목만) / `ml`(선택 후보를 ML 기법으로 선별) / `either`(기본, 둘 중 하나).
 ML 기법: split·시간 추이·분포/산포 변화·극단값 비율(통계 검정, 전체 BH 보정 + 기법별 효과 기준), 과거 wafer 로 학습한 Isolation Forest / LOF, 진단용 장비·공간 차이. q 는 불량률이 아니고, 탐지 없음이 전체 정상 판정은 아닙니다(연산 상한 도달 시 본문에 표시).
 
 ### 항목 페이지 — auto report 항목 페이지와 같은 구조
@@ -415,6 +438,7 @@ PPT: 요약 1장 → 항목마다 ① **항목 페이지** ② **ML_TABLE 인자
 | 전역(경로·임계값·화질·병렬·메일·일일 서비스) | `My_config.py` |
 | 제품별(조회 기간·메일 시트·토글) | `reformatter/config.yaml` |
 | 항목·Spec·ADDP | `reformatter/<vehicle>_reformatter.csv` |
+| Daily/ML별 제품→ALIAS→시간축/분류 | `reformatter/report_items.yaml` (상세: REPORT_REVIEW.md) |
 | 제품 순회 그룹·주기·수동 요청 큐 | `reformatter/scheduler.yaml` |
 
 ### 이상 판정 민감도 (값이 클수록 덜 민감)

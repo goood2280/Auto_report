@@ -5089,24 +5089,17 @@ def daily_trend_load(vehicle, reformatter, days=None):
 def daily_trend_ml(frame, reformatter, vehicle, settings):
     """Join only requested ML columns; ambiguous wafer keys are never guessed.
 
-    Reformatter tkout_time/split_check accepts an exact column or a process step,
-    resolved to TKOUT_TIME_<step>/KNOB_<step>. split_check accepts ANY Parquet
-    column (e.g. FAB_ETCH, recipe, numeric codes), case-insensitively, and CUSTOM
-    searches may use fnmatch wildcards (e.g. ``FAB 1.0*ppid``).
+    Per-item time_column/split_columns come from report_items.yaml and resolve
+    against ML_TABLE columns. split_columns accept exact names or CUSTOM
+    wildcards (e.g. ``FAB 1.0*ppid``), case-insensitively.
     Multiple grouping columns use ';'; the KNOB_ prefix is only a legacy fallback.
     """
-    columns={str(c).lower():c for c in reformatter.columns}
     mappings={};wanted=set()
-    def clean(value):
-        return '' if pd.isna(value) or str(value).strip().lower() in ('','nan','none','false','0') else str(value).strip()
     for _,spec in reformatter.iterrows():
-        timing=clean(spec.get(columns.get('tkout_time','tkout_time')))
-        split=clean(spec.get(columns.get('split_check','split_check')))
-        warnings=[]
-        if split.lower() in ('true','1','yes','y') and not timing:
-            warnings.append('split_check enabled without a tkout_time step or explicit ML column')
-        if split.lower() in ('true','1','yes','y'):split=timing
-        mappings[str(spec['ALIAS'])]=dict(time=timing,split=[x.strip() for x in split.split(';') if x.strip()],warnings=warnings)
+        item_options=(settings.get('_item_options') or {}).get(str(spec['ALIAS']),{})
+        timing=str(item_options.get('time_column','') or '').strip()
+        split=item_options.get('split_columns',[])
+        mappings[str(spec['ALIAS'])]=dict(time=timing,split=[str(x).strip() for x in split if str(x).strip()],warnings=[])
     deep=settings.get('service')=='mlmode'
     requested=deep or any(m['time'] or m['split'] for m in mappings.values())
     if not requested:return frame,mappings
@@ -5277,8 +5270,17 @@ def daily_trend_entries(frame, reformatter, vehicle, settings, now=None):
     """Every categorized item/context is retained, including no-data and no-spec items."""
     from anomaly_engine import trend_agg_spec
     now=pd.Timestamp.now() if now is None else pd.Timestamp(now)
-    if 'CAT2' not in reformatter:return []
-    selected=reformatter.loc[reformatter['CAT2'].notna() & reformatter['CAT2'].astype(str).str.strip().ne('')].drop_duplicates('ALIAS')
+    if 'ALIAS' not in reformatter or 'REPORT ORDER' not in reformatter:return []
+    from report_items import load_catalog,select_formatter
+    catalog=settings.get('_report_items_catalog')
+    if catalog is None:
+        path=settings.get('items_file') or os.path.join(GLOBAL_CONFIG.base_path,'reformatter','report_items.yaml')
+        catalog=load_catalog(path)
+    service=settings.get('service','daily_trend')
+    selected,item_options=select_formatter(reformatter,vehicle,service,catalog)
+    if selected.empty:return []
+    settings=dict(settings,_item_options=item_options)
+    selected=selected.drop_duplicates('ALIAS')
     frame,mappings=daily_trend_ml(frame,selected,vehicle,settings)
     entries=[]
     aliases=sorted(reformatter['ALIAS'].dropna().astype(str),key=len,reverse=True)
