@@ -557,7 +557,7 @@ class Config:
             # -- 데이터 --
             ml_table_dir='RUN/DB', ml_join_keys=['root_lot_id','wafer_id'],
             # -- 렌더/용량 --
-            chart_dpi=150, trend_marker_size=18, trend_recent_marker_size=32, trend_palette_colors=64, trend_background_alpha=0.3, html_legend_limit=6, html_columns=3, ppt_max_bytes=10_000_000, html_max_bytes=2_000_000,
+            chart_dpi=150, trend_marker_size=18, trend_recent_marker_size=32, trend_palette_colors=64, trend_background_alpha=0.3, html_legend_limit=6, html_columns=3, ppt_max_bytes=10_000_000, html_max_bytes=1_000_000,
             mail_max_bytes=20_000_000, max_mail_parts=10,
             # -- 실행 --
             report_timeout_sec=3600, poll_sec=30,
@@ -571,7 +571,7 @@ class Config:
             # -- 데이터 --
             ml_table_dir='RUN/DB', ml_join_keys=['root_lot_id','wafer_id'],
             # -- 렌더/용량 --
-            chart_dpi=150, trend_palette_colors=64, html_columns=4, ppt_max_bytes=10_000_000, html_max_bytes=2_000_000,
+            chart_dpi=150, trend_palette_colors=64, html_columns=4, ppt_max_bytes=10_000_000, html_max_bytes=1_000_000,
             mail_max_bytes=20_000_000, max_mail_parts=10,
             # -- 대상 선정 --
             # candidate_source: 'daily'  = Daily Trend(Auto Report 판정)가 이상·주의로 본 항목만 ML 로 자세히 분석(가장 가볍다)
@@ -813,7 +813,7 @@ class Config:
         # 메일 첨부 한도 대비 PPT 목표: 차트까지 만든 뒤 남은 용량으로 Description 이미지 화질을 정하고,
         # 그래도 넘으면 큰 이미지부터 줄여 한도 아래로 맞춘다(ppt_mail_max_mb × ppt_budget_ratio).
         self.ppt_mail_max_mb = 10.0
-        self.html_mail_max_mb = 2.0        # 메일 본문(HTML) 한도 — 넘으면 로그에 경고
+        self.html_mail_max_mb = 1.0        # 메일 HTML+base64 UTF-8 전체 한도(십진 MB); 저장·전송 전 강제 적용
         self.ppt_budget_ratio = 0.92       # 여유분(메일 서버 오버헤드) — 10MB × 0.92 ≈ 9.2MB
         self.description_min_px = 480      # 용량이 빠듯할 때 Description 이미지 최소 해상도(최대 변 px). 이보다 작아야 하면 이미지 생략(글자는 유지)
 

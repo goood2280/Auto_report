@@ -36,6 +36,58 @@ def request(identity='req-1', lot='L1', **changes):
     return req
 
 
+@pytest.mark.parametrize('action', [dict(kind='sync_wip'), dict(mode='WIP_SYNC')])
+def test_wip_sync_routes_to_product_only_command(action):
+    req, why = scheduler._norm_request(dict(req_id='wip-1', vehicle='vehicle_A', **action), 'test')
+    assert not why and req['kind'] == 'sync_wip' and req['generate_only']
+    assert scheduler.main_arguments(req, ['OPS']) == ['--sync-wip', 'vehicle_A']
+    assert scheduler.target_key(req) == 'vehicle_A|WIP_SYNC'
+    assert not req['lot_id'] and not req['step_id'] and req['email_receiver'] is None
+
+
+@pytest.mark.parametrize('field,value', [('lot_id','L1'), ('step_id','S1'), ('key','TEST_L1_S1'),
+                                        ('days',30), ('parallel',2), ('send_user','user'),
+                                        ('email_receiver',['OPS']), ('generate_only','false'), ('mode','SINGLE')])
+def test_wip_sync_rejects_report_options(field, value):
+    req, why = scheduler._norm_request(dict(kind='sync_wip', vehicle='TEST', **{field:value}), 'test')
+    assert req is None and why
+
+
+def test_wip_sync_queue_executes_without_mail_or_done_targets_and_can_repeat(queue, monkeypatch):
+    cfg, state = queue
+    cfg['trigger']['allowed_email_receiver'] = []
+    cfg['trigger']['email_receiver'] = []
+    calls = []
+    def run(cfg, args, label, email_receiver=None):
+        calls.append(args)
+        assert args == ['--sync-wip', 'TEST'] and email_receiver is None
+        assert cfg['_generate_only'] is True
+        saved = json.loads(Path(state.path).read_text(encoding='utf-8'))
+        assert saved['active']['request']['kind'] == 'sync_wip'
+        return 0
+    monkeypatch.setattr(scheduler, 'run_main', run)
+    for number in range(2):
+        req, why = scheduler._norm_request(dict(req_id=f'wip-{number}', kind='sync_wip', vehicle='TEST'), 'test')
+        assert not why and scheduler._enqueue(state, req, cfg)
+        duplicate, _ = scheduler._norm_request(dict(req_id=f'duplicate-{number}', kind='sync_wip', vehicle='TEST'), 'test')
+        assert not scheduler._enqueue(state, duplicate, cfg)
+        assert scheduler.process_triggers(cfg, state) == 1
+        assert state.data['history'][f'id:wip-{number}']['status'] == 'done'
+        assert not state.data.get('done_targets')
+        assert not scheduler._enqueue(state, req, cfg)
+    assert len(calls) == 2
+
+
+def test_wip_sync_respects_explicit_kind_allowlist(queue, monkeypatch):
+    cfg, state = queue
+    cfg['trigger']['allowed_kinds'] = ['report', 'init_db', 'send_user']
+    req, why = scheduler._norm_request(dict(req_id='blocked', kind='sync_wip', vehicle='TEST'), 'test')
+    assert not why and scheduler._enqueue(state, req, cfg)
+    monkeypatch.setattr(scheduler, 'run_main', lambda *a, **k: pytest.fail('Disabled WIP command executed'))
+    assert scheduler.process_triggers(cfg, state) == 1
+    assert state.data['history']['id:blocked']['rc'] == -5
+
+
 def test_claim_is_durable_before_main_and_finish_clears_it(queue, monkeypatch):
     cfg, state = queue
     state.data['pending'] = [request()]

@@ -460,7 +460,7 @@ PPT: 요약 1장 → 항목마다 ① **항목 페이지** ② **ML_TABLE 인자
 | `ppt_chart_dpi` / `html_chart_dpi` / `html_wfmap_dpi` | 125 / 170 / 200 | PPT·HTML 해상도(독립) |
 | `html_inline_img_max_kb` | 100 | 인라인 그림 1장 상한 |
 | `ppt_mail_max_mb` × `ppt_budget_ratio` | 10 × 0.92 | PPT 첨부 한도(남은 용량으로 Description 화질 결정) |
-| `html_mail_max_mb` | 2.0 | 메일 본문 한도 |
+| `html_mail_max_mb` | 1.0 | 메일 본문 한도 |
 | `mail_attach_limit` / `mail_inline_image_limit` | 10 / 8 | 메일 API 첨부 한도 / 메일 1통 본문 그림 상한 |
 | `mail_connect_timeout_sec` / `mail_read_timeout_sec` / `mail_max_attempts` | 10 / 90 / 3 | 메일 전송 |
 | `use_email_send` / `use_s3_upload` / `use_description_page` | False / True / True | 발송·업로드·간지 |
@@ -511,6 +511,8 @@ PPT: 요약 1장 → 항목마다 ① **항목 페이지** ② **ML_TABLE 인자
 | `python Main.py vehicle_A` | 신규 측정 완료 Lot의 자동 발행 |
 | `python Main.py --init-db vehicle_A [--days 30] [--parallel 4]` | DB setting 적재, 기본 200일·직렬 조회, 리포트·메일·S3 없음 |
 | `python Main.py "_TRIGGER_DB_SETTING_vehicle_A" --days 30 --parallel 4` | 오늘 포함 최근 30일 적재, 병렬 조회 최대 4개, executor 잠금 우회 |
+| `python Main.py --sync-wip vehicle_A` | 제품 WIP 조회 후 Final ET log의 완료 상태만 갱신, 과거 완료 건 자동 발행 제외 |
+| `python Main.py "_TRIGGER_WIP_SYNC_vehicle_A"` | `--sync-wip`와 동일. 보고서·메일·S3·ET 적재 없음 |
 | `python Main.py "_TRIGGER_vehicle_A_L001.1_S1"` | 기본 조회기간의 지정 대상 |
 | `python Main.py "_TRIGGER_SINGLE_vehicle_A_L001.1_S1"` | 기간 제한 없이 선택 Lot/Step ET만 |
 | `python Main.py "_TRIGGER_NORMAL_vehicle_A_L001.1_S1"` | 좌표 파일의 13pt shot만 |
@@ -525,11 +527,30 @@ DB setting은 Lot/Step 없이 제품만 지정한다. `--days`와 `--parallel`�
 생략하면 제품 YAML의 `db_setting_days`/`db_setting_parallel`(코드 기본값 200/1)을 사용한다.
 `SplitTimeSpan`(없으면 7일) 단위로 겹치지 않는 날짜 구간을 만들고 요청한 병렬 수 상한 안에서 조회한다.
 실제 병렬 수는 `resource_governor`의 공용 슬롯·CPU·메모리·`parallel_max_workers` 한도를 따르며 로그에 표시한다.
-WIP 조회·보고서·발송 상태 갱신·메일·S3는 수행하지 않는다. 적재 실패는 실패 종료로 전달한다.
+조회 구간이 모두 성공하면 기존 ET 이력을 Final ET log에 합쳐 `dc_done=True`로 초기화한다.
+초기 적재 이력은 다음 자동 실행에서 신규 완료/재시도 대상으로 다시 발행하지 않는다.
+초기화 이후 새 Lot/Step이나 기준선보다 늦은 측정의 재시도는 기존 자동 발행 조건을 따른다.
+명시적 Lot/Step 수동 TRIGGER는 계속 가능하다. 이 처리는 실제 메일 발송 성공을 뜻하지 않으며 발송 이력은 바꾸지 않는다.
+WIP 조회·보고서·메일·S3는 수행하지 않는다. 적재 실패는 실패 종료로 전달하며 완료 기준선을 갱신하지 않는다.
 
 Scheduler 큐도 `{"kind":"init_db","vehicle":"vehicle_A","days":30,"parallel":4}` 또는
 `{"mode":"DB_SETTING","vehicle":"vehicle_A","days":30,"parallel":4}`를 받는다.
 큐에 넣은 적재는 기존 순서대로 현재 Main 완료 후 실행한다. 즉시 별도 적재하려면 위 전용 CLI를 사용한다.
+
+과거 보고서가 다시 발행되는 제품은 **WIP 상태 갱신**을 큐로 접수할 수 있다.
+`{"req_id":"wip-sync-고유값","kind":"sync_wip","vehicle":"vehicle_A"}` 또는
+`{"req_id":"wip-sync-고유값","mode":"WIP_SYNC","vehicle":"vehicle_A"}`를 사용한다.
+실행 중인 Scheduler가 없을 때는 위 Main 전용 명령을 실행한다. 공통 executor와 같은 제품 잠금을 유지한다.
+기존 scheduler.yaml의 `trigger.allowed_kinds`에 허용 종류를 명시했다면 `sync_wip`를 추가해야 한다.
+기본 신규 설정은 이미 포함하며, 기존의 사용자 지정 허용목록을 자동으로 넓히지 않는다.
+
+이번에 성공한 WIP 조회에서 Lot별 최신 갱신 행을 선택해 원시 ET log와 Final의 전체 이력에 같은 완료 판정을 적용한다.
+대기시간(`delay_min`)이 지난 측정 중 WIP 공정 접두사가 다르거나, 공정 번호가 100 이상 진행했거나,
+현재 WIP에 Lot이 없으면 완료=True로 처리한다. 기존 True는 유지하고 진행·대기 중인 False는 유지한다.
+완료 처리한 측정 시각을 제외 기준선으로 저장해 과거 실패/대기/unknown/메일 비활성 보고서의 자동 재시도도 막는다.
+진행 중인 건이 이후 완료되면 정규 자동 발행 대상이 되고, 명시적인 Lot/Step 수동 TRIGGER는 가능하다.
+WIP 조회 실패·필수 값 누락·Final 저장 실패 시 갱신 성공으로 처리하지 않는다. 오래된 캐시로 대체하지 않는다.
+ET 원본·실제 발송 이력은 유지하며, 결과 JSON의 `wip_sync`에 완료/진행/신규 완료 건수를 기록한다.
 
 </details>
 
@@ -553,6 +574,11 @@ Scheduler 큐도 `{"kind":"init_db","vehicle":"vehicle_A","days":30,"parallel":4
 
 발송 직전 가드가 한 번 더 비교해 넘치면 뒤쪽 그림을 "첨부 PPT 참조" 문구로 바꿔 발송이 실패하지 않게 합니다(저장된 HTML·PPT 에는 그대로). 메일 API의 거부 사유는 메일 이력(reason)과 로그에서 확인합니다.
 모든 `<img>` 는 `data:image` 인라인이고 1장당 `html_inline_img_max_kb`(100 KB) 이하입니다(큰 인라인 그림은 메일 서버가 첨부로 떼어 냄).
+
+본문 전체는 한글 UTF-8·HTML 태그·인라인 base64를 합쳐 **1,000,000 bytes 미만**으로 제한합니다.
+표의 값·11px 글자·색상·셀 폭은 유지하며 반복 스타일/들여쓰기를 줄이고, 부족하면 이미지를 팔레트 PNG부터 압축합니다.
+Auto Report 저장 전과 모든 메일 전송 직전에 검사하며, 이전 2MB 설정도 1MB를 넘길 수 없습니다.
+Daily/ML은 각 분할 메일에 같은 한도를 적용합니다. 텍스트·표만으로 한도를 넘으면 발송 전에 실패 이유를 기록합니다.
 
 </details>
 

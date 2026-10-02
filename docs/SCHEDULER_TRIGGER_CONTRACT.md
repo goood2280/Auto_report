@@ -64,12 +64,13 @@ CLI 공개는 같은 폴더의 임시 파일을 hard link로 연결하므로 inb
 | 필드 | 내용 |
 |---|---|
 | `req_id` | 외부 생산자는 항상 고유 ID 지정. 영숫자로 시작, `[A-Za-z0-9._-]`, 최대 128자. CLI 생략 시 자동 생성. 직접 파일에 없으면 대상 조합으로 중복 판정 |
-| `kind` | `report`(기본), `init_db`, `send_user`. `trigger.allowed_kinds`에 있어야 함 |
+| `kind` | `report`(기본), `init_db`, `send_user`, `sync_wip`. `trigger.allowed_kinds`에 있어야 함 |
 | `vehicle` | 실제 `reformatter/config.yaml` 키. 영숫자·`.`·`_`·`-`, 1–64자. 설정을 읽지 못하면 유효 제품이라고 추측하지 않음 |
 | `lot_id`, `step_id` | report/send_user 대상. 각 토큰 영숫자·`.`·`-`, 1–40자. `_` 불가. 쉼표 목록 지원 |
 | `key` | vehicle/Lot/Step 대신 `제품_Lot_Step`. 오른쪽 두 `_`로 분리 |
 | `mode` | `TRIGGER`(기본), `SINGLE`, `NORMAL`, `FORCE`, `ALL` |
 | `mode=DB_SETTING` | `kind=init_db`로 정규화. Lot/Step 없이 제품의 원시 DB만 적재 |
+| `mode=WIP_SYNC` | `kind=sync_wip`로 정규화. Lot/Step 없이 제품 WIP와 Final ET log 완료 상태만 갱신 |
 | `days`, `parallel` | init_db/DB_SETTING 전용, 1 이상의 JSON 정수. 생략하면 제품 db_setting_days/db_setting_parallel(기본 200/1) |
 | `generate_only` | JSON boolean. 기본 false. true면 메일·S3 OFF, 보고서 파일 생성 |
 | `force` | JSON boolean. 기본 false. 대상 완료 중복만 우회. req_id/대기 중복·잠금·입력 검증은 유지 |
@@ -104,6 +105,17 @@ report_making=True를 적용한다. YAML 원본은 보존한다. generate_only=t
   큐의 순차 소비는 유지한다. 별도 실행을 승인한 적재는
   `Main.py "_TRIGGER_DB_SETTING_vehicle_A" --days 30 --parallel 4`로 executor를 기다리지 않고 시작할 수 있다.
   같은 제품 잠금은 유지하므로 그 제품의 다른 Main이 실행 중이면 기다린다.
+- WIP 상태 갱신: `{"req_id":"wip-sync-고유값","kind":"sync_wip","vehicle":"vehicle_A"}`.
+  Scheduler는 `Main.py --sync-wip vehicle_A`를 subprocess로 실행한다.
+  `_TRIGGER_WIP_SYNC_vehicle_A`도 같은 Main 명령이며 공통 executor·제품 잠금을 유지한다.
+  제품 WIP를 새로 조회해 원시 ET/Final의 전체 이력을 최신 Lot 공정과 비교하고 `dc_done`을 갱신한다.
+  완료=True로 정리한 과거 측정은 자동 재시도에서도 제외한다. 기존 True와 진행·대기 중인 False는 유지한다.
+  ET 적재·보고서 생성·메일·S3는 하지 않고 발송 이력과 그룹 done_targets도 바꾸지 않는다.
+  조회 실패나 잘못된 WIP에서는 오래된 캐시로 대체하지 않으며 Final을 변경하지 않는다.
+  Lot/Step/key, days/parallel, send_user/email_receiver는 넣지 않는다. `mode=WIP_SYNC`도 동일하다.
+  반복 갱신은 새 req_id로 접수하며 같은 제품의 대기 중인 WIP 갱신 요청은 중복 처리하지 않는다.
+  기존 scheduler.yaml의 명시적 `trigger.allowed_kinds`에는 `sync_wip`를 추가해야 한다.
+  새 기본 설정에는 포함하며 기존 사용자 지정 허용목록은 보존한다.
 
 ### 외부 파일 생산자
 

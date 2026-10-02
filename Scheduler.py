@@ -58,8 +58,8 @@ _RE_VEHICLE = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
 _RE_TOKEN = re.compile(r'^[A-Za-z0-9.-]{1,40}$')
 _RE_USER = re.compile(r'^[A-Za-z0-9._-]{1,64}$')        # Main.py samsung_email 의 사용자 ID 규칙과 같다
 _RE_REQUEST_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
-REQUEST_KINDS = ('report', 'init_db', 'send_user')        # 큐 요청 종류 (기본 report)
-QUEUE_MODES = ('TRIGGER', 'NORMAL', 'SINGLE', 'FORCE', 'ALL', 'DB_SETTING')
+REQUEST_KINDS = ('report', 'init_db', 'send_user', 'sync_wip')        # 큐 요청 종류 (기본 report)
+QUEUE_MODES = ('TRIGGER', 'NORMAL', 'SINGLE', 'FORCE', 'ALL', 'DB_SETTING', 'WIP_SYNC')
 
 _STOP = threading.Event()        # SIGINT/SIGTERM 수신 플래그
 _CURRENT_PROC = None             # 현재 실행 중인 Main.py 프로세스(정지 시 정리용)
@@ -113,8 +113,8 @@ trigger:
   # 요청 JSON 이 email_receiver 를 지정한 경우, 아래 허용목록에 있는 그룹만 받아들인다(외부 입력 검증).
   allowed_email_receiver: ['MANUAL_TRIGGER', 'POWER_USER', 'HOL']
 
-  # 받아들일 요청 종류: report(리포트 발행) / init_db(DB 설치 = 최근 200일 적재) / send_user(개인 1명 발송)
-  allowed_kinds: ['report', 'init_db', 'send_user']
+  # report(발행) / init_db(DB 설치) / send_user(개인 발송) / sync_wip(WIP 완료 상태 갱신만)
+  allowed_kinds: ['report', 'init_db', 'send_user', 'sync_wip']
   dedup_by_target: true        # 같은 vehicle/lot/step 은 req_id 가 달라도 재발행하지 않음(force:true 로 우회)
   max_retry: 0                 # 실패 시 재시도 횟수(0 = 재시도 없음 → '1회만 수행' 보장)
   retry_backoff_sec: 600
@@ -628,10 +628,32 @@ def _norm_request(raw, source):
     if kind not in REQUEST_KINDS:
         return None, f"kind는 {'/'.join(REQUEST_KINDS)}만 허용됩니다"
     if str(raw.get('mode') or '').upper() == 'DB_SETTING':
-        if kind == 'send_user':
+        if kind not in ('report', 'init_db'):
             return None, 'DB setting 적재는 개인 발송과 함께 사용할 수 없습니다'
         kind = 'init_db'
+    if str(raw.get('mode') or '').upper() == 'WIP_SYNC':
+        if kind not in ('report', 'sync_wip'):
+            return None, 'WIP 갱신은 적재/개인 발송과 함께 사용할 수 없습니다'
+        kind = 'sync_wip'
     vehicle = str(raw.get('vehicle') or '').strip()
+    if kind == 'sync_wip':
+        if not _RE_VEHICLE.fullmatch(vehicle):
+            return None, f'vehicle 형식 오류: {vehicle!r}'
+        if str(raw.get('mode') or 'WIP_SYNC').upper() not in ('WIP_SYNC', 'TRIGGER'):
+            return None, 'WIP 갱신 mode는 WIP_SYNC만 사용합니다'
+        for key in ('lot_id', 'lot', 'step_id', 'step', 'key', 'days', 'parallel', 'send_user', 'email_receiver'):
+            if key in raw:
+                return None, f'WIP 갱신은 제품만 지정합니다 ({key} 사용 불가)'
+        if not isinstance(raw.get('generate_only', False), bool):
+            return None, 'generate_only는 true/false만 허용됩니다'
+        return {
+            'req_id': req_id, 'kind': 'sync_wip', 'mode': 'WIP_SYNC', 'generate_only': True,
+            'vehicle': vehicle, 'lot_id': '', 'step_id': '', 'email_receiver': None, 'send_user': '',
+            'requested_by': str(raw.get('requested_by') or '').strip(),
+            'requested_at': str(raw.get('requested_at') or '').strip(),
+            'note': str(raw.get('note') or '').strip(), 'force': raw.get('force', False),
+            'source': source, 'attempts': 0, 'next_attempt_ts': 0,
+        }, ''
     if kind == 'init_db':
         # DB setting은 Lot/Step 없이 제품·기간·병렬 조회 상한만 지정한다.
         if not _RE_VEHICLE.match(vehicle):
@@ -734,6 +756,8 @@ def _dedup_key(req):
 def target_key(req):
     if req.get('kind') == 'init_db':
         return f"{req['vehicle']}|INIT_DB"
+    if req.get('kind') == 'sync_wip':
+        return f"{req['vehicle']}|WIP_SYNC"
     return f"{req['vehicle']}|{req['lot_id']}|{req['step_id']}"
 
 
@@ -771,6 +795,8 @@ def main_arguments(req, recv):
             if key in req:
                 args.extend(['--' + key, str(req[key])])
         return args
+    if kind == 'sync_wip':
+        return ['--sync-wip', vehicle]
     if kind == 'send_user':
         return ['--send-user', req['send_user'], '--prime-key', f'{vehicle}_{lot}_{step}'] + (
             ['--single'] if mode == 'SINGLE' else [])
@@ -878,7 +904,7 @@ def _enqueue(state, req, cfg):
 
     if tcfg.get('dedup_by_target', True) and not req.get('force'):
         done = state.data.get('done_targets', {})
-        if req.get('kind') == 'init_db':
+        if req.get('kind') in ('init_db', 'sync_wip'):
             prev = done.get(target_key(req))
             if prev:
                 log(f"트리거 중복(이미 처리 {prev}) 무시: {target_key(req)}")
@@ -1156,13 +1182,13 @@ def process_triggers(cfg, state):
             continue
         args = main_arguments(req, recv)
         arg = args[0] if len(args) == 1 else args
-        label = {'init_db': '[DB 설치]', 'send_user': '[개인 발송]'}.get(kind, '[TRIGGER]') + f" {target_key(req)}"
+        label = {'init_db': '[DB 설치]', 'sync_wip': '[WIP 갱신]', 'send_user': '[개인 발송]'}.get(kind, '[TRIGGER]') + f" {target_key(req)}"
         cfg['_request_id']=_dedup_key(req)
         cfg['_generate_only']=req.get('generate_only',False)
         cfg['_run_id']=run_id
         cfg['_state']=state
         # 개인 발송은 Main.py 가 --send-user 로 받는 사람 1명만 쓴다 → 그룹 수신처 환경변수를 넘기지 않는다.
-        try:rc = run_main(cfg, arg, label, email_receiver=None if kind in ('init_db', 'send_user') else recv)
+        try:rc = run_main(cfg, arg, label, email_receiver=None if kind in ('init_db', 'sync_wip', 'send_user') else recv)
         finally:
             cfg.pop('_request_id',None)
             cfg.pop('_generate_only',None)
@@ -1240,7 +1266,8 @@ def _finish(state, req, cfg, rc, note, ok, status=None):
         _move(src, req['_done_path'] if ok else req['_fail_path'])
 
     if ok:
-        done = ('DB 설치(200일 적재) 완료' if req.get('kind') == 'init_db' else
+        done = ('WIP·Final ET log 상태 갱신 완료 (발행 없음)' if req.get('kind') == 'sync_wip' else
+                'DB 설치 적재 완료' if req.get('kind') == 'init_db' else
                 '파일 생성·저장 (메일 없음)' if req.get('generate_only') else '메일 상태는 실행 이력에서 확인')
         log(f"수동 요청 처리 완료: {target_key(req)} | {done}", 'OK')
     else:

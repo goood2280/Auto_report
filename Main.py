@@ -31,7 +31,7 @@ if os.path.isfile(_runtime_zip) and _runtime_zip not in sys.path:
 #   (병렬 렌더링 워커가 __main__=Main을 재import할 때 무거운 bigdataquery 재import·안내문
 #    출력이 매번 발생하던 문제 방지 — 실제 쿼리는 My_Function 내부에서 지연 import한다.)
 from My_Function import *
-from My_Function import _filter_inline_by_vehicle  # import * 는 언더스코어 이름 미포함
+from My_Function import _filter_inline_by_vehicle, _et_completion_frame  # import * 는 언더스코어 이름 미포함
 from My_config import GLOBAL_CONFIG
 from anomaly_engine import analyze_commonality, render_findings_html, item_excluded
 from operator_console import STAGES, color
@@ -358,6 +358,14 @@ def _img_datauri(raw, max_kb=None):
     from PIL import Image as _PILc
     import io as _ioc
     _im = _PILc.open(_ioc.BytesIO(raw)).convert('RGB')
+    # Flat chart/map backgrounds compress well as palette PNG, without resizing
+    # labels or blurring thin lines. Try this before the JPEG/resize fallback.
+    for colors in (256, 128, 64):
+        _b = _ioc.BytesIO()
+        _im.quantize(colors=colors, method=_PILc.Quantize.MEDIANCUT,
+                     dither=_PILc.Dither.NONE).save(_b, 'PNG', optimize=True)
+        if _b.tell() <= _budget:
+            return 'data:image/png;base64,' + base64.b64encode(_b.getvalue()).decode('utf-8')
     for attempt in range(24):
         scale = 0.8 ** attempt
         resized = _im.resize((max(1, int(_im.width * scale)), max(1, int(_im.height * scale))), _PILc.Resampling.LANCZOS)
@@ -368,12 +376,170 @@ def _img_datauri(raw, max_kb=None):
     raise ValueError('인라인 이미지 크기 제한 초과')
 
 
+def _html_mail_limit(config=None, settings=None):
+    """Decimal MB, including UTF-8 text and inline base64; old 2MB settings cannot override 1MB."""
+    config = GLOBAL_CONFIG if config is None else config
+    configured = int(float(config.get('html_mail_max_mb', 1.0) or 1.0) * 1_000_000)
+    service = int((settings or {}).get('html_max_bytes', 1_000_000))
+    limit = min(1_000_000, configured, service)
+    if limit <= 0:
+        raise ValueError('메일 HTML 용량 한도는 양수여야 합니다')
+    return limit
+
+
+def _compact_report_html(content):
+    """Shorten generated inline CSS and indentation, keeping visible text and mail-safe styles."""
+    def style(match):
+        value = re.sub(r'\s*([:;,])\s*', r'\1', match.group(2)).strip().rstrip(';')
+        value = re.sub(r'#([0-9a-f])\1([0-9a-f])\2([0-9a-f])\3\b',
+                       r'#\1\2\3', value, flags=re.I)
+        return match.group(1) + value + match.group(3)
+    # Do not alter whitespace in preformatted text, scripts, CSS or textarea values.
+    parts = re.split(r'(<(?:pre|script|style|textarea)\b[^>]*>.*?</(?:pre|script|style|textarea)\s*>)',
+                     content, flags=re.I | re.S)
+    for i in range(0, len(parts), 2):
+        parts[i] = re.sub(r'(\bstyle=")([^"]*)(")', style, parts[i])
+        parts[i] = re.sub(r'>[ \t]*[\r\n]+\s*<', '><', parts[i])
+    return ''.join(parts)
+
+
+def _fit_html_budget(content, config=None, settings=None):
+    """Keep every table value and image; compact markup first, then fit images to the remaining bytes."""
+    config = GLOBAL_CONFIG if config is None else config
+    limit = _html_mail_limit(config, settings)
+    before = len(content.encode('utf-8'))
+    content = _compact_report_html(content)
+    # Reserve 5% for mail processing; the hard boundary remains the complete UTF-8 body.
+    target = int(limit * .95)
+    pattern = r'(<img\b[^>]*?\bsrc=")(data:image/[^"\s]+)(")'
+    for attempt in range(8):
+        size = len(content.encode('utf-8'))
+        if size <= target:
+            break
+        matches = list(re.finditer(pattern, content, flags=re.I | re.S))
+        image_bytes = sum(len(m.group(2)) for m in matches)
+        text_bytes = size - image_bytes
+        if not matches and size < limit:
+            break
+        if text_bytes >= limit or not matches:
+            raise ValueError(f'메일 본문 텍스트·표만 {text_bytes:,} bytes: {limit:,} bytes 한도 초과; 항목/비교 범위 분할 필요')
+        # When text leaves less than the reserved margin, use the hard boundary.
+        available = max(target - text_bytes, int((limit - text_bytes) * .95))
+        ratio = min(.95, available / image_bytes * .96)
+        cache = {}
+        def shrink(match):
+            uri = match.group(2)
+            if uri not in cache:
+                raw = base64.b64decode(uri.split(',', 1)[1], validate=True)
+                kb = max(1, int((len(uri) * ratio - 30) * .75 / 1024))
+                kb = min(kb, int(config.get('html_inline_img_max_kb', 100) or 100))
+                packed = _img_datauri(raw, max_kb=kb)
+                cache[uri] = packed if len(packed) < len(uri) else uri
+            return match.group(1) + cache[uri] + match.group(3)
+        reduced = re.sub(pattern, shrink, content, flags=re.I | re.S)
+        if reduced == content:
+            break
+        content = reduced
+    after = len(content.encode('utf-8'))
+    if after >= limit:
+        raise ValueError(f'메일 본문 {after:,} bytes > 한도 {limit:,} bytes; 항목/비교 범위 분할 필요')
+    print(f'[INFO] HTML 용량 {before:,} -> {after:,} bytes / 한도 {limit:,} bytes')
+    return content
+
+
+def _render_score_board(frame, target_lot, display_name=str):
+    """Render all item/wafer values with mail-safe inline styles and inherited row typography."""
+    sb_rows = list(frame.iterrows())
+    _wcols = list(frame.columns)
+
+    # Score Board WF MAP은 용량 문제로 제거됨 — WF MAP은 PPT에서만 확인.
+    # (렌더링/합성 코드와 scoreboard_wfmap_min_pts 설정도 함께 삭제)
+
+    # 렌더 시퀀스: index 점수행만.
+    render_seq = []   # (kind, cat, item, payload)
+    for idx, row in sb_rows:
+        cat, item = idx
+        render_seq.append(('score', cat, item, row))
+
+    # category 연속 묶음 rowspan
+    seq_cats = [r[1] for r in render_seq]
+    cat_span = {}
+    _j = 0
+    while _j < len(seq_cats):
+        _k = _j
+        while _k + 1 < len(seq_cats) and seq_cats[_k + 1] == seq_cats[_j]:
+            _k += 1
+        cat_span[_j] = _k - _j + 1
+        _j = _k + 1
+
+    # 메일 클라이언트는 <style> CSS를 무시하므로 각 셀에 inline style로 직접 지정
+    # (padding/font-size/nowrap도 <style> 값과 동일하게 inline — 메일·포워딩 표시 통일)
+    _SB_BD = 'border:1px solid #2c2c2c;'      # 셀 구분선(inline)
+    _SB_PAD = 'padding:4px 6px; white-space:nowrap;'
+    _sb_waf_w = 40      # wafer 셀 폭(숫자 잘림 방지) inline min-width
+    _SB_WAF = (f'{_SB_BD} width:{_sb_waf_w}px; min-width:{_sb_waf_w}px; '
+               f'max-width:{_sb_waf_w}px; padding:3px 1px; font-size:11px;')
+    _SB_CAT = f'{_SB_BD} {_SB_PAD} text-align:center; min-width:77px;'      # category 고정열
+    _SB_ITEM = f'{_SB_BD} {_SB_PAD} text-align:center; min-width:240px;'    # Item 고정열
+    sb_html = ''
+    # lot 그룹(헤더 colspan용): _wcols 순서대로 같은 lot을 묶음
+    _lot_groups = []   # [(lot, [col, ...]), ...]
+    for _c in _wcols:
+        if _lot_groups and _lot_groups[-1][0] == _c[0]:
+            _lot_groups[-1][1].append(_c)
+        else:
+            _lot_groups.append((_c[0], [_c]))
+
+    sb_html += '<table class="score-board" style="border-collapse:collapse; font-size:11px; text-align:center; white-space:nowrap; font-variant-numeric:tabular-nums;">\n  <thead>\n'
+    sb_html += '    <tr>\n'
+    sb_html += f'      <th colspan="2" class="sb-frozen-lot" style="{_SB_BD} {_SB_PAD} text-align:center; background-color:#d9e1f2;">LOT_ID</th>\n'
+    # root_lot_id가 같은 형제 lot을 각각 헤더로 분리 (target lot은 강조)
+    for _lot, _cols in _lot_groups:
+        _is_tgt = (str(_lot) == str(target_lot))
+        _bg = '#dbe7c8' if _is_tgt else '#f0f0f0'
+        _fw = 'bold' if _is_tgt else 'normal'
+        sb_html += (f'      <th colspan="{len(_cols)}" style="{_SB_BD} {_SB_PAD} text-align:center; '
+                    f'background-color:{_bg}; font-weight:{_fw};">{_lot}</th>\n')
+    sb_html += '    </tr>\n'
+    sb_html += '    <tr>\n'
+    sb_html += f'      <th class="sb-cat" style="{_SB_CAT} background-color:#d9e1f2;">category</th>\n'
+    sb_html += f'      <th class="sb-item" style="{_SB_ITEM} background-color:#d9e1f2;">Item</th>\n'
+    for col in _wcols:
+        sb_html += f'      <th class="sb-waf" style="{_SB_WAF} background-color:#f0f0f0;">#{col[1]}</th>\n'
+    sb_html += '    </tr>\n  </thead>\n  <tbody>\n'
+
+    for _i, (kind, cat, item, payload) in enumerate(render_seq):
+        sb_html += '    <tr style="font-weight:bold; text-align:center; white-space:nowrap; font-variant-numeric:tabular-nums;">\n'
+        if _i in cat_span:
+            sb_html += f'      <td class="sb-cat row_heading" rowspan="{cat_span[_i]}" style="{_SB_CAT} font-weight:bold; background-color:#ebf4ff; vertical-align:middle;">{cat}</td>\n'
+        row = payload
+        sb_html += (f'      <td class="sb-item row_heading" style="{_SB_ITEM} font-weight:bold; '
+                    f'background-color:#ebf4ff;">{display_name(item)}</td>\n')
+        for col in _wcols:
+            val = row[col]
+            if pd.isna(val) or val == "":
+                sb_html += f'      <td class="sb-val" style="{_SB_WAF} background-color:{GLOBAL_CONFIG.score_color_na};"></td>\n'
+            else:
+                # 연속 색상(PPT와 동일), ITEM별 스케일 override 지원
+                bg_color, color = GLOBAL_CONFIG.score_color(val, item)
+                sb_html += f'      <td class="sb-val" style="{_SB_WAF} background-color:{bg_color}; color:{color};">{val:.1f}</td>\n'
+        sb_html += '    </tr>\n'
+    sb_html += '  </tbody>\n</table>\n'
+
+    return _compact_report_html(sb_html)
+
+
 def _parse_trigger(argument):
-    """Report TRIGGER or DB_SETTING_<vehicle>; leading underscore optional."""
+    """Report, DB_SETTING or WIP_SYNC TRIGGER; leading underscore optional."""
     value = argument[1:] if argument.startswith('_') else argument
     if not value.startswith('TRIGGER_'):
         return None, argument, None, None, None
     value = value[len('TRIGGER_'):]
+    if value.startswith('WIP_SYNC_'):
+        vehicle = value[len('WIP_SYNC_'):].strip()
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', vehicle):
+            raise ValueError('WIP 갱신 형식: _TRIGGER_WIP_SYNC_<vehicle>')
+        return 'WIP_SYNC', vehicle, None, None, None
     if value.startswith('DB_SETTING_'):
         vehicle = value[len('DB_SETTING_'):].strip()
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', vehicle):
@@ -585,11 +751,12 @@ def _trend_artifacts(charts, title):
         content = ''.join(body)
         ppt = io.BytesIO()
         prs.save(ppt)
-        if len(content.encode('utf-8')) < 2_000_000 and ppt.tell() < 10_000_000:
+        content = _fit_html_budget(content)
+        if len(content.encode('utf-8')) < _html_mail_limit() and ppt.tell() < 10_000_000:
             _assert_inline_images(content, len(sheets))
             print('[INFO] HTML 인라인 이미지 검증 OK')
             return content, ppt.getvalue()
-    raise ValueError('ALL: 모든 trend를 유지하면서 HTML 2MB/PPTX 10MB 미만으로 축소할 수 없습니다')
+    raise ValueError('ALL: 모든 trend를 유지하면서 HTML 1MB/PPTX 10MB 미만으로 축소할 수 없습니다')
 
 
 def _publish_all_trends(frame, reformatter, vehicle, lot, root, dc, step, recipient, date):
@@ -694,6 +861,17 @@ class OperationRun:
         return 1 if failed else 0
 
 
+def _exclude_db_setup_history(candidates, vehicle):
+    """Suppress AUTO revisions handled by DB setup/WIP sync; manual triggers remain available."""
+    baseline = ops_get('db_setting_baseline', vehicle, {}).get('revisions', {})
+    if candidates.empty or not baseline:
+        return candidates
+    keys = vehicle + '_' + candidates['lot_id'].astype(str) + '_' + candidates['dc_step_id'].astype(str)
+    initialized = pd.to_datetime(keys.map(baseline), errors='coerce')
+    measured = pd.to_datetime(candidates['tkout_time'], errors='coerce')
+    return candidates.loc[initialized.isna() | measured.gt(initialized)].copy()
+
+
 def _retry_candidates(candidates, final_log, vehicle):
     """Called under the product lock: queued/running records belong to interrupted work."""
     revisions={}
@@ -703,13 +881,14 @@ def _retry_candidates(candidates, final_log, vehicle):
                (record.get('email')=='disabled' and GLOBAL_CONFIG.get('use_email_send',False)))
         if not retry or record.get('attempts',0)>=int(GLOBAL_CONFIG.get('report_max_attempts',3)):continue
         revisions[(record['prime_key'],record['tkout_time'])]=None
-    if not revisions:return candidates
+    if not revisions:return _exclude_db_setup_history(candidates, vehicle)
     # Series.astype(str) drops 00:00:00 for all-midnight batches, unlike the ledger.
     keys=zip(final_log['prime_key'].astype(str),final_log['tkout_time'].map(str))
     positions={key:index for index,key in enumerate(keys)}
     matched=final_log.iloc[[positions[key] for key in revisions if key in positions]]
     matched=matched[['lot_id','dc_step_id','dc_done','tkout_time']]
-    return pd.concat([candidates,matched],ignore_index=True).drop_duplicates(['lot_id','dc_step_id'])
+    return _exclude_db_setup_history(
+        pd.concat([candidates,matched],ignore_index=True).drop_duplicates(['lot_id','dc_step_id']), vehicle)
 
 
 def _queue_auto_reports(candidates, vehicle):
@@ -844,6 +1023,9 @@ def _durable_mail(identity, recipients, title, html_path, ppt_path, config):
         if ppt_path:
             with open(ppt_path,'rb') as stream:ppt=stream.read()
         content,record['inline_images']=_mail_attachment_guard(content,1 if ppt_path else 0,config)
+        content = _fit_html_budget(content, config)
+        record['html_bytes'] = len(content.encode('utf-8'))
+        record['html_limit'] = _html_mail_limit(config)
         payload=dict(content=content,receiverList=recipients,senderMailAddress=f"{config.get('KNOXID')}@samsung.com",
                      statusCode='SENT',title=title)
         mime='text/csv' if str(ppt_path).lower().endswith('.csv') else 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
@@ -892,6 +1074,7 @@ def _parse_command(arguments):
     parser = argparse.ArgumentParser(description='Auto Report: DB 초기 적재 및 지정 수신처 발행')
     action = parser.add_mutually_exclusive_group()
     action.add_argument('--init-db', metavar='VEHICLE', help='DB setting 적재 (기본 200일, 리포트/메일 없음)')
+    action.add_argument('--sync-wip', metavar='VEHICLE', help='WIP 조회 후 Final ET log 완료 상태만 갱신 (발행 없음)')
     action.add_argument('--send-user', metavar='USER', help='엑셀을 읽지 않고 USER@samsung.com 한 명에게만 발송')
     parser.add_argument('--prime-key', help='발행 대상 vehicle_lot_step')
     parser.add_argument('--single', action='store_true', help='viewing_period 없이 대상 lot/step ET만 조회')
@@ -904,6 +1087,20 @@ def _parse_command(arguments):
     parser.add_argument('--parallel', type=positive_int, help='DB setting 병렬 조회 수 상한 (기본 db_setting_parallel=1)')
     parser.add_argument('legacy', nargs='?', help='기존 vehicle 또는 _TRIGGER 명령')
     args = parser.parse_args(arguments)
+    wip_trigger = None
+    if args.legacy and args.legacy.lstrip('_').startswith('TRIGGER_WIP_SYNC_'):
+        try:
+            _, wip_trigger, _, _, _ = _parse_trigger(args.legacy)
+        except ValueError as exc:
+            parser.error(str(exc))
+    if args.sync_wip is not None or wip_trigger is not None:
+        if ((args.sync_wip is not None and args.legacy) or args.init_db or args.send_user
+                or args.prime_key or args.single or args.days is not None or args.parallel is not None):
+            parser.error('--sync-wip는 다른 적재/발행 옵션 없이 제품명만 지정합니다')
+        vehicle = (args.sync_wip if args.sync_wip is not None else wip_trigger).strip()
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', vehicle) or vehicle.lstrip('_').startswith('TRIGGER_'):
+            parser.error('--sync-wip에는 TRIGGER 대신 제품명을 지정합니다')
+        return dict(argument=vehicle, kind='sync_wip', recipient=None)
     db_trigger = None
     if args.legacy and args.legacy.lstrip('_').startswith('TRIGGER_DB_SETTING_'):
         try:
@@ -936,12 +1133,16 @@ def _parse_command(arguments):
             parser.error('--prime-key에는 TRIGGER 접두어 없는 vehicle_lot_step을 지정합니다')
         return dict(argument=argument, kind='person', recipient=recipient)
     if not args.legacy or args.prime_key or args.single:
-        parser.error('vehicle, TRIGGER 또는 --init-db / --send-user 명령을 지정하세요')
+        parser.error('vehicle, TRIGGER 또는 --init-db / --sync-wip / --send-user 명령을 지정하세요')
     return dict(argument=args.legacy, kind='legacy', recipient=None)
 
 
 def _apply_command_settings(command, config):
     """YAML은 변경하지 않고 이번 실행의 적재·발송 설정만 적용한다."""
+    if command['kind'] == 'sync_wip':
+        config.settings.update(DB_Setting_mode=False, test_mode=False, report_making=False,
+                               use_email_send=False, use_s3_upload=False)
+        return None
     if command['kind'] == 'init_db':
         days = command.get('days', config.get('db_setting_days', 200))
         parallel = command.get('parallel', config.get('db_setting_parallel', 1))
@@ -989,13 +1190,27 @@ def _main_impl(command=None):
         trigger_mail = explicit_mail
 
     if command['kind'] == 'init_db':
-        # 적재 전용 경로: WIP/발행 상태/렌더링을 건드리지 않는다.
+        # 적재 전용 경로: 성공한 ET 이력은 완료 기준선으로 초기화하며 WIP/렌더링/발송은 하지 않는다.
         _LOG_PATH = GLOBAL_CONFIG.get('unified_log') or GLOBAL_CONFIG.get('loop_log')
         builtins.print = _run_log_print
         _RUN.data['vehicle'] = GLOBAL_CONFIG.get('vehicle')
         _RUN.stage('et_query')
         _RUN.data['db_setting'] = etdata_query()
-        print_status('DB setting 적재', 'ok', '날짜별 원시 DB와 ET 로그 반영 완료')
+        print_status('DB setting 적재', 'ok', '날짜별 원시 DB·ET 로그 반영, 기존 이력 dc_done=True 초기화 완료')
+        return
+
+    if command['kind'] == 'sync_wip':
+        _LOG_PATH = GLOBAL_CONFIG.get('unified_log') or GLOBAL_CONFIG.get('loop_log')
+        builtins.print = _run_log_print
+        _RUN.data['vehicle'] = GLOBAL_CONFIG.get('vehicle')
+        _RUN.stage('wip_query')
+        wip = wipdata_query()
+        _RUN.stage('measurement_selection')
+        settings = {key: GLOBAL_CONFIG.get(key) for key in
+                    ('vehicle', 'et_log_path', 'Final_et_log_path', 'delay_min')}
+        settings['lock_wait_sec'] = GLOBAL_CONFIG.get('product_lock_wait_sec', 3600)
+        _RUN.data['wip_sync'] = sync_wip_et_completion(settings, wip)
+        print_status('WIP 완료 상태 갱신', 'ok', 'Final ET log 갱신·과거 자동 발행 제외, 보고서/메일/S3 없음')
         return
 
     # =============================================== Config get ==================================================================
@@ -1134,47 +1349,15 @@ def _main_impl(command=None):
             print_status('공정 진행 현황 갱신', 'ok', 'Lot별 현재 공정과 DC 측정 완료 여부를 비교합니다.')
 
         _RUN.stage('measurement_selection')
-        et_log = pd.read_csv(et_log_path) # n일 치 et_log
-        existing_lot_log = pd.read_csv(Final_et_log_path) if os.path.exists(Final_et_log_path) else pd.DataFrame(columns=['prime_key','wafer_id','step_seq','total_site_cnt',\
+        _et_dtype = {'prime_key': str, 'lot_id': str, 'dc_step_id': str}
+        et_log = pd.read_csv(et_log_path, dtype=_et_dtype) # n일 치 et_log
+        existing_lot_log = pd.read_csv(Final_et_log_path, dtype=_et_dtype) if os.path.exists(Final_et_log_path) else pd.DataFrame(columns=['prime_key','wafer_id','step_seq','total_site_cnt',\
                                                                                                                         'tkout_time','lot_id','dc_step_id','dc_done'])
 
-        wip_current = pd.read_csv(DB + f'{vehicle}_wip_current.csv' ,encoding='cp949')
-        wip_current['last_update_date'] = pd.to_datetime(wip_current['last_update_date'])
-        wip_current = wip_current.sort_values(by='last_update_date')
-        grouped = wip_current.groupby('lot_id').last().reset_index()
-
-        # rsplit: vehicle 이름에 언더스코어 포함 가능 대응 (prime_key = mask_fablotid_stepid)
-        _pk_parts = et_log['prime_key'].str.rsplit('_', n=2)
-        et_log['lot_id'] = _pk_parts.str[1]
-        et_log['dc_step_id'] = _pk_parts.str[2]
-        et_log = pd.merge(et_log, grouped[['lot_id','step_id']], on='lot_id', how='left')
-
-        combined_lot_log = pd.concat([existing_lot_log, et_log]) 
-        final_lot_log = combined_lot_log.drop_duplicates(subset=['prime_key'], keep='last').copy() #기존 et_log update
-        final_lot_log['tkout_time'] = pd.to_datetime(final_lot_log['tkout_time'])
-
-        datetime_now_plus = datetime_now - timedelta(minutes=delay_min) 
-
-        # LOT 완료 확인 Logic
-        final_lot_log['dc_step_id_num'] = final_lot_log['dc_step_id'].str.extract(r'(\d+)', expand=False).astype(float)
-        final_lot_log['step_id_num'] = final_lot_log['step_id'].str.extract(r'(\d+)', expand=False).astype(float)
-
-        final_lot_log['dc_done']= np.where( ((final_lot_log['step_id'].str[:2] != final_lot_log['dc_step_id'].str[:2]) | \
-                                            (final_lot_log['step_id'].isnull()) |\
-                                            (final_lot_log['step_id_num'] - final_lot_log['dc_step_id_num'] >= 100)) & \
-                                            (datetime_now_plus > final_lot_log['tkout_time'] ),True, False)
-
-        # Report 1회만 발송
-        # dc_done열에서 True 값을 유지하기 위해 원본 데이터프레임에서 True 값이 있는경우 그대로 반영
-        # (행별 combined_lot_log 전체 재필터 O(N^2) apply → prime_key groupby.any() 벡터화)
-        _prev_done = combined_lot_log.groupby('prime_key')['dc_done'].any()
-        final_lot_log['dc_done'] = (final_lot_log['dc_done'].astype(bool)
-                                    | final_lot_log['prime_key'].map(_prev_done).fillna(False).astype(bool))
-
-        final_lot_log.drop('step_id', axis=1, inplace=True)
-        final_lot_log.drop('dc_step_id_num', axis=1, inplace=True)
-        final_lot_log.drop('step_id_num', axis=1, inplace=True)
-        final_lot_log = final_lot_log.sort_values(by='tkout_time', ascending=True)
+        wip_current = pd.read_csv(DB + f'{vehicle}_wip_current.csv', encoding='cp949',
+                                  dtype={'lot_id': str, 'step_id': str})
+        final_lot_log = _et_completion_frame(existing_lot_log, et_log, wip_current, vehicle,
+                                             delay_min, datetime_now)
 
         selected_et_log = final_lot_log[['lot_id', 'dc_step_id', 'dc_done','tkout_time']]
         selected_et_log_before = existing_lot_log[['lot_id', 'dc_step_id', 'dc_done']]
@@ -1840,86 +2023,7 @@ def _main_impl(command=None):
                         # Pandas의 to_html()이 만드는 불안정한 멀티인덱스 태그를 방지하기 위해 HTML 태그를 한 땀 한 땀 생성
                         # - 좌측 고정열(LOT_ID/category/Item)은 클래스 기반 sticky (rowspan 사용해도 안깨짐)
                         # - category(CAT2) 연속 동일값은 rowspan으로 병합
-                        sb_rows = list(VIP_group_HTML.iterrows())
-                        _wcols = list(VIP_group_HTML.columns)
-
-                        # Score Board WF MAP은 용량 문제로 제거됨 — WF MAP은 PPT에서만 확인.
-                        # (렌더링/합성 코드와 scoreboard_wfmap_min_pts 설정도 함께 삭제)
-
-                        # 렌더 시퀀스: index 점수행만.
-                        render_seq = []   # (kind, cat, item, payload)
-                        for idx, row in sb_rows:
-                            cat, item = idx
-                            render_seq.append(('score', cat, item, row))
-
-                        # category 연속 묶음 rowspan
-                        seq_cats = [r[1] for r in render_seq]
-                        cat_span = {}
-                        _j = 0
-                        while _j < len(seq_cats):
-                            _k = _j
-                            while _k + 1 < len(seq_cats) and seq_cats[_k + 1] == seq_cats[_j]:
-                                _k += 1
-                            cat_span[_j] = _k - _j + 1
-                            _j = _k + 1
-
-                        # 메일 클라이언트는 <style> CSS를 무시하므로 각 셀에 inline style로 직접 지정
-                        # (padding/font-size/nowrap도 <style> 값과 동일하게 inline — 메일·포워딩 표시 통일)
-                        _SB_BD = 'border:1px solid #2c2c2c;'      # 셀 구분선(inline)
-                        _SB_PAD = 'padding:4px 6px; white-space:nowrap;'
-                        _sb_waf_w = 40      # wafer 셀 폭(숫자 잘림 방지) inline min-width
-                        _SB_WAF = (f'{_SB_BD} text-align:center; width:{_sb_waf_w}px; min-width:{_sb_waf_w}px; '
-                                   f'max-width:{_sb_waf_w}px; padding:3px 1px; font-size:11px; white-space:nowrap; '
-                                   'font-variant-numeric:tabular-nums;')
-                        _SB_CAT = f'{_SB_BD} {_SB_PAD} text-align:center; min-width:77px;'      # category 고정열
-                        _SB_ITEM = f'{_SB_BD} {_SB_PAD} text-align:center; min-width:240px;'    # Item 고정열
-                        sb_html = ''
-                        # lot 그룹(헤더 colspan용): _wcols 순서대로 같은 lot을 묶음
-                        _lot_groups = []   # [(lot, [col, ...]), ...]
-                        for _c in _wcols:
-                            if _lot_groups and _lot_groups[-1][0] == _c[0]:
-                                _lot_groups[-1][1].append(_c)
-                            else:
-                                _lot_groups.append((_c[0], [_c]))
-
-                        sb_html += '<table class="score-board" style="border-collapse:collapse; font-size:11px;">\n  <thead>\n'
-                        sb_html += '    <tr>\n'
-                        sb_html += f'      <th colspan="2" class="sb-frozen-lot" style="{_SB_BD} {_SB_PAD} text-align:center; background-color:#d9e1f2;">LOT_ID</th>\n'
-                        # root_lot_id가 같은 형제 lot을 각각 헤더로 분리 (target lot은 강조)
-                        for _lot, _cols in _lot_groups:
-                            _is_tgt = (str(_lot) == str(target_lot_id))
-                            _bg = '#dbe7c8' if _is_tgt else '#f0f0f0'
-                            _fw = 'bold' if _is_tgt else 'normal'
-                            sb_html += (f'      <th colspan="{len(_cols)}" style="{_SB_BD} {_SB_PAD} text-align:center; '
-                                        f'background-color:{_bg}; font-weight:{_fw};">{_lot}</th>\n')
-                        sb_html += '    </tr>\n'
-                        sb_html += '    <tr>\n'
-                        sb_html += f'      <th class="sb-cat" style="{_SB_CAT} background-color:#d9e1f2;">category</th>\n'
-                        sb_html += f'      <th class="sb-item" style="{_SB_ITEM} background-color:#d9e1f2;">Item</th>\n'
-                        for col in _wcols:
-                            sb_html += f'      <th class="sb-waf" style="{_SB_WAF} background-color:#f0f0f0;">#{col[1]}</th>\n'
-                        sb_html += '    </tr>\n  </thead>\n  <tbody>\n'
-
-                        for _i, (kind, cat, item, payload) in enumerate(render_seq):
-                            sb_html += '    <tr>\n'
-                            if _i in cat_span:
-                                sb_html += f'      <td class="sb-cat row_heading" rowspan="{cat_span[_i]}" style="{_SB_CAT} font-weight:bold; background-color:#ebf4ff; vertical-align:middle;">{cat}</td>\n'
-                            row = payload
-                            sb_html += (f'      <td class="sb-item row_heading" style="{_SB_ITEM} font-weight:bold; '
-                                        f'background-color:#ebf4ff;">{display_name(item)}</td>\n')
-                            for col in _wcols:
-                                val = row[col]
-                                if pd.isna(val) or val == "":
-                                    sb_html += f'      <td class="sb-val" style="{_SB_WAF} background-color:{GLOBAL_CONFIG.score_color_na};"></td>\n'
-                                else:
-                                    # 연속 색상(PPT와 동일), ITEM별 스케일 override 지원
-                                    bg_color, color = GLOBAL_CONFIG.score_color(val, item)
-                                    sb_html += f'      <td class="sb-val" style="{_SB_WAF} background-color:{bg_color}; color:{color}; font-weight:bold;">{val:.1f}</td>\n'
-                            sb_html += '    </tr>\n'
-                        sb_html += '  </tbody>\n</table>\n'
-
-                        # Score Board WF MAP은 용량 문제로 제거됨 — PPT에서만 확인.
-                        score_board_html = sb_html
+                        score_board_html = _render_score_board(VIP_group_HTML, target_lot_id, display_name)
 
                         # ==================== Inline Table HTML 렌더링 (Manual) ====================
                         inlinedata_filtered_pivot = inlinedata_filtered_pivot.reset_index()
@@ -2569,12 +2673,7 @@ def _main_impl(command=None):
                         # 가독성: 메일 클라이언트는 <style> 을 무시하므로 inline 10px(표 셀) 글자를 11px 로 올린다.
                         # data URI(base64)에는 ':' 가 없어 이미지 내용과 겹치지 않는다.
                         html_content = html_content.replace('font-size:10px', 'font-size:11px')
-                        # 메일 본문 한도(2MB) 확인 — 넘으면 발송 전에 알린다(이미지는 _img_datauri 가 장당 상한 관리).
-                        _html_bytes = len(html_content.encode('utf-8'))
-                        _html_limit = int(float(GLOBAL_CONFIG.get('html_mail_max_mb', 2.0) or 2.0) * 1_000_000)
-                        if _html_bytes > _html_limit:
-                            print_status('HTML 용량', 'fail', f'{_html_bytes/1e6:.2f}MB > 한도 {_html_limit/1e6:.1f}MB — '
-                                         'html_inline_img_max_kb 또는 Anomaly Trend 차트 수를 줄이세요')
+                        html_content = _fit_html_budget(html_content)
 
                         # ==================== 인라인 이미지 불변식 검증 (수정 금지) ====================
                         # 불변식: 리포트 HTML의 모든 <img> src는 반드시 data:image(base64) 인라인이어야
@@ -3777,7 +3876,7 @@ def _ml_report_pack(entries, settings, title):
         renders[id(entry)]=_ml_item_render(entry,settings)
         if i%10==0:print(f'[INFO] ML mode 항목 차트 {i}/{len(entries)}',flush=True)
     limit=_mail_image_limit(settings)
-    html_cap=min(2_000_000,int(settings.get('html_max_bytes',2_000_000)))
+    html_cap=_html_mail_limit(settings=settings)
     ppt_cap=min(10_000_000,int(settings.get('ppt_max_bytes',10_000_000)))
     cost=lambda e:1+(1 if renders[id(e)]['factor_sheet'] else 0)
     groups=[];current=[]
@@ -3801,6 +3900,7 @@ def _ml_report_pack(entries, settings, title):
     for i,(group,body,ppt) in enumerate(parts,1):
         # 번호(메일 i/N)는 최종 분할 수로 다시 그린다.
         body=_ml_html(group,renders,settings,title,i,len(parts),entries)
+        body=_fit_html_budget(body, settings=settings)
         images=_assert_inline_images(body)
         if images>limit:raise ValueError(f'ML 메일 본문 이미지 {images}장 > 한도 {limit}장')
         result.append((body,ppt,len(group)))
@@ -4050,7 +4150,7 @@ def _daily_trend_pack(entries, settings, title):
         # Independent artifact limits: inline base64 is already included in HTML bytes.
         # 본문 이미지 수도 한도 — 넘으면 다음 메일로 나눈다(메일 API 첨부 개수 제한).
         return (len(ppt)<min(10_000_000,int(settings.get('ppt_max_bytes',10_000_000))) and
-                len(body.encode('utf-8'))<min(2_000_000,int(settings.get('html_max_bytes',2_000_000))) and
+                len(body.encode('utf-8'))<_html_mail_limit(settings=settings) and
                 len(re.findall(r'<img\s',body))<=image_limit)
     if not entries:raise ValueError('Daily Trend: 선택 제품에 CAT2 항목이 없습니다')
     parts=[];remaining=sorted(entries,key=lambda e:_trend_category_key(e,settings))
@@ -4073,6 +4173,7 @@ def _daily_trend_pack(entries, settings, title):
         if boundaries and boundaries[-1]!=best[2]:
             n=boundaries[-1];body,ppt=build(remaining[:n]);best=(body,ppt,n)
         parts.append(best);remaining=remaining[best[2]:]
+    parts=[(_fit_html_budget(body, settings=settings),ppt,count) for body,ppt,count in parts]
     print(f'[INFO] HTML 인라인 이미지 검증 OK / {len(entries)} charts / {len(parts)} parts')
     return parts
 
@@ -4237,7 +4338,7 @@ def _daily_trend_report(request):
         except _DailyTrendLimit as exc:
             import html
             chunks=[]
-            content='<html><meta charset="utf-8"><body><h2>Daily Trend 발행 범위를 조정해 주세요</h2><p>'+html.escape(str(exc))+'</p><p>제품: '+html.escape(', '.join(products))+' / 차트: '+str(len(plot_entries))+'</p><p>HTML 본문은 2MB 이하, PPTX 첨부는 별도로 10MB 이하, 한 번의 발행은 최대 10통입니다. My_config.py의 daily_trend 설정과 제품 reformatter의 카테고리/항목 선택을 조정해 주세요.</p></body></html>'
+            content='<html><meta charset="utf-8"><body><h2>Daily Trend 발행 범위를 조정해 주세요</h2><p>'+html.escape(str(exc))+'</p><p>제품: '+html.escape(', '.join(products))+' / 차트: '+str(len(plot_entries))+'</p><p>HTML 본문은 1MB 이하, PPTX 첨부는 별도로 10MB 이하, 한 번의 발행은 최대 10통입니다. My_config.py의 daily_trend 설정과 제품 reformatter의 카테고리/항목 선택을 조정해 주세요.</p></body></html>'
             hp=os.path.join(dest,'limit-notice.html');atomic_bytes(hp,content.encode('utf-8'))
             notice=dict(html=hp,html_sha256=hashlib.sha256(content.encode('utf-8')).hexdigest(),title=title+' / 발행 범위 조정 요청',reason=str(exc))
         parts=[]

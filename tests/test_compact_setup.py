@@ -46,6 +46,7 @@ def test_compact_install_import_paths_cli_and_spawn(installed, tmp_path):
     assert 'start_manager' not in (root / 'Scheduler.py').read_text(encoding='utf-8')
     assert 'self.manager' not in (root / 'My_config.py').read_text(encoding='utf-8')
     assert '--init-db' in run(root, 'Main.py', '--help')
+    assert '--sync-wip' in run(root, 'Main.py', '--help')
     assert '--drain' in run(root, 'Scheduler.py', '--help')
     assert 'prepare' in run(root, 'report_review.py', '--help')
     script = root / 'spawn_check.py'
@@ -76,6 +77,41 @@ if __name__ == '__main__':
     assert mf.file_fingerprint([mf.__file__, anomaly_engine.__file__]) != before
 ''', encoding='utf-8')
     run(root, str(script))
+
+
+def test_compact_wip_sync_cli_updates_final_without_et_query_or_reports(installed):
+    output = run(installed, '-c', '''
+import json, os, sys
+from pathlib import Path
+import pandas as pd
+import Main as m
+import My_Function as mf
+root = Path.cwd()
+assert '.zip' in mf.__file__
+cfg = m.GLOBAL_CONFIG
+cfg.settings = dict(vehicle='TEST', DB=str(root / 'DB') + os.sep,
+    et_log_path=str(root / 'et.csv'), Final_et_log_path=str(root / 'et_Final.csv'),
+    delay_min=15, unified_log=str(root / 'log.txt'), use_email_send=True,
+    use_s3_upload=True, report_making=True, DB_Setting_mode=True)
+cfg.load_from_yaml = lambda vehicle: None
+pd.DataFrame([dict(prime_key='TEST_00001.01_CC100', lot_id='00001.01', dc_step_id='CC100',
+    tkout_time='2020-01-01 09:00:00', dc_done=False)]).to_csv(root / 'et_Final.csv', index=False)
+def query(params, **kwargs):
+    assert params['table_name'] == 'fab.f_wip_current', 'ET query entered WIP-only command'
+    return pd.DataFrame([dict(lot_id='00001.01', step_seq='CC200', last_update_date='2026-10-01 12:00:00')])
+mf.getData_with_retry = query
+os.environ['AUTO_REPORT_RESULT_PATH'] = str(root / 'wip-result.json')
+sys.argv = ['Main.py', '_TRIGGER_WIP_SYNC_TEST']
+assert m.main() == 0
+assert pd.read_csv(root / 'et_Final.csv').dc_done.all()
+assert mf.ops_get('db_setting_baseline', 'TEST')['source'] == 'wip_sync'
+assert not mf.ops_list('reports') and not mf.ops_list('mail')
+result = json.loads((root / 'wip-result.json').read_text(encoding='utf-8'))
+assert result['status'] == 'success' and result['wip_sync']['completed'] == 1
+assert not result['reports']
+print('COMPACT_WIP_SYNC_OK')
+''')
+    assert 'COMPACT_WIP_SYNC_OK' in output
 
 
 def test_upgrade_retires_owned_files_and_preserves_data(installed):

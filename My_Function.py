@@ -4485,6 +4485,137 @@ def _et_query_workers(requested, chunk_count):
         return 1
 
 
+def _et_completion_frame(existing, et_log, wip, vehicle, delay_min, now=None):
+    """Use fresh WIP for every ET key; retain completed flags without truthy 'False' strings."""
+    required = {'lot_id', 'step_id', 'last_update_date'}
+    if not required.issubset(wip.columns):
+        raise ValueError('WIP에 lot_id/step_id/last_update_date가 필요합니다')
+    wip = wip.copy()
+    for key in ('lot_id', 'step_id'):
+        if wip[key].isna().any() or wip[key].astype(str).str.strip().eq('').any():
+            raise ValueError(f'WIP의 {key}가 비어 있습니다')
+        wip[key] = wip[key].astype(str)
+    wip['last_update_date'] = _et_timestamps(wip['last_update_date'])
+    if wip['last_update_date'].isna().any():
+        raise ValueError('WIP의 갱신 시각이 비어 있습니다')
+    latest = wip.sort_values('last_update_date', kind='stable').drop_duplicates('lot_id', keep='last')
+    delay = float(delay_min or 0)
+    if not np.isfinite(delay) or delay < 0:
+        raise ValueError('delay_min은 0 이상의 유한한 숫자여야 합니다')
+    columns = ['prime_key', 'wafer_id', 'step_seq', 'total_site_cnt', 'tkout_time',
+               'lot_id', 'dc_step_id', 'dc_done']
+    frames = [frame for frame in (existing, et_log) if not frame.empty]
+    if not frames:
+        return pd.DataFrame(columns=columns)
+    combined = pd.concat(frames, ignore_index=True)
+    if not {'prime_key', 'tkout_time'}.issubset(combined.columns):
+        raise ValueError('ET log에 prime_key/tkout_time이 필요합니다')
+    parts = combined['prime_key'].astype('string').str.rsplit('_', n=2)
+    valid = (parts.str.len().eq(3) & parts.str[0].eq(str(vehicle))
+             & parts.str[1].fillna('').ne('') & parts.str[2].fillna('').ne(''))
+    if not valid.fillna(False).all():
+        raise ValueError('ET log의 prime_key/제품이 올바르지 않습니다')
+    combined['lot_id'], combined['dc_step_id'] = parts.str[1], parts.str[2]
+    combined['tkout_time'] = _et_timestamps(combined['tkout_time'])
+    if combined['tkout_time'].isna().any():
+        raise ValueError('ET log에 측정 시각이 없습니다')
+    flags = combined.get('dc_done', pd.Series(False, index=combined.index)).fillna(False)
+    flags = flags.astype(str).str.strip().str.lower()
+    if not flags.isin(['true', 'false']).all():
+        raise ValueError('Final ET log의 dc_done은 True/False여야 합니다')
+    previous = flags.eq('true').groupby(combined['prime_key']).any()
+    final = combined.sort_values('tkout_time', kind='stable').drop_duplicates('prime_key', keep='last').copy()
+    # Previous cached WIP columns must not override this successful snapshot.
+    final = final.drop(columns=['step_id', 'dc_step_id_num', 'step_id_num'], errors='ignore')
+    final = final.merge(latest[['lot_id', 'step_id']], on='lot_id', how='left')
+    dc_num = pd.to_numeric(final['dc_step_id'].str.extract(r'(\d+)', expand=False), errors='coerce')
+    wip_num = pd.to_numeric(final['step_id'].str.extract(r'(\d+)', expand=False), errors='coerce')
+    advanced = (final['step_id'].isna() | final['step_id'].str[:2].ne(final['dc_step_id'].str[:2])
+                | (wip_num - dc_num).ge(100)).fillna(False)
+    deadline = pd.Timestamp(now if now is not None else datetime.now()) - pd.Timedelta(minutes=delay)
+    final['dc_done'] = (advanced & final['tkout_time'].lt(deadline)
+                        | final['prime_key'].map(previous).fillna(False)).astype(bool)
+    return final.drop(columns='step_id').sort_values('tkout_time', kind='stable').reset_index(drop=True)
+
+
+def _record_et_completion_baseline(vehicle, final, source):
+    """Exclude handled AUTO revisions, preserving both DB setup and prior WIP sync baselines."""
+    prior = ops_get('db_setting_baseline', vehicle, {})
+    revisions = dict(prior.get('revisions', {}))
+    for row in final.loc[final['dc_done']].to_dict('records'):
+        key, stamp = str(row['prime_key']), str(row['tkout_time'])
+        if key not in revisions or pd.Timestamp(stamp) > pd.Timestamp(revisions[key]):
+            revisions[key] = stamp
+    ops_put('db_setting_baseline', vehicle,
+            dict(revisions=revisions, initialized_at=time.time(), rows=len(revisions), source=source))
+    return len(revisions)
+
+
+def sync_wip_et_completion(settings, wip):
+    """Repair one product's Final log after WIP refresh, without querying ET or publishing."""
+    source, target = settings['et_log_path'], settings['Final_et_log_path']
+    if os.path.abspath(source) == os.path.abspath(target):
+        raise ValueError('ET log와 Final ET log는 다른 파일이어야 합니다')
+    wait = settings.get('lock_wait_sec', 3600)
+    with process_lock(source + '.lock', wait_sec=wait):
+        with process_lock(target + '.lock', wait_sec=wait):
+            dtype = {'prime_key': str, 'lot_id': str, 'dc_step_id': str}
+            existing = pd.read_csv(target, dtype=dtype) if os.path.exists(target) else pd.DataFrame()
+            et_log = pd.read_csv(source, dtype=dtype) if os.path.exists(source) else pd.DataFrame()
+            if existing.empty and et_log.empty:
+                raise ValueError('갱신할 ET log 이력이 없습니다')
+            final = _et_completion_frame(existing, et_log, wip, settings['vehicle'], settings.get('delay_min', 0))
+            previous = (existing.get('dc_done', pd.Series(dtype=bool)).astype(str).str.lower().eq('true'))
+            previous_keys = set(existing.loc[previous, 'prime_key']) if not existing.empty else set()
+            completed = int(final['dc_done'].sum())
+            atomic_output(target, lambda temp: final.to_csv(temp, index=False))
+            excluded = _record_et_completion_baseline(settings['vehicle'], final, 'wip_sync')
+    result = dict(rows=len(final), completed=completed, pending=len(final)-completed,
+                  newly_completed=int((final['dc_done'] & ~final['prime_key'].isin(previous_keys)).sum()),
+                  history_excluded=excluded)
+    print(f'[INFO] WIP sync {settings["vehicle"]}: 완료 {completed} / 진행·대기 {result["pending"]}건, '
+          'Final ET log 갱신, 과거 자동 발행 제외 (보고서/메일 없음)')
+    return result
+
+
+def _initialize_et_completion_log(settings):
+    """Treat existing ET history as handled after successful DB setup; never claim mail was sent."""
+    source = settings['et_log_path']
+    target = settings.get('Final_et_log_path') or os.path.splitext(source)[0] + '_Final.csv'
+    if os.path.abspath(source) == os.path.abspath(target):
+        raise ValueError('ET log와 Final ET log는 다른 파일이어야 합니다')
+    columns = ['prime_key', 'wafer_id', 'step_seq', 'total_site_cnt', 'tkout_time',
+               'lot_id', 'dc_step_id', 'dc_done']
+    # All query workers have finished. The product lock protects this baseline
+    # against normal generation; ET/Final file locks also protect readers/writers.
+    with process_lock(source + '.lock', wait_sec=settings['lock_wait_sec']):
+        with process_lock(target + '.lock', wait_sec=settings['lock_wait_sec']):
+            frames = [pd.read_csv(path, dtype={'prime_key': str, 'lot_id': str, 'dc_step_id': str})
+                      for path in (target, source) if os.path.exists(path)]
+            final = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=columns)
+            if not final.empty:
+                parts = final['prime_key'].str.rsplit('_', n=2)
+                valid = (parts.str.len().eq(3) & parts.str[0].eq(str(settings['vehicle']))
+                         & parts.str[1].fillna('').ne('') & parts.str[2].fillna('').ne(''))
+                if not valid.all():
+                    raise ValueError('DB setting ET log의 prime_key/제품이 올바르지 않습니다')
+                final['tkout_time'] = _et_timestamps(final['tkout_time'])
+                if final['tkout_time'].isna().any():
+                    raise ValueError('DB setting ET log에 측정 시각이 없습니다')
+                final = final.sort_values('tkout_time', kind='stable').drop_duplicates('prime_key', keep='last').copy()
+                parts = final['prime_key'].str.rsplit('_', n=2)
+                final['lot_id'], final['dc_step_id'] = parts.str[1], parts.str[2]
+            else:
+                final = final.reindex(columns=columns)
+            final['dc_done'] = True
+            # Keep an explicit baseline so old failed AUTO attempts cannot bypass
+            # dc_done through the retry path. Delivery/status history remains intact.
+            atomic_output(target, lambda temp: final.to_csv(temp, index=False))
+            _record_et_completion_baseline(settings['vehicle'], final, 'db_setting')
+    print(f'[INFO] DB setting: 기존 ET 이력 {len(final)}건 dc_done=True, 과거 자동 발행 제외')
+    return len(final)
+
+
 def etdata_query():
     """Load disjoint ET day snapshots; DB setting can use bounded spawn workers."""
     import hashlib
@@ -4513,7 +4644,7 @@ def etdata_query():
         print(f'[Date Ranges] {ranges}')
         item_ids = item_et.loc[item_et['CATEGORY'].eq('REAL'), 'ITEMID'].tolist()
         settings = {key: GLOBAL_CONFIG.get(key) for key in (
-            'vehicle', 'DB_et_daily', 'et_log_path', 'et_custom_columns', 'user_name')}
+            'vehicle', 'DB_et_daily', 'et_log_path', 'Final_et_log_path', 'et_custom_columns', 'user_name')}
         settings['lock_wait_sec'] = GLOBAL_CONFIG.get('product_lock_wait_sec', 3600)
         tasks = [dict(settings=settings, params={
             'table_name': 'eds.f_et_test', 'dateFrom': first, 'dateTo': last,
@@ -4562,6 +4693,8 @@ def etdata_query():
         finally:
             if requested > 1:
                 resource_governor.release_all()
+        if GLOBAL_CONFIG.get('DB_Setting_mode') in (True, 'True'):
+            summary['history_completed'] = _initialize_et_completion_log(settings)
         ops_put('et_refresh', settings['vehicle'], dict(signature=signature, success_at=time.time(),
                 full_at=time.time() if full else refresh.get('full_at', time.time())))
         return summary
@@ -4690,10 +4823,14 @@ def wipdata_query():
         Query_Table_tmp = getData_with_retry(params, custom_columns=GLOBAL_CONFIG.get("wip_custom_columns"), user_name=GLOBAL_CONFIG.get("user_name"))
         Query_Table_tmp['lot_id6'] = Query_Table_tmp['lot_id'].str.split('.').str[0]
         Query_Table_tmp.rename(columns={'step_seq': 'step_id'}, inplace=True)
+        # Validate before replacing the successful cached snapshot or Final log.
+        _et_completion_frame(pd.DataFrame(), pd.DataFrame(), Query_Table_tmp,
+                             GLOBAL_CONFIG.get('vehicle'), GLOBAL_CONFIG.get('delay_min', 0))
 
         atomic_output(GLOBAL_CONFIG.get('DB') + f"{GLOBAL_CONFIG.get('vehicle')}_wip_current.csv", lambda temp: Query_Table_tmp.to_csv(temp, index=False, encoding='cp949'))
             
         print('wip data 추출완료')
+        return Query_Table_tmp
     
     except Exception as e:
         print(f"wipdata_query 에러가 발생했습니다: {e}")
@@ -6218,4 +6355,3 @@ def cached_trend_band(vehicle_frame, item, percentile):
     band=daily.set_index('date').sort_index().rolling('3D',min_periods=1).mean()
     atomic_bytes(path,pickle.dumps(band,protocol=4))
     return band
-

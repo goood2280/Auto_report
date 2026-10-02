@@ -146,7 +146,7 @@ def test_summary_links_html_and_ppt_and_size_limits(tmp_path):
     parts=main._daily_trend_pack(entries,cfg,'SYNTHETIC · Daily Trend')
     assert sum(n for _,_,n in parts)==3
     for body,ppt,count in parts:
-        assert len(body.encode())<2_000_000 and len(ppt)<10_000_000
+        assert len(body.encode())<1_000_000 and len(ppt)<10_000_000
         links=re.findall('href="#(item-[^"]+)"',body)
         assert links and all(f'id="{anchor}"' in body for anchor in links)
         assert body.index('daily-findings')<body.index('trend-category')
